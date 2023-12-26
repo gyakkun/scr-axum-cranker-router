@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io;
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
@@ -6,25 +7,25 @@ use std::sync::{Arc, RwLock};
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 
-use axum::{BoxError, Extension, http, Router};
+use axum::{BoxError, Extension, extract, http, Router};
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Query, State, WebSocketUpgrade};
+use axum::extract::{OriginalUri, Query, State, WebSocketUpgrade};
 use axum::extract::ws::WebSocket;
-use axum::http::{HeaderMap, Request, StatusCode};
+use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use dashmap::DashMap;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
 use log::LevelFilter::Info;
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
+use tower_http::limit;
 use uuid::Uuid;
+
 use crate::exceptions::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException};
-
-
 use crate::router_socket::RouterSocketV1;
 
 pub mod cranker_protocol;
@@ -76,14 +77,14 @@ async fn main() {
         .route("/register/", any(cranker_register_handler)
             .layer(from_fn_with_state(app_state.clone(), validate_route_domain_and_cranker_version)),
         )
-        .with_state(app_state);
+        .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
+        .with_state(app_state.clone());
 
     let visit_portal = Router::new()
         // .route("/*any", get(|| async {}));
-        .route("/*any", any(move || async {
-            info!("hit any");
-            Response::new(Body::from("<h1>Hi there</h1>"))
-        }));
+        .route("/*any", any(portal))
+        .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
+        .with_state(app_state.clone());
 
     let reg_listener = TcpListener::bind("127.0.0.1:3000")
         .await
@@ -100,6 +101,30 @@ async fn main() {
     axum::serve(visit_listener, visit_portal)
         .await
         .unwrap();
+}
+
+async fn portal(
+    State(app_state): State<TSState>,
+    method: Method,
+    original_uri: OriginalUri,
+    headers: HeaderMap,
+    axum_req: extract::Request,
+) -> Response {
+    // axum_req
+    let mut body_data_stream = axum_req.into_body().into_data_stream()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        .peekable();
+    let mut has_body = body_data_stream.peek().await.is_some();
+    todo!("
+           resolve path and get a router socket\\
+            send the req body (if any)
+    ");
+    if has_body {} else {
+        // while let sth = map_err.next().await {
+        //     has_body = true;
+        // }
+    }
+    Response::new(Body::new("hi there".to_string()))
 }
 
 async fn cranker_register_handler(
@@ -192,7 +217,7 @@ async fn take_and_store_websocket(wss: WebSocket, state: TSState,
             connector_id.clone(),
             tx,
             rx,
-            SocketAddr::from_str("127.0.0.1:1024").unwrap()
+            SocketAddr::from_str("127.0.0.1:1024").unwrap(),
             // addr,
         ));
     state.write().unwrap().counter.compare_exchange(state.read().unwrap().counter.load(SeqCst), state.write().unwrap().counter.load(SeqCst) + 1, SeqCst, SeqCst)
