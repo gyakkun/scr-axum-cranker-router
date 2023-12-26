@@ -30,6 +30,7 @@ pub mod cranker_protocol;
 pub mod router_socket;
 pub mod time_utils;
 pub mod exceptions;
+mod cranker_protocol_response;
 
 pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &str = "CrankerProtocol";
 lazy_static! {

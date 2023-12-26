@@ -19,16 +19,17 @@ use crate::exceptions::CrankerRouterException;
 // use crate::web_socket_farm::WebSocketFarm;
 
 const RESPONSE_HEADERS_TO_NOT_SEND_BACK: &[&str] = &["server"];
+const HEADER_MAX_SIZE: usize = 64 * 1024; // 64KBytes
 
 #[async_trait]
 pub trait WebSocketListener {
     // this should be done in on_upgrade, so ignore it
     // fn on_connect(&self, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;
-    async fn on_text(&self, text_msg: String, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;
-    async fn on_binary(&self, binary_msg: Vec<u8>, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;
-    async fn on_ping(&self, ping_msg: Vec<u8>, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;
-    async fn on_pong(&self, pong_msg: Vec<u8>, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;
-    async fn on_close(&self, close_msg: Option<CloseFrame<'static>>, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;
+    async fn on_text(&self, text_msg: String) -> Result<(), CrankerRouterException>;
+    async fn on_binary(&self, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException>;
+    async fn on_ping(&self, ping_msg: Vec<u8>) -> Result<(), CrankerRouterException>;
+    async fn on_pong(&self, pong_msg: Vec<u8>) -> Result<(), CrankerRouterException>;
+    async fn on_close(&self, close_msg: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException>;
 }
 
 #[async_trait]
@@ -122,13 +123,21 @@ impl RouterSocketV1 {
 
 #[async_trait]
 impl WebSocketListener for RouterSocketV1 {
-    async fn on_text(&self, text_msg: String, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException> {
+    async fn on_text(&self, text_msg: String) -> Result<(), CrankerRouterException> {
         self.target_res_header_received.store(true, SeqCst);
         if self.target_res_body_received.load(SeqCst) {
             let failed_reason = "res body already received but still receiving text message which is not expected!".to_string();
             self.on_target_res_error(failed_reason.clone());
             return Err(CrankerRouterException::new(failed_reason));
         }
+        let text_len = text_msg.len();
+        if text_len + self.header_string_buf.read().unwrap().len() > HEADER_MAX_SIZE {
+            let failed_reason = format!("Header too large after appending: before {} bytes, after {} bytes, max {} bytes",
+                                        text_len, self.header_string_buf.read().unwrap().len(), HEADER_MAX_SIZE);
+            self.on_target_res_error(failed_reason.clone());
+            return Err(CrankerRouterException::new(failed_reason));
+        }
+        // FIXME: Is it necessary to handle lock error here?
         match self.header_string_buf.try_write() {
             Ok(mut hsb) => {
                 hsb.push_str(text_msg.as_str());
@@ -143,7 +152,8 @@ impl WebSocketListener for RouterSocketV1 {
         Ok(())
     }
 
-    async fn on_binary(&self, binary_msg: Vec<u8>, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException> {
+    async fn on_binary(&self, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
+        self.target_res_body_received.store(true, SeqCst);
         if !self.target_res_header_received.load(SeqCst) {
             let failed_reason = "res header not received yet but binary comes first which is not expected!".to_string();
             self.on_client_req_error(failed_reason.clone());
@@ -152,15 +162,15 @@ impl WebSocketListener for RouterSocketV1 {
         Ok(())
     }
 
-    async fn on_ping(&self, ping_msg: Vec<u8>, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException> {
+    async fn on_ping(&self, ping_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
         todo!()
     }
 
-    async fn on_pong(&self, pong_msg: Vec<u8>, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException> {
+    async fn on_pong(&self, pong_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
         todo!()
     }
 
-    async fn on_close(&self, close_msg: Option<CloseFrame<'static>>, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException> {
+    async fn on_close(&self, close_msg: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException> {
         todo!()
     }
 }
