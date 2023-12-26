@@ -19,3 +19,50 @@ impl Display for CrankerRouterException {
 }
 
 impl Error for CrankerRouterException {}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CrankerProtocolVersionNotSupportedException {
+    version: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CrankerProtocolVersionNotFoundException;
+
+impl CrankerProtocolVersionNotSupportedException {
+    pub(crate) fn new(version: String) -> CrankerProtocolVersionNotSupportedException {
+        CrankerProtocolVersionNotSupportedException {
+            version
+        }
+    }
+}
+
+impl CrankerProtocolVersionNotFoundException {
+    pub(crate) fn new() -> CrankerProtocolVersionNotFoundException {
+        CrankerProtocolVersionNotFoundException {}
+    }
+}
+
+impl Display for CrankerProtocolVersionNotFoundException {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Version is null. Please set header Sec-WebSocket-Protocol for cranker protocol negotiation")
+    }
+}
+
+impl Error for CrankerProtocolVersionNotFoundException {}
+
+impl Display for CrankerProtocolVersionNotSupportedException {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Cranker version {} not supported!", &self.version)
+    }
+}
+
+impl Error for CrankerProtocolVersionNotSupportedException {}
+
+
+
+#[test]
+fn test_error() {
+    let ex = CrankerProtocolVersionNotSupportedException::new(String::from("v1.0"));
+    println!("{}", ex);
+    assert_eq!(format!("{}", ex), "Cranker version v1.0 not supported!")
+}

@@ -6,12 +6,15 @@ use std::sync::RwLock;
 
 use axum::{async_trait, BoxError};
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, Method};
+use axum::http::uri::PathAndQuery;
 use bytes::Bytes;
+use futures::{SinkExt, StreamExt};
 use futures::stream::{SplitSink, SplitStream};
+use log::{debug, error};
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::Receiver;
 
+use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::exceptions::CrankerRouterException;
 
 // use crate::proxy_listener::ProxyListener;
@@ -35,12 +38,20 @@ pub trait WebSocketListener {
 #[async_trait]
 pub trait RouterSocket: WebSocketListener {
     // accept a client req
-    async fn on_client_req(&self, headers: &HeaderMap, opt_body: Option<mpsc::Receiver<Bytes>>);
+    async fn on_client_req(&mut self,
+                           method: Method,
+                           path_and_query: Option<&PathAndQuery>,
+                           headers: &HeaderMap,
+                           opt_body: Option<mpsc::Receiver<Bytes>>,
+    ) -> Result<(), CrankerRouterException>;
 
     /* async */ fn on_client_req_error(&self, reason: String);
 
     // accept response from target
-    async fn on_target_res(&self, headers: &HeaderMap, opt_body: Option<mpsc::Receiver<Bytes>>);
+    async fn on_target_res(&self,
+                           headers: &HeaderMap,
+                           opt_body: Option<mpsc::Receiver<Bytes>>,
+    ) -> Result<(), CrankerRouterException>;
 
     /* async */ fn on_target_res_error(&self, reason: String);
 }
@@ -62,10 +73,6 @@ pub struct RouterSocketV1 {
     pub bytes_received: AtomicI64,
     pub bytes_sent: AtomicI64,
     pub binary_frame_received: AtomicI64,
-    // TODO
-    // async_handle: Box<dyn Future<Output=hyper::body::Body>>,
-    // response: Option<axum::http::Response<Body>>,
-    // client_request: Option<axum::http::Request<Body>>,
     pub socket_wait_in_millis: i64,
     pub error: Option<BoxError>,
     pub duration_millis: i64,
@@ -74,13 +81,16 @@ pub struct RouterSocketV1 {
     // on_text_buffer: Vec<char>,
 
     // below should be private for inner routine
-
+    // async_handle: Box<dyn Future<Output=hyper::body::Body>>,
+    client_request_headers: HeaderMap,
+    client_response_headers: HeaderMap,
 
     target_res_header_received: AtomicBool,
     header_string_buf: RwLock<String>,
     target_res_header_sent: AtomicBool,
     target_res_body_received: AtomicBool,
     websocket_closed: AtomicBool,
+
 }
 
 impl RouterSocketV1 {
@@ -100,6 +110,9 @@ impl RouterSocketV1 {
             wss_tx,
             wss_rx,
             remote_address,
+
+            client_request_headers: HeaderMap::new(),
+            client_response_headers: HeaderMap::new(),
             is_removed: false,
             has_response: false,
             bytes_received: AtomicI64::new(0),
@@ -112,11 +125,22 @@ impl RouterSocketV1 {
             duration_millis: -1,
 
             target_res_header_received: AtomicBool::new(false),
-            header_string_buf: RwLock::new("".to_string()),
+            header_string_buf: RwLock::new(String::new()),
             target_res_header_sent: AtomicBool::new(false),
             target_res_body_received: AtomicBool::new(false),
             websocket_closed: AtomicBool::new(false),
         }
+    }
+
+    fn build_request_line(method: Method, path_and_query: Option<&PathAndQuery>) -> String {
+        let mut res = String::new();
+        res.push_str(method.as_str());
+        res.push(' ');
+        match path_and_query {
+            Some(paq) => res.push_str(paq.as_str()),
+            _ => {}
+        }
+        res
     }
 }
 
@@ -177,15 +201,84 @@ impl WebSocketListener for RouterSocketV1 {
 
 #[async_trait]
 impl RouterSocket for RouterSocketV1 {
-    async fn on_client_req(&self, headers: &HeaderMap, opt_body: Option<Receiver<Bytes>>) {
-        todo!()
+    async fn on_client_req(&mut self,
+                           method: Method,
+                           path_and_query: Option<&PathAndQuery>,
+                           headers: &HeaderMap,
+                           opt_body: Option<mpsc::Receiver<Bytes>>,
+    ) -> Result<(), CrankerRouterException> {
+        headers.iter().for_each(|(k, v)| {
+            self.client_request_headers.insert(k.to_owned(), v.to_owned());
+        });
+        let request_line = Self::build_request_line(method, path_and_query);
+        let cranker_req_bdr = CrankerProtocolRequestBuilder::new();
+        let cranker_req = match opt_body {
+            None => {
+                cranker_req_bdr
+                    .with_request_line(request_line)
+                    .with_request_headers(headers)
+                    .with_request_has_no_body()
+                    .build()?
+            }
+            Some(_) => {
+                cranker_req_bdr
+                    .with_request_line(request_line)
+                    .with_request_headers(headers)
+                    .with_request_body_pending()
+                    .build()?
+            }
+        };
+        let send_hdr_res = self.wss_tx.send(Message::Text(cranker_req.clone())).await;
+        match send_hdr_res {
+            Ok(_) => debug!("Req without body sent to target: {}", cranker_req),
+            Err(e) => {
+                let failed_reason = format!("Failed to send cranker req to target. Req: {}. Err: {:?}", cranker_req, e);
+                error!("{failed_reason}");
+                self.on_client_req_error(failed_reason.clone());
+                return Err(CrankerRouterException::new(failed_reason));
+            }
+        }
+
+        if opt_body.is_some() {
+            todo!("Send req body to target")
+            //     let mut receiver = opt_body.unwrap();
+            //     tokio::spawn(async move {
+            //         for b in receiver.recv() {
+            //             self.wss_tx.send(Message::Binary(b)).await.expect("something wrong when sending bytes");
+            //         }
+            //     });
+        }
+
+        while let Some(Ok(msg)) = self.wss_rx.next().await {
+            match msg {
+                Message::Text(txt) => {
+                    self.on_text(txt).await;
+                }
+                Message::Binary(bin) => {
+                    self.on_binary(bin).await;
+                }
+                Message::Ping(pin) => {
+                    self.on_ping(pin).await;
+                }
+                Message::Pong(pon) => {
+                    self.on_pong(pon).await;
+                }
+                Message::Close(clo) => {
+                    self.on_close(clo).await;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn on_client_req_error(&self, reason: String) {
         todo!()
     }
 
-    async fn on_target_res(&self, headers: &HeaderMap, opt_body: Option<Receiver<Bytes>>) {
+    async fn on_target_res(&self,
+                           headers: &HeaderMap,
+                           opt_body: Option<mpsc::Receiver<Bytes>>,
+    ) -> Result<(), CrankerRouterException> {
         todo!()
     }
 

@@ -22,21 +22,28 @@ use log::LevelFilter::Info;
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
 use uuid::Uuid;
+use crate::exceptions::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException};
 
-use crate::cranker_protocol::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException};
+
 use crate::router_socket::RouterSocketV1;
 
 pub mod cranker_protocol;
 pub mod router_socket;
 pub mod time_utils;
 pub mod exceptions;
-mod cranker_protocol_response;
+pub mod cranker_protocol_response;
+pub mod cranker_protocol_request_builder;
 
 pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &str = "CrankerProtocol";
+pub const CRANKER_PROTOCOL_VERSION_1_0: &str = "1.0";
+pub const CRANKER_PROTOCOL_VERSION_2_0: &str = "2.0";
+pub const CRANKER_PROTOCOL_VERSION_3_0: &str = "3.0";
+pub const SUPPORTING_HTTP_VERSION_1_1: &str = "HTTP/1.1";
+
 lazy_static! {
     static ref SUPPORTED_CRANKER_VERSION: HashSet<&'static str> =  {
         let mut s = HashSet::new();
-        s.insert("1.0");
+        s.insert(CRANKER_PROTOCOL_VERSION_1_0);
         s
     };
 }
