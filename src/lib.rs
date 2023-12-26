@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
-use std::ops::DerefMut;
+use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::sync::atomic::AtomicI64;
@@ -11,7 +11,7 @@ use axum::body::Body;
 use axum::extract::{ConnectInfo, Query, State, WebSocketUpgrade};
 use axum::extract::ws::WebSocket;
 use axum::http::{HeaderMap, Request, StatusCode};
-use axum::middleware::Next;
+use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use dashmap::DashMap;
@@ -20,6 +20,7 @@ use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
 use log::LevelFilter::Info;
 use simple_logger::SimpleLogger;
+use tokio::net::TcpListener;
 use uuid::Uuid;
 
 use crate::cranker_protocol::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException};
@@ -27,6 +28,8 @@ use crate::router_socket::RouterSocketV1;
 
 pub mod cranker_protocol;
 pub mod router_socket;
+pub mod time_utils;
+pub mod exceptions;
 
 pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &str = "CrankerProtocol";
 lazy_static! {
@@ -60,10 +63,10 @@ async fn main() {
     }));
     let registration_portal = Router::new()
         .route("/register", any(cranker_register_handler)
-            .layer(axum::middleware::from_fn_with_state(app_state.clone(), validate_route_domain_and_cranker_version)),
+            .layer(from_fn_with_state(app_state.clone(), validate_route_domain_and_cranker_version)),
         )
         .route("/register/", any(cranker_register_handler)
-            .layer(axum::middleware::from_fn_with_state(app_state.clone(), validate_route_domain_and_cranker_version)),
+            .layer(from_fn_with_state(app_state.clone(), validate_route_domain_and_cranker_version)),
         )
         .with_state(app_state);
 
@@ -74,10 +77,10 @@ async fn main() {
             Response::new(Body::from("<h1>Hi there</h1>"))
         }));
 
-    let reg_listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+    let reg_listener = TcpListener::bind("127.0.0.1:3000")
         .await
         .unwrap();
-    let visit_listener = tokio::net::TcpListener::bind("127.0.0.1:3002")
+    let visit_listener = TcpListener::bind("127.0.0.1:3002")
         .await
         .unwrap();
 
@@ -166,7 +169,7 @@ async fn take_and_store_websocket(wss: WebSocket, state: TSState,
     info!("Connector registered! connector_id: {}", connector_id.clone());
 
     tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-
+    let a: Arc<dyn Deref<Target=u64>> = Arc::new(Box::new(64));
     let (mut tx, mut rx) = wss.split();
     let router_socket_id = Uuid::new_v4().to_string();
     let (rs_tx, rs_rx) = tokio::sync::mpsc::unbounded_channel::<RouterSocketV1>();

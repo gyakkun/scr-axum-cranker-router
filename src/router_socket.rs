@@ -1,16 +1,49 @@
-use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::AtomicI64;
+use std::fmt::Display;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::sync::atomic::Ordering::SeqCst;
+use std::sync::RwLock;
 
-use axum::body::Body;
-use axum::BoxError;
-use axum::extract::ws::{Message, WebSocket};
+use axum::{async_trait, BoxError};
+use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use axum::http::HeaderMap;
+use bytes::Bytes;
 use futures::stream::{SplitSink, SplitStream};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
+
+use crate::exceptions::CrankerRouterException;
 
 // use crate::proxy_listener::ProxyListener;
 // use crate::RouterSocketV1;
 // use crate::web_socket_farm::WebSocketFarm;
 
 const RESPONSE_HEADERS_TO_NOT_SEND_BACK: &[&str] = &["server"];
+
+#[async_trait]
+pub trait WebSocketListener {
+    // this should be done in on_upgrade, so ignore it
+    // fn on_connect(&self, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;
+    async fn on_text(&self, text_msg: String, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;
+    async fn on_binary(&self, binary_msg: Vec<u8>, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;
+    async fn on_ping(&self, ping_msg: Vec<u8>, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;
+    async fn on_pong(&self, pong_msg: Vec<u8>, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;
+    async fn on_close(&self, close_msg: Option<CloseFrame<'static>>, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;
+}
+
+#[async_trait]
+pub trait RouterSocket: WebSocketListener {
+    // accept a client req
+    async fn on_client_req(&self, headers: &HeaderMap, opt_body: Option<mpsc::Receiver<Bytes>>);
+
+    /* async */ fn on_client_req_error(&self, reason: String);
+
+    // accept response from target
+    async fn on_target_res(&self, headers: &HeaderMap, opt_body: Option<mpsc::Receiver<Bytes>>);
+
+    /* async */ fn on_target_res_error(&self, reason: String);
+}
+
 
 pub struct RouterSocketV1 {
     pub route: String,
@@ -22,22 +55,31 @@ pub struct RouterSocketV1 {
     pub wss_tx: SplitSink<WebSocket, Message>,
     pub wss_rx: SplitStream<WebSocket>,
     // on_ready_for_action: &'static dyn Fn() -> (),
-    remote_address: SocketAddr,
-    is_removed: bool,
-    has_response: bool,
-    bytes_received: AtomicI64,
-    bytes_sent: AtomicI64,
-    binary_frame_received: AtomicI64,
+    pub remote_address: SocketAddr,
+    pub is_removed: bool,
+    pub has_response: bool,
+    pub bytes_received: AtomicI64,
+    pub bytes_sent: AtomicI64,
+    pub binary_frame_received: AtomicI64,
     // TODO
     // async_handle: Box<dyn Future<Output=hyper::body::Body>>,
     // response: Option<axum::http::Response<Body>>,
     // client_request: Option<axum::http::Request<Body>>,
-    socket_wait_in_millis: i64,
-    error: Option<BoxError>,
-    duration_millis: i64,
+    pub socket_wait_in_millis: i64,
+    pub error: Option<BoxError>,
+    pub duration_millis: i64,
     // TODO: seems axum receive websocket message in a Message level rather than a Frame level
     // so maybe no need to create buffer for frame of TEXT message
     // on_text_buffer: Vec<char>,
+
+    // below should be private for inner routine
+
+
+    target_res_header_received: AtomicBool,
+    header_string_buf: RwLock<String>,
+    target_res_header_sent: AtomicBool,
+    target_res_body_received: AtomicBool,
+    websocket_closed: AtomicBool,
 }
 
 impl RouterSocketV1 {
@@ -67,6 +109,77 @@ impl RouterSocketV1 {
             socket_wait_in_millis: -1,
             error: None,
             duration_millis: -1,
+
+            target_res_header_received: AtomicBool::new(false),
+            header_string_buf: RwLock::new("".to_string()),
+            target_res_header_sent: AtomicBool::new(false),
+            target_res_body_received: AtomicBool::new(false),
+            websocket_closed: AtomicBool::new(false),
         }
+    }
+}
+
+
+#[async_trait]
+impl WebSocketListener for RouterSocketV1 {
+    async fn on_text(&self, text_msg: String, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException> {
+        self.target_res_header_received.store(true, SeqCst);
+        if self.target_res_body_received.load(SeqCst) {
+            let failed_reason = "res body already received but still receiving text message which is not expected!".to_string();
+            self.on_target_res_error(failed_reason.clone());
+            return Err(CrankerRouterException::new(failed_reason));
+        }
+        match self.header_string_buf.try_write() {
+            Ok(mut hsb) => {
+                hsb.push_str(text_msg.as_str());
+            }
+            Err(e) => {
+                let failed_reason = format!("failed to lock header_string_buf: {:?}", e).to_string();
+                self.on_target_res_error(failed_reason.clone());
+                return Err(CrankerRouterException::new(failed_reason));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn on_binary(&self, binary_msg: Vec<u8>, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException> {
+        if !self.target_res_header_received.load(SeqCst) {
+            let failed_reason = "res header not received yet but binary comes first which is not expected!".to_string();
+            self.on_client_req_error(failed_reason.clone());
+            return Err(CrankerRouterException::new(failed_reason));
+        }
+        Ok(())
+    }
+
+    async fn on_ping(&self, ping_msg: Vec<u8>, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException> {
+        todo!()
+    }
+
+    async fn on_pong(&self, pong_msg: Vec<u8>, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException> {
+        todo!()
+    }
+
+    async fn on_close(&self, close_msg: Option<CloseFrame<'static>>, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException> {
+        todo!()
+    }
+}
+
+#[async_trait]
+impl RouterSocket for RouterSocketV1 {
+    async fn on_client_req(&self, headers: &HeaderMap, opt_body: Option<Receiver<Bytes>>) {
+        todo!()
+    }
+
+    fn on_client_req_error(&self, reason: String) {
+        todo!()
+    }
+
+    async fn on_target_res(&self, headers: &HeaderMap, opt_body: Option<Receiver<Bytes>>) {
+        todo!()
+    }
+
+    fn on_target_res_error(&self, reason: String) {
+        todo!()
     }
 }
