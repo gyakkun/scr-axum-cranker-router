@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
-use std::io;
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
@@ -8,8 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 
-use axum::{BoxError, Extension, extract, http, Router};
-use axum::body::Body;
+use axum::{BoxError, Error, Extension, http, Router};
+use axum::body::{Body, HttpBody};
 use axum::extract::{OriginalUri, Query, State, WebSocketUpgrade};
 use axum::extract::ws::WebSocket;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
@@ -17,8 +16,10 @@ use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum_macros::debug_handler;
+use bytes::Bytes;
 use dashmap::DashMap;
-use futures::{pin_mut, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
+use futures::stream::BoxStream;
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
 use log::LevelFilter::Info;
@@ -108,40 +109,63 @@ async fn main() {
         .unwrap();
 }
 
+struct Hi<'t> {
+    body_data_stream: BoxStream<'t, Result<Bytes, Error>>,
+}
+
 #[debug_handler]
 async fn portal(
     State(app_state): State<TSState>,
     method: Method,
     original_uri: OriginalUri,
     headers: HeaderMap,
-    axum_req: extract::Request,
+    body: Body,
 ) -> Response {
     // axum_req
-    let mut body_data_stream = axum_req.into_body().into_data_stream()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
-        .peekable();
-    pin_mut!(body_data_stream);
-    let mut has_body = body_data_stream.peek().await.is_some();
+    let has_body = body.is_end_stream();
+    let mut body_data_stream = body.into_data_stream();
+    let mut boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, Error>>;
+    // .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
+    // pin_mut!(body_data_stream);
+    // let a = body_data_stream;
     let route = DEFAULT_ROUTE_RESOLVER.resolve(&app_state.read().await.route_to_socket, original_uri.path().to_string());
     let expected_err = CrankerRouterException::new("No router socket available".to_string());
     match app_state.read().await.route_to_socket.get_mut(&route) {
         None => { return expected_err.clone().into_response(); }
         Some(mut v) => {
-            match v.value_mut().pop_back() {
+            match v.value_mut().pop_front() {
                 None => { return expected_err.clone().into_response(); }
                 Some(mut am_rs) => {
-                    async {
-                        // do something
-                    }.await;
-                    //match am_rs.lock().unwrap().on_client_req(
-                    //    method,
-                    //    original_uri.path_and_query(),
-                    //    &headers,
-                    //    None,
-                    //).await {
-                    //    Ok(res) => {return res;}
-                    //    Err(e) => {return e.into_response();}
-                    //}
+                    let mut opt_body = None;
+                    let mut amrs_clone = am_rs.clone();
+                    if has_body {
+                        // opt_body = Some(boxed_stream);
+                        let (pipe_tx, pipe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes,Error>>();
+                        opt_body = Some(pipe_rx);
+                        tokio::spawn(pipe_body_data_stream_to_a_mpsc_sender(boxed_stream,pipe_tx));
+
+                        // tokio::spawn(async move {
+                        //     while let Some(frag) = body_data_stream.next().await {
+                        //         match frag {
+                        //             Ok(b) => { let _ = tx.send(Some(b)); }
+                        //             Err(e) => {
+                        //                 let _ = tx.send(None);
+                        //                 amrs_clone.lock().await.on_client_req_error(format!("failed to pipe body bytes: {:?}", e));
+                        //             }
+                        //         }
+                        //     }
+                        // });
+                    }
+
+                    match am_rs.lock().await.on_client_req(
+                        method,
+                        original_uri.path_and_query(),
+                        &headers,
+                        opt_body,
+                    ).await {
+                        Ok(res) => { return res; }
+                        Err(e) => { return e.into_response(); }
+                    }
                 }
             }
         }
@@ -156,6 +180,19 @@ async fn portal(
     // }
     // }
     Response::new(Body::new("hi there".to_string()))
+}
+
+async fn pipe_body_data_stream_to_a_mpsc_sender(mut stream: BoxStream<'_, Result<Bytes, Error>>, sender: tokio::sync::mpsc::UnboundedSender<Result<Bytes, Error>>) {
+    while let Some(frag) = stream.next().await {
+        match sender.send(frag) {
+            Err(e) => {
+                error!("error when piping body data stream to mpsc sender, pipe will break: {:?}", e);
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(sender);
 }
 
 async fn cranker_register_handler(
