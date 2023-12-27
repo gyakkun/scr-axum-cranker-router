@@ -7,11 +7,12 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 
-use axum::{BoxError, Error, Extension, http, Router};
+use axum::{BoxError, Error, Extension, Router, ServiceExt};
 use axum::body::{Body, HttpBody};
-use axum::extract::{OriginalUri, Query, State, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, OriginalUri, Query, State, WebSocketUpgrade};
 use axum::extract::ws::WebSocket;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
+use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -22,7 +23,7 @@ use futures::{Stream, StreamExt, TryStreamExt};
 use futures::stream::BoxStream;
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
-use log::LevelFilter::Info;
+use log::LevelFilter::Debug;
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
@@ -41,16 +42,23 @@ pub mod cranker_protocol_response;
 pub mod cranker_protocol_request_builder;
 pub mod route_resolver;
 
-pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &str = "CrankerProtocol";
-pub const CRANKER_PROTOCOL_VERSION_1_0: &str = "1.0";
-pub const CRANKER_PROTOCOL_VERSION_2_0: &str = "2.0";
-pub const CRANKER_PROTOCOL_VERSION_3_0: &str = "3.0";
-pub const SUPPORTING_HTTP_VERSION_1_1: &str = "HTTP/1.1";
+pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &str = "crankerprotocol"; // should be CrankerProtocol, but axum all lower cased
+pub const _VER_1_0: &str = "1.0";
+pub const _VER_3_0: &str = "3.0";
+
+pub const CRANKER_V_1_0:&str = "cranker_1.0";
+pub const CRANKER_V_3_0:&str = "cranker_3.0";
+
+#[derive(Clone)]
+struct VersionNegotiate {
+    dealt: &'static str,
+}
 
 lazy_static! {
-    static ref SUPPORTED_CRANKER_VERSION: HashSet<&'static str> =  {
-        let mut s = HashSet::new();
-        s.insert(CRANKER_PROTOCOL_VERSION_1_0);
+    static ref SUPPORTED_CRANKER_VERSION: HashMap<&'static str, &'static str> =  {
+        let mut s = HashMap::new();
+        s.insert(_VER_1_0, CRANKER_V_1_0);
+        s.insert(_VER_3_0, CRANKER_V_3_0);
         s
     };
 }
@@ -67,7 +75,7 @@ type TSState = Arc<RwLock<AppState>>;
 async fn main() {
     SimpleLogger::new()
         .with_local_timestamps()
-        .with_level(Info)
+        .with_level(Debug)
         .init()
         .unwrap();
 
@@ -84,7 +92,8 @@ async fn main() {
             .layer(from_fn_with_state(app_state.clone(), validate_route_domain_and_cranker_version)),
         )
         .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
-        .with_state(app_state.clone());
+        .with_state(app_state.clone())
+        .into_make_service_with_connect_info::<SocketAddr>();
 
     let visit_portal = Router::new()
         // .route("/*any", get(|| async {}));
@@ -125,36 +134,32 @@ async fn portal(
     let has_body = body.is_end_stream();
     let mut body_data_stream = body.into_data_stream();
     let mut boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, Error>>;
-    // .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
-    // pin_mut!(body_data_stream);
-    // let a = body_data_stream;
-    let route = DEFAULT_ROUTE_RESOLVER.resolve(&app_state.read().await.route_to_socket, original_uri.path().to_string());
+
+    let path = original_uri.path().to_string();
+    let route = DEFAULT_ROUTE_RESOLVER.resolve(&app_state.read().await.route_to_socket, path.clone());
     let expected_err = CrankerRouterException::new("No router socket available".to_string());
+    debug!("1");
     match app_state.read().await.route_to_socket.get_mut(&route) {
-        None => { return expected_err.clone().into_response(); }
+        None => {
+            debug!("2");
+            return expected_err.clone().into_response();
+        }
         Some(mut v) => {
             match v.value_mut().pop_front() {
-                None => { return expected_err.clone().into_response(); }
+                None => {
+                    debug!("3");
+                    return expected_err.clone().into_response();
+                }
                 Some(mut am_rs) => {
+                    debug!("4");
                     let mut opt_body = None;
-                    let mut amrs_clone = am_rs.clone();
                     if has_body {
-                        // opt_body = Some(boxed_stream);
-                        let (pipe_tx, pipe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes,Error>>();
+                        debug!("5");
+                        let (pipe_tx, pipe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, Error>>();
                         opt_body = Some(pipe_rx);
-                        tokio::spawn(pipe_body_data_stream_to_a_mpsc_sender(boxed_stream,pipe_tx));
-
-                        // tokio::spawn(async move {
-                        //     while let Some(frag) = body_data_stream.next().await {
-                        //         match frag {
-                        //             Ok(b) => { let _ = tx.send(Some(b)); }
-                        //             Err(e) => {
-                        //                 let _ = tx.send(None);
-                        //                 amrs_clone.lock().await.on_client_req_error(format!("failed to pipe body bytes: {:?}", e));
-                        //             }
-                        //         }
-                        //     }
-                        // });
+                        tokio::spawn(pipe_body_data_stream_to_a_mpsc_sender(boxed_stream, pipe_tx));
+                    } else {
+                        debug!("6");
                     }
 
                     match am_rs.lock().await.on_client_req(
@@ -163,22 +168,19 @@ async fn portal(
                         &headers,
                         opt_body,
                     ).await {
-                        Ok(res) => { return res; }
-                        Err(e) => { return e.into_response(); }
+                        Ok(res) => {
+                            debug!("7");
+                            return res;
+                        }
+                        Err(e) => {
+                            debug!("8");
+                            return e.into_response();
+                        }
                     }
                 }
             }
         }
     };
-    todo!("
-           resolve path and get a router socket\\
-            send the req body (if any)
-    ");
-    // if has_body {} else {
-    // while let sth = map_err.next().await {
-    //     has_body = true;
-    // }
-    // }
     Response::new(Body::new("hi there".to_string()))
 }
 
@@ -195,12 +197,15 @@ async fn pipe_body_data_stream_to_a_mpsc_sender(mut stream: BoxStream<'_, Result
     drop(sender);
 }
 
+#[debug_handler]
 async fn cranker_register_handler(
     State(app_state): State<TSState>,
     ws: WebSocketUpgrade,
     Extension(ext_map): Extension<HashMap<String, String>>,
+    Extension(ver_neg):Extension<VersionNegotiate>,
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     req: Request<Body>,
     // ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
@@ -243,53 +248,76 @@ async fn cranker_register_handler(
         });
 
     // TODO: Error handling - what if all these fields not exists?
-    let cranker_version = ext_map.get("version").unwrap().to_string();
     let domain = ext_map.get("domain").unwrap().to_string();
     let route = ext_map.get("route").unwrap().to_owned();
 
     info!("connector id : {:?}", connector_id);
     info!("component name : {:?}", component_name);
 
-    ws.on_upgrade(move |socket| take_and_store_websocket(
-        socket, app_state, connector_id, component_name, cranker_version, domain, route,
-        // addr.clone(),
-    ))
+    ws
+        .protocols([ver_neg.dealt])
+        .on_upgrade(move |socket| take_and_store_websocket(
+            socket, app_state.clone(), connector_id, component_name, ver_neg.dealt.to_string(), domain, route,
+            addr,
+        ))
 }
 
 // This function deals with a single websocket connection, i.e., a single
 // connected client / user, for which we will spawn two independent tasks (for
 // receiving / sending chat messages).
-async fn take_and_store_websocket(wss: WebSocket, state: TSState,
+async fn take_and_store_websocket(wss: WebSocket,
+                                  state: TSState,
                                   connector_id: String,
                                   component_name: String,
                                   cranker_version: String,
                                   domain: String,
                                   route: String,
-                                  // addr: SocketAddr,
+                                  addr: SocketAddr,
 ) {
     info!("Connector registered! connector_id: {}", connector_id.clone());
 
-    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-    let a: Arc<Box<u64>> = Arc::new(Box::new(64));
+    // tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+    // let a: Arc<Box<u64>> = Arc::new(Box::new(64));
+    debug!("Going to split wss");
     let (mut tx, mut rx) = wss.split();
+    debug!("going to gen router socket id");
     let router_socket_id = Uuid::new_v4().to_string();
-    let (rs_tx, rs_rx) = tokio::sync::mpsc::unbounded_channel::<RouterSocketV1>();
-    state.write().await
-        .route_to_socket
-        .entry(route.clone())
-        .or_insert(VecDeque::new())
-        .push_back(Arc::new(Mutex::new(RouterSocketV1::new(
-            route.clone(),
-            component_name.clone(),
-            /*router_socket_id*/ router_socket_id.clone(),
-            connector_id.clone(),
-            tx,
-            rx,
-            SocketAddr::from_str("127.0.0.1:1024").unwrap(),
-            // addr,
-        ))));
-    state.write().await.counter.compare_exchange(state.read().await.counter.load(SeqCst), state.write().await.counter.load(SeqCst) + 1, SeqCst, SeqCst)
-        .expect("Failed to add counter");
+    match state.try_read() {
+        Ok(_) => debug!("state is not locking"),
+        Err(_) => debug!("!!! state now is locking !!!")
+    }
+    {
+        info!("before registration, state route size: {}", state.read().await.route_to_socket.len());
+    }
+    {
+        state.write().await
+            .route_to_socket
+            .entry(route.clone())
+            .or_insert(VecDeque::new())
+            .push_back(Arc::new(Mutex::new(RouterSocketV1::new(
+                route.clone(),
+                component_name.clone(),
+                router_socket_id.clone(),
+                connector_id.clone(),
+                tx,
+                rx,
+                addr,
+            ))));
+    }
+    {
+        match state.try_read() {
+            Ok(_) => {}
+            Err(_) => debug!("!!! state is still locking after inserting something !!!")
+        }
+    }
+    {
+        info!("after registration, state route size: {}", state.read().await.route_to_socket.len());
+    }
+
+    {
+        let write_guard = state.write().await;
+        write_guard.counter.compare_exchange_weak(write_guard.counter.load(SeqCst), write_guard.counter.load(SeqCst) + 1, SeqCst, SeqCst);
+    }
 }
 
 /// Domain and route is mandatory so add a middleware to check.
@@ -335,9 +363,12 @@ async fn validate_route_domain_and_cranker_version(
 
     // let mut supported_cranker_version_set = HashSet::new();
     // SUPPORTED_CRANKER_VERSION.iter().for_each(|i| { supported_cranker_version_set.insert(*i); });
-    let dealt_version: String;
+    let dealt_version: &'static str;
     match extract_cranker_version(&SUPPORTED_CRANKER_VERSION, &headers) {
-        Ok(v) => { dealt_version = v; }
+        Ok(v) => {
+            debug!("Version negotiated: {}", v);
+            dealt_version = v;
+        }
         Err(err) => {
             error!("Not able to negotiate cranker version during handshake: {}", err);
             return (StatusCode::BAD_REQUEST,
@@ -347,16 +378,18 @@ async fn validate_route_domain_and_cranker_version(
     }
 
     // Extract to
-    let mut extension_test = HashMap::<String, String>::new();
-    extension_test.insert("route".to_string(), route.to_string());
-    extension_test.insert("domain".to_string(), domain.to_string());
-    extension_test.insert("version".to_string(), dealt_version);
+    let mut ext_hashmap = HashMap::<String, String>::new();
+    ext_hashmap.insert("route".to_string(), route.to_string());
+    ext_hashmap.insert("domain".to_string(), domain.to_string());
+    // extension_test.insert("version".to_string(), dealt_version);
+    let ext_ver_neg = VersionNegotiate { dealt: dealt_version};
+    request.extensions_mut().insert(ext_ver_neg);
 
     // app_state.route_to_connector_id_map
     //     .entry("route".to_string())
     //     .or_insert(DashSet::<String>::new())
     //     .insert(Uuid::new_v4().to_string());
-    request.extensions_mut().insert(extension_test);
+    request.extensions_mut().insert(ext_hashmap);
     info!("Domain: {:?}",domain);
     info!("Route: {:?}",route);
 
@@ -367,12 +400,15 @@ async fn validate_route_domain_and_cranker_version(
     response
 }
 
+
+// Return "cranker_1.0" or "cranker_3.0", different from mu-cranker ("1.0" / "3.0")
+// because the "protocols()" method requires `&'static str`
 fn extract_cranker_version(
-    supported_cranker_version_set: &HashSet<&str>,
+    supported_cranker_version_set: &HashMap<&'static str, &'static str>,
     headers: &HeaderMap,
-) -> Result<String, BoxError>
+) -> Result<&'static str, BoxError>
 {
-    let sub_protocols = headers.get(http::header::SEC_WEBSOCKET_PROTOCOL);
+    let sub_protocols = headers.get(SEC_WEBSOCKET_PROTOCOL);
     let legacy_protocol_header = headers.get(CRANKER_PROTOCOL_HEADER_KEY);
     if sub_protocols.is_none() && legacy_protocol_header.is_none() {
         error!("No cranker version specified in headers: {:?}", headers);
@@ -383,8 +419,12 @@ fn extract_cranker_version(
         Some(sp) => {
             let split = sp.to_str().ok().unwrap().split(",");
             for v in split.into_iter() {
-                if supported_cranker_version_set.contains(v) {
-                    return Ok(v.to_string());
+                let trimmed = v.trim().replace("cranker_", "");
+                let trimmed = trimmed.as_str();
+                if supported_cranker_version_set.contains_key(trimmed) {
+                    debug!("selected in sub_protocols: {}", trimmed);
+                    let res: &'static str = *supported_cranker_version_set.get(trimmed).unwrap();
+                    return Ok(res);
                 }
             }
         }
@@ -394,8 +434,10 @@ fn extract_cranker_version(
     match legacy_protocol_header {
         Some(lph) => {
             let lp = lph.to_str().ok().unwrap();
-            if supported_cranker_version_set.contains(lp) {
-                return Ok(lp.to_string());
+            if supported_cranker_version_set.contains_key(lp) {
+                debug!("selected in legacy protocol header: {}", lp);
+                let res: &'static str = *supported_cranker_version_set.get(lp).unwrap();
+                return Ok(res);
             }
         }
         None => {}

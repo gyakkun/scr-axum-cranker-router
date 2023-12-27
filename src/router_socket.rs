@@ -200,14 +200,15 @@ impl WebSocketListenerV1 {
 
 #[async_trait]
 impl WebSocketListener for WebSocketListenerV1 {
-    async fn on_text(&mut self, text_msg: String) -> Result<(), CrankerRouterException> {
+    async fn on_text(&mut self, txt: String) -> Result<(), CrankerRouterException> {
+        debug!("Text coming! {}", txt);
         self.target_res_header_received.store(true, SeqCst);
         if self.target_res_body_received.load(SeqCst) {
             let failed_reason = "res body already received but still receiving text message which is not expected!".to_string();
             self.on_target_res_error(failed_reason.clone());
             return Err(CrankerRouterException::new(failed_reason));
         }
-        let text_len = text_msg.len();
+        let text_len = txt.len();
         if text_len + self.header_string_buf.read().unwrap().len() > HEADER_MAX_SIZE {
             let failed_reason = format!("Header too large after appending: before {} bytes, after {} bytes, max {} bytes",
                                         text_len, self.header_string_buf.read().unwrap().len(), HEADER_MAX_SIZE);
@@ -217,7 +218,7 @@ impl WebSocketListener for WebSocketListenerV1 {
         // FIXME: Is it necessary to handle lock error here?
         match self.header_string_buf.try_write() {
             Ok(mut hsb) => {
-                hsb.push_str(text_msg.as_str());
+                hsb.push_str(txt.as_str());
             }
             Err(e) => {
                 let failed_reason = format!("failed to lock header_string_buf: {:?}", e).to_string();
@@ -229,7 +230,8 @@ impl WebSocketListener for WebSocketListenerV1 {
         Ok(())
     }
 
-    async fn on_binary(&mut self, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
+    async fn on_binary(&mut self, bin: Vec<u8>) -> Result<(), CrankerRouterException> {
+        debug!("binary coming! {}", bin.len());
         if !self.target_res_header_received.load(SeqCst) {
             let failed_reason = "res header not received yet but binary comes first which is not expected!".to_string();
             self.on_client_req_error(failed_reason.clone());
@@ -263,6 +265,7 @@ impl RouterSocket for RouterSocketV1 {
                            headers: &HeaderMap,
                            opt_body: Option<UnboundedReceiver<Result<Bytes, Error>>>,
     ) -> Result<Response<Body>, CrankerRouterException> {
+        debug!("9");
         headers.iter().for_each(|(k, v)| {
             self.client_request_headers.insert(k.to_owned(), v.to_owned());
         });
@@ -284,6 +287,7 @@ impl RouterSocket for RouterSocketV1 {
                     .build()?
             }
         };
+        debug!("10");
         let send_hdr_res = self.ts_wss_tx.lock().await.send(Message::Text(cranker_req.clone())).await;
         match send_hdr_res {
             Ok(_) => debug!("Req without body sent to target: {}", cranker_req),

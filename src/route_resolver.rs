@@ -3,14 +3,22 @@ use std::sync::{Arc};
 use tokio::sync::{Mutex};
 
 use dashmap::{DashMap, Map};
+use log::info;
 
 use crate::router_socket::RouterSocket;
 
 pub trait RouteResolver: Sync + Send {
     fn resolve(&self, routes: &DashMap<String, VecDeque<Arc<Mutex<dyn RouterSocket>>>>, target: String) -> String {
+        info!("resolving route");
+        info!("path {}", target);
         let split: Vec<&str> = target.split("/").collect();
+        split.iter().for_each(|s|info!("Here's a frag of target {}", s));
 
-        return if split.len() >= 2 && routes._contains_key(split[1]) {
+        info!("state routes size: {}", routes.len());
+        routes.iter().for_each(|r|info!("Here's a route in state: {}", r.key()));
+
+        return if split.len() >= 2 && routes.contains_key(&split[1].to_string()) {
+            info!("selected route {}", split[1].to_string());
             split[1].to_string()
         } else {
             "*".to_string()

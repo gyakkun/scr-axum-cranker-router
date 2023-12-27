@@ -86,9 +86,11 @@ impl CrankerProtocolRequestBuilder {
                 }
             });
         });
-        let cookie_cat = cookie_list.join("; ");
-        headers_str.push_str(cookie_cat.as_str());
-        headers_str.push('\n');
+        if !cookie_list.is_empty() {
+            let cookie_cat = cookie_list.join("; ");
+            headers_str.push_str(cookie_cat.as_str());
+            headers_str.push('\n');
+        }
         headers_str
     }
 }
