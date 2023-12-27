@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 
@@ -15,18 +16,21 @@ use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
+use axum_macros::debug_handler;
 use dashmap::DashMap;
-use futures::{StreamExt, TryStreamExt};
+use futures::{pin_mut, StreamExt, TryStreamExt};
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
 use log::LevelFilter::Info;
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
+use tokio::sync::{Mutex, RwLock};
 use tower_http::limit;
 use uuid::Uuid;
 
-use crate::exceptions::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException};
-use crate::router_socket::RouterSocketV1;
+use crate::exceptions::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException, CrankerRouterException};
+use crate::route_resolver::{DEFAULT_ROUTE_RESOLVER, RouteResolver};
+use crate::router_socket::{RouterSocket, RouterSocketV1};
 
 pub mod cranker_protocol;
 pub mod router_socket;
@@ -34,6 +38,7 @@ pub mod time_utils;
 pub mod exceptions;
 pub mod cranker_protocol_response;
 pub mod cranker_protocol_request_builder;
+pub mod route_resolver;
 
 pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &str = "CrankerProtocol";
 pub const CRANKER_PROTOCOL_VERSION_1_0: &str = "1.0";
@@ -52,7 +57,7 @@ lazy_static! {
 // Our shared state
 struct AppState {
     counter: AtomicI64,
-    route_to_socket: DashMap<String, VecDeque<RouterSocketV1>>,
+    route_to_socket: DashMap<String, VecDeque<Arc<Mutex<dyn RouterSocket>>>>,
 }
 
 type TSState = Arc<RwLock<AppState>>;
@@ -103,6 +108,7 @@ async fn main() {
         .unwrap();
 }
 
+#[debug_handler]
 async fn portal(
     State(app_state): State<TSState>,
     method: Method,
@@ -114,16 +120,41 @@ async fn portal(
     let mut body_data_stream = axum_req.into_body().into_data_stream()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
         .peekable();
+    pin_mut!(body_data_stream);
     let mut has_body = body_data_stream.peek().await.is_some();
+    let route = DEFAULT_ROUTE_RESOLVER.resolve(&app_state.read().await.route_to_socket, original_uri.path().to_string());
+    let expected_err = CrankerRouterException::new("No router socket available".to_string());
+    match app_state.read().await.route_to_socket.get_mut(&route) {
+        None => { return expected_err.clone().into_response(); }
+        Some(mut v) => {
+            match v.value_mut().pop_back() {
+                None => { return expected_err.clone().into_response(); }
+                Some(mut am_rs) => {
+                    async {
+                        // do something
+                    }.await;
+                    //match am_rs.lock().unwrap().on_client_req(
+                    //    method,
+                    //    original_uri.path_and_query(),
+                    //    &headers,
+                    //    None,
+                    //).await {
+                    //    Ok(res) => {return res;}
+                    //    Err(e) => {return e.into_response();}
+                    //}
+                }
+            }
+        }
+    };
     todo!("
            resolve path and get a router socket\\
             send the req body (if any)
     ");
-    if has_body {} else {
-        // while let sth = map_err.next().await {
-        //     has_body = true;
-        // }
-    }
+    // if has_body {} else {
+    // while let sth = map_err.next().await {
+    //     has_body = true;
+    // }
+    // }
     Response::new(Body::new("hi there".to_string()))
 }
 
@@ -202,15 +233,15 @@ async fn take_and_store_websocket(wss: WebSocket, state: TSState,
     info!("Connector registered! connector_id: {}", connector_id.clone());
 
     tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-    let a: Arc<dyn Deref<Target=u64>> = Arc::new(Box::new(64));
+    let a: Arc<Box<u64>> = Arc::new(Box::new(64));
     let (mut tx, mut rx) = wss.split();
     let router_socket_id = Uuid::new_v4().to_string();
     let (rs_tx, rs_rx) = tokio::sync::mpsc::unbounded_channel::<RouterSocketV1>();
-    state.write().unwrap()
+    state.write().await
         .route_to_socket
         .entry(route.clone())
         .or_insert(VecDeque::new())
-        .push_back(RouterSocketV1::new(
+        .push_back(Arc::new(Mutex::new(RouterSocketV1::new(
             route.clone(),
             component_name.clone(),
             /*router_socket_id*/ router_socket_id.clone(),
@@ -219,8 +250,8 @@ async fn take_and_store_websocket(wss: WebSocket, state: TSState,
             rx,
             SocketAddr::from_str("127.0.0.1:1024").unwrap(),
             // addr,
-        ));
-    state.write().unwrap().counter.compare_exchange(state.read().unwrap().counter.load(SeqCst), state.write().unwrap().counter.load(SeqCst) + 1, SeqCst, SeqCst)
+        ))));
+    state.write().await.counter.compare_exchange(state.read().await.counter.load(SeqCst), state.write().await.counter.load(SeqCst) + 1, SeqCst, SeqCst)
         .expect("Failed to add counter");
 }
 

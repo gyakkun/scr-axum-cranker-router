@@ -1,9 +1,13 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-#[derive(Debug)]
+use axum::body::Body;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+
+#[derive(Debug, Clone)]
 pub struct CrankerRouterException {
-    reason: String
+    reason: String,
 }
 
 impl CrankerRouterException {
@@ -19,6 +23,15 @@ impl Display for CrankerRouterException {
 }
 
 impl Error for CrankerRouterException {}
+
+impl IntoResponse for CrankerRouterException {
+    fn into_response(self) -> Response {
+        Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::new(self.reason))
+            .unwrap()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct CrankerProtocolVersionNotSupportedException {
@@ -57,7 +70,6 @@ impl Display for CrankerProtocolVersionNotSupportedException {
 }
 
 impl Error for CrankerProtocolVersionNotSupportedException {}
-
 
 
 #[test]

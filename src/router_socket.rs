@@ -5,8 +5,9 @@ use std::sync::atomic::Ordering::SeqCst;
 use std::sync::RwLock;
 
 use axum::{async_trait, BoxError};
+use axum::body::Body;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use axum::http::{HeaderMap, Method};
+use axum::http::{HeaderMap, Method, Response, StatusCode};
 use axum::http::uri::PathAndQuery;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
@@ -36,14 +37,14 @@ pub trait WebSocketListener {
 }
 
 #[async_trait]
-pub trait RouterSocket: WebSocketListener {
+pub trait RouterSocket: WebSocketListener + Send + Sync {
     // accept a client req
     async fn on_client_req(&mut self,
                            method: Method,
                            path_and_query: Option<&PathAndQuery>,
                            headers: &HeaderMap,
                            opt_body: Option<mpsc::Receiver<Bytes>>,
-    ) -> Result<(), CrankerRouterException>;
+    ) -> Result<Response<Body>, CrankerRouterException>;
 
     /* async */ fn on_client_req_error(&self, reason: String);
 
@@ -206,7 +207,7 @@ impl RouterSocket for RouterSocketV1 {
                            path_and_query: Option<&PathAndQuery>,
                            headers: &HeaderMap,
                            opt_body: Option<mpsc::Receiver<Bytes>>,
-    ) -> Result<(), CrankerRouterException> {
+    ) -> Result<Response<Body>, CrankerRouterException> {
         headers.iter().for_each(|(k, v)| {
             self.client_request_headers.insert(k.to_owned(), v.to_owned());
         });
@@ -268,7 +269,8 @@ impl RouterSocket for RouterSocketV1 {
                 }
             }
         }
-        Ok(())
+        //todo
+        Ok(Response::builder().status(StatusCode::OK).body(Body::new("OK!".to_string())).unwrap())
     }
 
     fn on_client_req_error(&self, reason: String) {
