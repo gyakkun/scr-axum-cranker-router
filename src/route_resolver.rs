@@ -8,7 +8,7 @@ use log::info;
 use crate::router_socket::RouterSocket;
 
 pub trait RouteResolver: Sync + Send {
-    fn resolve(&self, routes: &DashMap<String, VecDeque<Arc<Mutex<dyn RouterSocket>>>>, target: String) -> String {
+    fn resolve(&self, routes: &DashMap<String, VecDeque<Arc<tokio::sync::RwLock<dyn RouterSocket>>>>, target: String) -> String {
         info!("resolving route");
         info!("path {}", target);
         let split: Vec<&str> = target.split("/").collect();
@@ -35,9 +35,9 @@ impl DefaultRouteResolver {
 impl RouteResolver for DefaultRouteResolver {}
 
 impl<F: Send + Sync + 'static> RouteResolver for F
-    where F: Fn(&DashMap<String, VecDeque<Arc<Mutex<dyn RouterSocket>>>>, String) -> String
+    where F: Fn(&DashMap<String, VecDeque<Arc<tokio::sync::RwLock<dyn RouterSocket>>>>, String) -> String
 {
-    fn resolve(&self, routes: &DashMap<String, VecDeque<Arc<Mutex<dyn RouterSocket>>>>, target: String) -> String {
+    fn resolve(&self, routes: &DashMap<String, VecDeque<Arc<tokio::sync::RwLock<dyn RouterSocket>>>>, target: String) -> String {
         self(routes, target)
     }
 }

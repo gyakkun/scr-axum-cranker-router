@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering::SeqCst;
 use axum::{BoxError, Error, Extension, Router, ServiceExt};
 use axum::body::{Body, HttpBody};
 use axum::extract::{ConnectInfo, OriginalUri, Query, State, WebSocketUpgrade};
-use axum::extract::ws::WebSocket;
+use axum::extract::ws::{Message, WebSocket};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
 use axum::middleware::{from_fn_with_state, Next};
@@ -19,14 +19,15 @@ use axum::routing::any;
 use axum_macros::debug_handler;
 use bytes::Bytes;
 use dashmap::DashMap;
-use futures::{pin_mut, Stream, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use futures::stream::BoxStream;
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
 use log::LevelFilter::Debug;
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::RwLock;
 use tower_http::limit;
 use uuid::Uuid;
 
@@ -95,7 +96,7 @@ lazy_static! {
 // Our shared state
 struct AppState {
     counter: AtomicI64,
-    route_to_socket: DashMap<String, VecDeque<Arc<Mutex<dyn RouterSocket>>>>,
+    route_to_socket: DashMap<String, VecDeque<Arc<RwLock<dyn RouterSocket>>>>,
 }
 
 type TSState = Arc<RwLock<AppState>>;
@@ -194,7 +195,7 @@ async fn portal(
                         debug!("6");
                     }
 
-                    match am_rs.lock().await.on_client_req(
+                    match am_rs.write().await.on_client_req(
                         method,
                         original_uri.path_and_query(),
                         &headers,
@@ -307,11 +308,12 @@ async fn take_and_store_websocket(wss: WebSocket,
                                   addr: SocketAddr,
 ) {
     info!("Connector registered! connector_id: {}", connector_id.clone());
-
+    let (mut from_ws_to_rs_tx, mut from_ws_to_rs_rx) = unbounded_channel::<Message>();
+    let (mut from_rs_to_ws_tx, mut from_rs_to_ws_rx) = unbounded_channel::<Message>();
     // tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     // let a: Arc<Box<u64>> = Arc::new(Box::new(64));
     debug!("Going to split wss");
-    let (mut tx, mut rx) = wss.split();
+    let (mut wss_tx, mut wss_rx) = wss.split();
     debug!("going to gen router socket id");
     let router_socket_id = Uuid::new_v4().to_string();
     match state.try_read() {
@@ -321,20 +323,24 @@ async fn take_and_store_websocket(wss: WebSocket,
     {
         info!("before registration, state route size: {}", state.read().await.route_to_socket.len());
     }
+
+    let rs = Arc::new(RwLock::new(RouterSocketV1::new(
+        route.clone(),
+        component_name.clone(),
+        router_socket_id.clone(),
+        connector_id.clone(),
+        from_ws_to_rs_rx, // from websocket
+        from_rs_to_ws_tx, // to websocket
+        addr,
+    )));
+
+
     {
         state.write().await
             .route_to_socket
             .entry(route.clone())
             .or_insert(VecDeque::new())
-            .push_back(Arc::new(Mutex::new(RouterSocketV1::new(
-                route.clone(),
-                component_name.clone(),
-                router_socket_id.clone(),
-                connector_id.clone(),
-                tx,
-                rx,
-                addr,
-            ))));
+            .push_back(rs.clone());
     }
     {
         match state.try_read() {
@@ -347,8 +353,108 @@ async fn take_and_store_websocket(wss: WebSocket,
     }
 
     {
+        // Prepare for some counter
         let write_guard = state.write().await;
         write_guard.counter.compare_exchange_weak(write_guard.counter.load(SeqCst), write_guard.counter.load(SeqCst) + 1, SeqCst, SeqCst);
+    }
+
+    {
+        debug!("Listening on connector ws message!");
+        let (mut notify_ch_close_tx, mut notify_ch_close_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let mut clo_tx_1 = notify_ch_close_tx.clone();
+        loop {
+            tokio::select! {
+                Some(should_stop) = notify_ch_close_rx.recv() => {
+                    break;
+                }
+                Some(from_rs) = from_rs_to_ws_rx.recv() => {
+
+                }
+                from_wss_nullable = wss_rx.next() => {
+                    match from_wss_nullable {
+                        None => {
+                            warn!("Receive None from wss_rx, seems wss closed!");
+                            from_ws_to_rs_tx.send(Message::Close(None));
+                            clo_tx_1.send(());
+                        }
+                        Some(may_err) => {
+                            let mut from_ws_to_rs_tx = from_ws_to_rs_tx.clone();
+                            let mut notify_ch_close_tx = notify_ch_close_tx.clone();
+                            tokio::spawn(handle_msg_from_wss_to_router_socket(may_err, from_ws_to_rs_tx, notify_ch_close_tx));
+                        }
+                    }
+                }
+            }
+        }
+        // stop receiving from router socket
+        from_rs_to_ws_rx.close();
+        // drop receiver from router socket
+        drop(from_rs_to_ws_rx);
+        // drop sender to router socket
+        drop(from_ws_to_rs_tx);
+
+
+        // tokio::select! {
+        //     from_ws = wss_rx.next() => {
+        //
+        //     },
+        //     from_rs = r
+        // }
+
+
+        // while let Some(Ok(msg)) = self.ts_wss_rx.lock().await.next().await {
+        //     debug!("[from-connector] Connector msg comes! {:?}", msg);
+        //     match msg {
+        //         Message::Text(txt) => {
+        //             self.websocket_listener.write().await.on_text(txt).await;
+        //         }
+        //         Message::Binary(bin) => {
+        //             self.websocket_listener.write().await.on_binary(bin).await;
+        //         }
+        //         Message::Ping(pin) => {
+        //             self.websocket_listener.read().await.on_ping(pin).await;
+        //         }
+        //         Message::Pong(pon) => {
+        //             self.websocket_listener.read().await.on_pong(pon).await;
+        //         }
+        //         Message::Close(clo) => {
+        //             self.websocket_listener.read().await.on_close(clo).await;
+        //         }
+        //     }
+        // }
+        debug!("END OF Listening on connector ws message!");
+    }
+}
+
+async fn handle_msg_from_wss_to_router_socket(
+    may_err: Result<Message, Error>,
+    from_ws_to_rs_tx: UnboundedSender<Message>,
+    notify_ch_close_tx: UnboundedSender<()>,
+) {
+    match may_err {
+        Err(e) => {
+            error!("Error from wss: {:?}", e);
+            notify_ch_close_tx.send(());
+        }
+        Ok(msg) => {
+            match msg {
+                Message::Text(txt) => {
+                    from_ws_to_rs_tx.send(Message::Text(txt));
+                }
+                Message::Binary(bin) => {
+                    from_ws_to_rs_tx.send(Message::Binary(bin));
+                }
+                Message::Ping(_) => debug!("pinged!"),
+                Message::Pong(_) => debug!("ponged!"),
+                Message::Close(opt_close_frame) => {
+                    if let Some(clo_fra) = opt_close_frame {
+                        warn!("Closing from connector: code={}, {:?}", clo_fra.code, clo_fra.reason);
+                    }
+                    from_ws_to_rs_tx.send(Message::Close(None));
+                    notify_ch_close_tx.send(());
+                }
+            }
+        }
     }
 }
 

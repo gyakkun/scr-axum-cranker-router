@@ -15,7 +15,7 @@ use futures::{SinkExt, StreamExt};
 use futures::stream::{SplitSink, SplitStream};
 use log::{debug, error};
 use tokio::sync::{mpsc, Mutex};
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::exceptions::CrankerRouterException;
@@ -77,8 +77,8 @@ pub struct RouterSocketV1 {
     // pub web_socket_farm: Option<Weak<Mutex<WebSocketFarm>>>,
     pub connector_instance_id: String,
     // pub proxy_listeners: Vec<&'static dyn ProxyListener>,
-    pub ts_wss_tx: Arc<Mutex<SplitSink<WebSocket, Message>>>,
-    pub ts_wss_rx: Arc<Mutex<SplitStream<WebSocket>>>,
+    pub from_web_socket: tokio::sync::mpsc::UnboundedReceiver<Message>,
+    pub to_websocket: tokio::sync::mpsc::UnboundedSender<Message>,
     // on_ready_for_action: &'static dyn Fn() -> (),
     pub remote_address: SocketAddr,
     pub is_removed: bool,
@@ -89,7 +89,7 @@ pub struct RouterSocketV1 {
     pub socket_wait_in_millis: i64,
     pub error: Option<BoxError>,
     pub duration_millis: i64,
-    pub websocket_listener: Arc<tokio::sync::RwLock<dyn WebSocketListener>>,
+    // pub websocket_listener: Arc<tokio::sync::RwLock<dyn WebSocketListener>>,
     // TODO: seems axum receive websocket message in a Message level rather than a Frame level
     // so maybe no need to create buffer for frame of TEXT message
     // on_text_buffer: Vec<char>,
@@ -110,12 +110,10 @@ impl RouterSocketV1 {
                component_name: String,
                router_socket_id: String,
                connector_instance_id: String,
-               wss_tx: SplitSink<WebSocket, Message>,
-               wss_rx: SplitStream<WebSocket>,
+               from_web_socket: UnboundedReceiver<Message>,
+               to_websocket: UnboundedSender<Message>,
                remote_address: SocketAddr,
     ) -> Self {
-        let ts_wss_tx = Arc::new(Mutex::new(wss_tx));
-        let ts_wss_rx = Arc::new(Mutex::new(wss_rx));
         let (target_err_tx, target_err_rx) = tokio::sync::mpsc::channel::<()>(1);
         let (client_err_tx, client_err_rx) = tokio::sync::mpsc::channel::<()>(1);
 
@@ -127,8 +125,8 @@ impl RouterSocketV1 {
             component_name,
             router_socket_id,
             connector_instance_id,
-            ts_wss_tx: ts_wss_tx.clone(),
-            ts_wss_rx: ts_wss_rx.clone(),
+            from_web_socket,
+            to_websocket,
             remote_address,
 
             is_removed: false,
@@ -141,10 +139,10 @@ impl RouterSocketV1 {
             socket_wait_in_millis: -1,
             error: None,
             duration_millis: -1,
-            websocket_listener: Arc::new(tokio::sync::RwLock::new(WebSocketListenerV1::new(
-                ts_wss_tx.clone(), ts_wss_rx.clone(),
-                client_err_tx, target_err_tx,
-            ))),
+            // websocket_listener: Arc::new(tokio::sync::RwLock::new(WebSocketListenerV1::new(
+            //     ts_wss_tx.clone(), ts_wss_rx.clone(),
+            //     client_err_tx, target_err_tx,
+            // ))),
 
             client_request_headers: HeaderMap::new(),
             client_response_headers: HeaderMap::new(),
@@ -295,7 +293,7 @@ impl RouterSocket for RouterSocketV1 {
             }
         };
         debug!("10");
-        let send_hdr_res = self.ts_wss_tx.lock().await.send(Message::Text(cranker_req.clone())).await;
+        let send_hdr_res = self.to_websocket.send(Message::Text(cranker_req.clone()));
         match send_hdr_res {
             Ok(_) => debug!("Req without body sent to target: {}", cranker_req),
             Err(e) => {
@@ -311,12 +309,12 @@ impl RouterSocket for RouterSocketV1 {
         match opt_body {
             Some(mut body) => {
                 // todo!("Send req body to target")
-                let mut ts_wss_tx_clone = self.ts_wss_tx.clone();
+                let mut to_websocket_clone = self.to_websocket.clone();
                 let mut client_err_tx_clone = self.client_err_tx.clone();
                 let hdl = tokio::spawn(async move {
                     while let Some(r) = body.recv().await {
                         match r {
-                            Ok(b) => ts_wss_tx_clone.lock().await.send(Message::Binary(b.to_vec())).await.expect("something wrong when sending bytes"),
+                            Ok(b) => { to_websocket_clone.send(Message::Binary(b.to_vec())); },
                             Err(e) => {
                                 error!("Something wrong: {:?}",e );
                                 client_err_tx_clone.send(());
@@ -331,28 +329,7 @@ impl RouterSocket for RouterSocketV1 {
             None => {}
         }
 
-        debug!("Listening on connector ws message!");
-        while let Some(Ok(msg)) = self.ts_wss_rx.lock().await.next().await {
-            debug!("[from-connector] Connector msg comes! {:?}", msg);
-            match msg {
-                Message::Text(txt) => {
-                    self.websocket_listener.write().await.on_text(txt).await;
-                }
-                Message::Binary(bin) => {
-                    self.websocket_listener.write().await.on_binary(bin).await;
-                }
-                Message::Ping(pin) => {
-                    self.websocket_listener.read().await.on_ping(pin).await;
-                }
-                Message::Pong(pon) => {
-                    self.websocket_listener.read().await.on_pong(pon).await;
-                }
-                Message::Close(clo) => {
-                    self.websocket_listener.read().await.on_close(clo).await;
-                }
-            }
-        }
-        debug!("END OF Listening on connector ws message!");
+
 
         // let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
         // let mut streamrx = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
