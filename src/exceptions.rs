@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use axum::body::Body;
+use axum::BoxError;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
@@ -32,6 +33,7 @@ impl IntoResponse for CrankerRouterException {
             .unwrap()
     }
 }
+
 
 #[derive(Debug, Clone)]
 pub(crate) struct CrankerProtocolVersionNotSupportedException {

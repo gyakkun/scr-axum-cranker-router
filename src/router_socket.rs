@@ -1,20 +1,22 @@
-use std::fmt::Display;
+use std::fmt::{Display, format};
 use std::net::SocketAddr;
-use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::atomic::Ordering::SeqCst;
+use std::sync::mpsc::Receiver;
+use std::sync::RwLock;
 
 use axum::{async_trait, BoxError, Error};
 use axum::body::Body;
-use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use axum::extract::ws::{CloseFrame, Message};
 use axum::http::{HeaderMap, Method, Response, StatusCode};
 use axum::http::uri::PathAndQuery;
+use axum::response::IntoResponse;
 use bytes::Bytes;
-use futures::{SinkExt, StreamExt};
-use futures::stream::{SplitSink, SplitStream};
-use log::{debug, error};
-use tokio::sync::{mpsc, Mutex};
+use futures::{SinkExt, Stream, StreamExt, TryFutureExt};
+use log::{debug, error, info};
+use tokio::io::AsyncWrite;
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
@@ -25,14 +27,27 @@ const RESPONSE_HEADERS_TO_NOT_SEND_BACK: &[&str] = &["server"];
 const HEADER_MAX_SIZE: usize = 64 * 1024; // 64KBytes
 
 #[async_trait]
-pub trait WebSocketListener: Send + Sync {
+pub trait WssMessageListener: Send + Sync {
     // this should be done in on_upgrade, so ignore it
     // fn on_connect(&self, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;
     async fn on_text(&mut self, text_msg: String) -> Result<(), CrankerRouterException>;
     async fn on_binary(&mut self, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException>;
-    async fn on_ping(&self, ping_msg: Vec<u8>) -> Result<(), CrankerRouterException>;
-    async fn on_pong(&self, pong_msg: Vec<u8>) -> Result<(), CrankerRouterException>;
+    async fn on_ping(&self, ping_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
+        let decoded = std::str::from_utf8(ping_msg.as_slice()).unwrap_or("INVALID PONG MSG");
+        debug!("pinged: {}", decoded);
+        Ok(())
+    }
+    async fn on_pong(&self, pong_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
+        let decoded = std::str::from_utf8(pong_msg.as_slice()).unwrap_or("INVALID PONG MSG");
+        debug!("ponged: {}", decoded);
+        Ok(())
+    }
     async fn on_close(&self, close_msg: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException>;
+
+    async fn on_error(&self, err: CrankerRouterException) -> Result<(), CrankerRouterException> {
+        error!("error: {:?}", err); // FIXME: Swallow the error by default
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -44,7 +59,7 @@ pub trait RouterSocket: Send + Sync {
                            headers: &HeaderMap,
                            opt_body: Option<UnboundedReceiver<Result<Bytes, Error>>>,
     ) -> Result<Response<Body>, CrankerRouterException>;
-    // async fn on_client_req_error(&self, reason: String);
+    async fn on_client_req_error(&self, reason: CrankerRouterException);
 
     // accept response from target
     async fn on_target_res(&self,
@@ -52,21 +67,19 @@ pub trait RouterSocket: Send + Sync {
                            opt_body: Option<mpsc::Receiver<Bytes>>,
     ) -> Result<(), CrankerRouterException>;
 
-    //  async  fn on_target_res_error(&self, reason: String);
+    async fn on_target_res_error(&self, reason: CrankerRouterException);
 }
 
 
-pub struct WebSocketListenerV1 {
-    ts_wss_tx: Arc<Mutex<SplitSink<WebSocket, Message>>>,
-    ts_wss_rx: Arc<Mutex<SplitStream<WebSocket>>>,
-    client_err_tx: mpsc::Sender<()>,
-    target_err_tx: mpsc::Sender<()>,
+pub struct RSv1WssMessageListener {
+    pub from_ws_to_rs_rx: UnboundedReceiver<Message>,
+    pub from_rs_to_ws_tx: UnboundedSender<Message>,
 
-    target_res_header_received: AtomicBool,
-    header_string_buf: RwLock<String>,
-    target_res_header_sent: AtomicBool,
-    target_res_body_received: AtomicBool,
-    websocket_closed: AtomicBool,
+    pub target_res_header_received: AtomicBool,
+    pub header_string_buf: tokio::sync::RwLock<String>,
+    pub target_res_header_sent: AtomicBool,
+    pub target_res_body_received: AtomicBool,
+    pub websocket_closed: AtomicBool,
 }
 
 
@@ -77,8 +90,6 @@ pub struct RouterSocketV1 {
     // pub web_socket_farm: Option<Weak<Mutex<WebSocketFarm>>>,
     pub connector_instance_id: String,
     // pub proxy_listeners: Vec<&'static dyn ProxyListener>,
-    pub from_web_socket: tokio::sync::mpsc::UnboundedReceiver<Message>,
-    pub to_websocket: tokio::sync::mpsc::UnboundedSender<Message>,
     // on_ready_for_action: &'static dyn Fn() -> (),
     pub remote_address: SocketAddr,
     pub is_removed: bool,
@@ -89,7 +100,8 @@ pub struct RouterSocketV1 {
     pub socket_wait_in_millis: i64,
     pub error: Option<BoxError>,
     pub duration_millis: i64,
-    // pub websocket_listener: Arc<tokio::sync::RwLock<dyn WebSocketListener>>,
+    pub router_socket_wss_message_listener: RSv1WssMessageListener,
+    pub err_chan_to_wss: UnboundedSender<CrankerRouterException>,
     // TODO: seems axum receive websocket message in a Message level rather than a Frame level
     // so maybe no need to create buffer for frame of TEXT message
     // on_text_buffer: Vec<char>,
@@ -99,34 +111,24 @@ pub struct RouterSocketV1 {
     client_request_headers: HeaderMap,
     client_response_headers: HeaderMap,
 
-    client_err_tx: mpsc::Sender<()>,
-    target_err_tx: mpsc::Sender<()>,
-    client_err_rx: mpsc::Receiver<()>,
-    target_err_rx: mpsc::Receiver<()>,
 }
 
 impl RouterSocketV1 {
+    // err should use a separated channel to communicate between wss side and router socket side
     pub fn new(route: String,
                component_name: String,
                router_socket_id: String,
                connector_instance_id: String,
                from_web_socket: UnboundedReceiver<Message>,
                to_websocket: UnboundedSender<Message>,
+               err_chan_to_websocket: UnboundedSender<CrankerRouterException>,
                remote_address: SocketAddr,
     ) -> Self {
-        let (target_err_tx, target_err_rx) = tokio::sync::mpsc::channel::<()>(1);
-        let (client_err_tx, client_err_rx) = tokio::sync::mpsc::channel::<()>(1);
-
-        let target_err_tx_clone = target_err_tx.clone();
-        let client_err_tx_clone = client_err_tx.clone();
-
         Self {
             route,
             component_name,
             router_socket_id,
             connector_instance_id,
-            from_web_socket,
-            to_websocket,
             remote_address,
 
             is_removed: false,
@@ -139,6 +141,8 @@ impl RouterSocketV1 {
             socket_wait_in_millis: -1,
             error: None,
             duration_millis: -1,
+            router_socket_wss_message_listener: RSv1WssMessageListener::new(from_web_socket, to_websocket),
+            err_chan_to_wss: err_chan_to_websocket,
             // websocket_listener: Arc::new(tokio::sync::RwLock::new(WebSocketListenerV1::new(
             //     ts_wss_tx.clone(), ts_wss_rx.clone(),
             //     client_err_tx, target_err_tx,
@@ -146,11 +150,6 @@ impl RouterSocketV1 {
 
             client_request_headers: HeaderMap::new(),
             client_response_headers: HeaderMap::new(),
-
-            client_err_tx: client_err_tx_clone,
-            target_err_tx: target_err_tx_clone,
-            client_err_rx,
-            target_err_rx,
         }
     }
 
@@ -166,63 +165,58 @@ impl RouterSocketV1 {
     }
 }
 
-impl WebSocketListenerV1 {
-    fn new(ts_wss_tx: Arc<Mutex<SplitSink<WebSocket, Message>>>,
-           ts_wss_rx: Arc<Mutex<SplitStream<WebSocket>>>,
-           client_err_tx: mpsc::Sender<()>,
-           target_err_tx: mpsc::Sender<()>,
+impl RSv1WssMessageListener {
+    fn new(
+        from_ws_to_rs_rx: UnboundedReceiver<Message>,
+        from_rs_to_ws_tx: UnboundedSender<Message>,
     ) -> Self {
         Self {
-            ts_wss_tx,
-            ts_wss_rx,
-            client_err_tx,
-            target_err_tx,
-
+            from_ws_to_rs_rx,
+            from_rs_to_ws_tx,
             target_res_header_received: AtomicBool::new(false),
-            header_string_buf: RwLock::new(String::new()),
+            header_string_buf: tokio::sync::RwLock::new(String::new()),
             target_res_header_sent: AtomicBool::new(false),
             target_res_body_received: AtomicBool::new(false),
             websocket_closed: AtomicBool::new(false),
         }
     }
 
-    fn on_target_res_error(&self, reason: String) {
-        self.target_err_tx.send(());
+    async fn send_text(&self, txt: String) -> Result<(), CrankerRouterException> {
+        self.from_rs_to_ws_tx.send(Message::Text(txt))
+            .map_err(|e| CrankerRouterException::new(format!(
+                "failed to send txt to wss: {:?}", e
+            )))
     }
-    fn on_client_req_error(&self, reason: String) {
-        self.client_err_tx.send(());
+
+    async fn send_binary(&self, bin: Vec<u8>) -> Result<(), CrankerRouterException> {
+        self.from_rs_to_ws_tx.send(Message::Binary(bin))
+            .map_err(|e| CrankerRouterException::new(format!(
+                "failed to send binary to wss: {:?}", e
+            )))
     }
 }
 
 #[async_trait]
-impl WebSocketListener for WebSocketListenerV1 {
+impl WssMessageListener for RSv1WssMessageListener {
     async fn on_text(&mut self, txt: String) -> Result<(), CrankerRouterException> {
         debug!("Text coming! {}", txt);
         self.target_res_header_received.store(true, SeqCst);
         if self.target_res_body_received.load(SeqCst) {
             let failed_reason = "res body already received but still receiving text message which is not expected!".to_string();
-            self.on_target_res_error(failed_reason.clone());
+            self.on_error(CrankerRouterException::new(failed_reason.clone())).await;
             return Err(CrankerRouterException::new(failed_reason));
+            // self.on_target_res_error(failed_reason.clone());
+            // return Err(CrankerRouterException::new(failed_reason));
         }
         let text_len = txt.len();
-        if text_len + self.header_string_buf.read().unwrap().len() > HEADER_MAX_SIZE {
+        if text_len + self.header_string_buf.read().await.len() > HEADER_MAX_SIZE {
             let failed_reason = format!("Header too large after appending: before {} bytes, after {} bytes, max {} bytes",
-                                        text_len, self.header_string_buf.read().unwrap().len(), HEADER_MAX_SIZE);
-            self.on_target_res_error(failed_reason.clone());
+                                        text_len, self.header_string_buf.read().await.len(), HEADER_MAX_SIZE);
+            self.on_error(CrankerRouterException::new(failed_reason.clone()).into()).await;
+            // self.on_target_res_error(failed_reason.clone());
             return Err(CrankerRouterException::new(failed_reason));
         }
-        // FIXME: Is it necessary to handle lock error here?
-        match self.header_string_buf.try_write() {
-            Ok(mut hsb) => {
-                hsb.push_str(txt.as_str());
-            }
-            Err(e) => {
-                let failed_reason = format!("failed to lock header_string_buf: {:?}", e).to_string();
-                self.on_target_res_error(failed_reason.clone());
-                return Err(CrankerRouterException::new(failed_reason));
-            }
-        }
-
+        self.header_string_buf.write().await.push_str(txt.as_str());
         Ok(())
     }
 
@@ -230,28 +224,24 @@ impl WebSocketListener for WebSocketListenerV1 {
         debug!("binary coming! {}", bin.len());
         if !self.target_res_header_received.load(SeqCst) {
             let failed_reason = "res header not received yet but binary comes first which is not expected!".to_string();
-            self.on_client_req_error(failed_reason.clone());
+            self.on_error(CrankerRouterException::new(failed_reason.clone()).into()).await;
             return Err(CrankerRouterException::new(failed_reason));
         }
+        // FIXME: Seems the text message always comes with one frame / one message
+        // consider simplify it to on_text()
         if let Ok(_) = self.target_res_body_received.compare_exchange_weak(false, true, SeqCst, SeqCst) {
-            let _ = self.ts_wss_tx.lock().await.send(Message::Text(self.header_string_buf.read().unwrap().clone()));
+            self.from_rs_to_ws_tx.send(Message::Text(self.header_string_buf.read().await.clone()))
+                .map_err(|e| CrankerRouterException::new(format!(
+                    "failed to send header from target to client: {:?}", e
+                )))?
         }
+        self.from_rs_to_ws_tx.send(Message::Binary(bin));
         // TODO
         Ok(())
     }
 
-    async fn on_ping(&self, ping_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
-        // todo!()
-        Ok(())
-    }
-
-    async fn on_pong(&self, pong_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
-        // todo!()
-        Ok(())
-    }
-
     async fn on_close(&self, close_msg: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException> {
-        // todo!()
+        // TODO: Gracefully close the router socket
         Ok(())
     }
 }
@@ -293,42 +283,29 @@ impl RouterSocket for RouterSocketV1 {
             }
         };
         debug!("10");
-        let send_hdr_res = self.to_websocket.send(Message::Text(cranker_req.clone()));
-        match send_hdr_res {
-            Ok(_) => debug!("Req without body sent to target: {}", cranker_req),
-            Err(e) => {
-                let failed_reason = format!("Failed to send cranker req to target. Req: {}. Err: {:?}", cranker_req, e);
-                error!("{failed_reason}");
-                self.client_err_tx.send(());
-                // self.on_client_req_error(failed_reason.clone()).await;
-                return Err(CrankerRouterException::new(failed_reason));
-            }
-        }
+        self.router_socket_wss_message_listener.send_text(cranker_req.clone()).await?;
 
-        let mut rec_handle = None;
-        match opt_body {
+
+        match opt_body { // req body
+            None => { /*no body*/ }
             Some(mut body) => {
-                // todo!("Send req body to target")
-                let mut to_websocket_clone = self.to_websocket.clone();
-                let mut client_err_tx_clone = self.client_err_tx.clone();
-                let hdl = tokio::spawn(async move {
-                    while let Some(r) = body.recv().await {
-                        match r {
-                            Ok(b) => { to_websocket_clone.send(Message::Binary(b.to_vec())); },
-                            Err(e) => {
-                                error!("Something wrong: {:?}",e );
-                                client_err_tx_clone.send(());
-                                // self.on_client_req_error(format!("Something wrong: {:?}", e).to_string()).await;
-                                break;
-                            }
+                info!("Sending req body to target");
+                while let Some(r) =  body.recv().await {
+                    match r {
+                        Ok(b) => {
+                            self.router_socket_wss_message_listener.send_binary(b.to_vec()).await?
+                        }
+                        Err(e) => {
+                            let failed_reason = format!("error when sending body to target: {:?}", e);
+                            error!("{}", failed_reason.clone());
+                            return Err(CrankerRouterException::new(failed_reason));
                         }
                     }
-                });
-                rec_handle = Some(hdl);
+                }
             }
-            None => {}
         }
 
+        // while let Some(msg) = self.router_socket_wss_message_listener.from_ws_to_rs_rx.recv()
 
 
         // let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
@@ -354,4 +331,11 @@ impl RouterSocket for RouterSocketV1 {
     // fn on_target_res_error(&self, reason: String) {
     //    todo!()
     // }
+
+    async fn on_target_res_error(&self, err: CrankerRouterException) {
+        let _ = self.err_chan_to_wss.send(err);
+    }
+    async fn on_client_req_error(&self, err: CrankerRouterException) {
+        let _ = self.err_chan_to_wss.send(err);
+    }
 }

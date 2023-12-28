@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::atomic::Ordering::SeqCst;
 
 use axum::{BoxError, Error, Extension, Router, ServiceExt};
@@ -19,15 +19,16 @@ use axum::routing::any;
 use axum_macros::debug_handler;
 use bytes::Bytes;
 use dashmap::DashMap;
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
 use futures::stream::BoxStream;
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
 use log::LevelFilter::Debug;
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::RwLock;
+use tokio_util::io::StreamReader;
 use tower_http::limit;
 use uuid::Uuid;
 
@@ -188,8 +189,9 @@ async fn portal(
                     let mut opt_body = None;
                     if has_body {
                         debug!("5");
-                        let (pipe_tx, pipe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, Error>>();
+                        let (mut pipe_tx, mut pipe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, Error>>();
                         opt_body = Some(pipe_rx);
+                        // tok
                         tokio::spawn(pipe_body_data_stream_to_a_mpsc_sender(boxed_stream, pipe_tx));
                     } else {
                         debug!("6");
@@ -217,17 +219,22 @@ async fn portal(
     Response::new(Body::new("hi there".to_string()))
 }
 
-async fn pipe_body_data_stream_to_a_mpsc_sender(mut stream: BoxStream<'_, Result<Bytes, Error>>, sender: tokio::sync::mpsc::UnboundedSender<Result<Bytes, Error>>) {
+async fn pipe_body_data_stream_to_a_mpsc_sender(mut stream: BoxStream<'_, Result<Bytes, Error>>,
+                                                mut sender: tokio::sync::mpsc::UnboundedSender<Result<Bytes, Error>>
+) -> Result<(), CrankerRouterException>
+{
     while let Some(frag) = stream.next().await {
         match sender.send(frag) {
             Err(e) => {
-                error!("error when piping body data stream to mpsc sender, pipe will break: {:?}", e);
-                break;
+                let failed_reason = format!("error when piping body data stream to mpsc sender, pipe will break: {:?}", e);
+                error!("{failed_reason}");
+                return Err(CrankerRouterException::new(failed_reason));
             }
             _ => {}
         }
     }
     drop(sender);
+    Ok(())
 }
 
 #[debug_handler]
@@ -308,7 +315,7 @@ async fn take_and_store_websocket(wss: WebSocket,
                                   addr: SocketAddr,
 ) {
     info!("Connector registered! connector_id: {}", connector_id.clone());
-    let (mut from_ws_to_rs_tx, mut from_ws_to_rs_rx) = unbounded_channel::<Message>();
+    let (mut from_ws_to_rs_tx, mut from_ws_to_rs_rx): (UnboundedSender<Message>, UnboundedReceiver<Message>) = unbounded_channel::<Message>();
     let (mut from_rs_to_ws_tx, mut from_rs_to_ws_rx) = unbounded_channel::<Message>();
     // tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     // let a: Arc<Box<u64>> = Arc::new(Box::new(64));
@@ -323,6 +330,7 @@ async fn take_and_store_websocket(wss: WebSocket,
     {
         info!("before registration, state route size: {}", state.read().await.route_to_socket.len());
     }
+    let (err_chan_tx, err_chan_rx) = unbounded_channel::<CrankerRouterException>();
 
     let rs = Arc::new(RwLock::new(RouterSocketV1::new(
         route.clone(),
@@ -331,6 +339,7 @@ async fn take_and_store_websocket(wss: WebSocket,
         connector_id.clone(),
         from_ws_to_rs_rx, // from websocket
         from_rs_to_ws_tx, // to websocket
+        err_chan_tx,
         addr,
     )));
 
@@ -361,26 +370,50 @@ async fn take_and_store_websocket(wss: WebSocket,
     {
         debug!("Listening on connector ws message!");
         let (mut notify_ch_close_tx, mut notify_ch_close_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let mut clo_tx_1 = notify_ch_close_tx.clone();
+        let mut notify_ch_close_tx_clone = notify_ch_close_tx.clone();
+
+
+        while let Some(from_rs) = from_rs_to_ws_rx.recv().await {
+            match from_rs {
+                Message::Text(txt) => {
+                    let _ = wss_tx.send(Message::Text(txt)).await
+                        .map_err(|e| {
+                            let _ = from_ws_to_rs_tx.send(Message::Close(None));
+                            let _ = notify_ch_close_tx.send(());
+                        });
+                }
+                Message::Binary(bin) => {
+                    let _ = wss_tx.send(Message::Binary(bin)).await
+                        .map_err(|e| {
+                            let _ = from_ws_to_rs_tx.send(Message::Close(None));
+                            let _ = notify_ch_close_tx.send(());
+                        });
+                }
+                Message::Close(_) => {}
+                _ => {}
+            }
+        }
+
         loop {
             tokio::select! {
                 Some(should_stop) = notify_ch_close_rx.recv() => {
                     break;
                 }
                 Some(from_rs) = from_rs_to_ws_rx.recv() => {
-
+                    // TODO
                 }
                 from_wss_nullable = wss_rx.next() => {
                     match from_wss_nullable {
                         None => {
                             warn!("Receive None from wss_rx, seems wss closed!");
-                            from_ws_to_rs_tx.send(Message::Close(None));
-                            clo_tx_1.send(());
+                            let _ = from_ws_to_rs_tx.send(Message::Close(None));
+                            let _ = notify_ch_close_tx_clone.send(());
                         }
                         Some(may_err) => {
+                            // FIXME: Let's believe cloning these channels equals cloning their inner Arc, which is super cheap!
                             let mut from_ws_to_rs_tx = from_ws_to_rs_tx.clone();
                             let mut notify_ch_close_tx = notify_ch_close_tx.clone();
-                            tokio::spawn(handle_msg_from_wss_to_router_socket(may_err, from_ws_to_rs_tx, notify_ch_close_tx));
+                            tokio::spawn(pipe_msg_from_wss_to_router_socket(may_err, from_ws_to_rs_tx, notify_ch_close_tx));
                         }
                     }
                 }
@@ -393,40 +426,11 @@ async fn take_and_store_websocket(wss: WebSocket,
         // drop sender to router socket
         drop(from_ws_to_rs_tx);
 
-
-        // tokio::select! {
-        //     from_ws = wss_rx.next() => {
-        //
-        //     },
-        //     from_rs = r
-        // }
-
-
-        // while let Some(Ok(msg)) = self.ts_wss_rx.lock().await.next().await {
-        //     debug!("[from-connector] Connector msg comes! {:?}", msg);
-        //     match msg {
-        //         Message::Text(txt) => {
-        //             self.websocket_listener.write().await.on_text(txt).await;
-        //         }
-        //         Message::Binary(bin) => {
-        //             self.websocket_listener.write().await.on_binary(bin).await;
-        //         }
-        //         Message::Ping(pin) => {
-        //             self.websocket_listener.read().await.on_ping(pin).await;
-        //         }
-        //         Message::Pong(pon) => {
-        //             self.websocket_listener.read().await.on_pong(pon).await;
-        //         }
-        //         Message::Close(clo) => {
-        //             self.websocket_listener.read().await.on_close(clo).await;
-        //         }
-        //     }
-        // }
         debug!("END OF Listening on connector ws message!");
     }
 }
 
-async fn handle_msg_from_wss_to_router_socket(
+async fn pipe_msg_from_wss_to_router_socket(
     may_err: Result<Message, Error>,
     from_ws_to_rs_tx: UnboundedSender<Message>,
     notify_ch_close_tx: UnboundedSender<()>,
