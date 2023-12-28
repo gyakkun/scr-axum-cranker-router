@@ -57,8 +57,8 @@ pub trait RouterSocket: Send + Sync {
 
 
 pub struct WebSocketListenerV1 {
-    ts_wss_tx: Arc<Mutex<Pin<Box<SplitSink<WebSocket, Message>>>>>,
-    ts_wss_rx: Arc<Mutex<Pin<Box<SplitStream<WebSocket>>>>>,
+    ts_wss_tx: Arc<Mutex<SplitSink<WebSocket, Message>>>,
+    ts_wss_rx: Arc<Mutex<SplitStream<WebSocket>>>,
     client_err_tx: mpsc::Sender<()>,
     target_err_tx: mpsc::Sender<()>,
 
@@ -77,8 +77,8 @@ pub struct RouterSocketV1 {
     // pub web_socket_farm: Option<Weak<Mutex<WebSocketFarm>>>,
     pub connector_instance_id: String,
     // pub proxy_listeners: Vec<&'static dyn ProxyListener>,
-    pub ts_wss_tx: Arc<Mutex<Pin<Box<SplitSink<WebSocket, Message>>>>>,
-    pub ts_wss_rx: Arc<Mutex<Pin<Box<SplitStream<WebSocket>>>>>,
+    pub ts_wss_tx: Arc<Mutex<SplitSink<WebSocket, Message>>>,
+    pub ts_wss_rx: Arc<Mutex<SplitStream<WebSocket>>>,
     // on_ready_for_action: &'static dyn Fn() -> (),
     pub remote_address: SocketAddr,
     pub is_removed: bool,
@@ -110,8 +110,8 @@ impl RouterSocketV1 {
                component_name: String,
                router_socket_id: String,
                connector_instance_id: String,
-               wss_tx: Pin<Box<SplitSink<WebSocket, Message>>>,
-               wss_rx: Pin<Box<SplitStream<WebSocket>>>,
+               wss_tx: SplitSink<WebSocket, Message>,
+               wss_rx: SplitStream<WebSocket>,
                remote_address: SocketAddr,
     ) -> Self {
         let ts_wss_tx = Arc::new(Mutex::new(wss_tx));
@@ -169,8 +169,8 @@ impl RouterSocketV1 {
 }
 
 impl WebSocketListenerV1 {
-    fn new(ts_wss_tx: Arc<Mutex<Pin<Box<SplitSink<WebSocket, Message>>>>>,
-           ts_wss_rx: Arc<Mutex<Pin<Box<SplitStream<WebSocket>>>>>,
+    fn new(ts_wss_tx: Arc<Mutex<SplitSink<WebSocket, Message>>>,
+           ts_wss_rx: Arc<Mutex<SplitStream<WebSocket>>>,
            client_err_tx: mpsc::Sender<()>,
            target_err_tx: mpsc::Sender<()>,
     ) -> Self {

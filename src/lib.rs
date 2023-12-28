@@ -312,8 +312,6 @@ async fn take_and_store_websocket(wss: WebSocket,
     // let a: Arc<Box<u64>> = Arc::new(Box::new(64));
     debug!("Going to split wss");
     let (mut tx, mut rx) = wss.split();
-    let mut tx = Box::pin(tx);
-    let mut rx = Box::pin(rx);
     debug!("going to gen router socket id");
     let router_socket_id = Uuid::new_v4().to_string();
     match state.try_read() {
