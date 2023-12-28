@@ -19,7 +19,7 @@ use axum::routing::any;
 use axum_macros::debug_handler;
 use bytes::Bytes;
 use dashmap::DashMap;
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::{pin_mut, Stream, StreamExt, TryStreamExt};
 use futures::stream::BoxStream;
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
@@ -42,12 +42,13 @@ pub mod cranker_protocol_response;
 pub mod cranker_protocol_request_builder;
 pub mod route_resolver;
 
-pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &str = "crankerprotocol"; // should be CrankerProtocol, but axum all lower cased
+pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &str = "crankerprotocol";
+// should be CrankerProtocol, but axum all lower cased
 pub const _VER_1_0: &str = "1.0";
 pub const _VER_3_0: &str = "3.0";
 
-pub const CRANKER_V_1_0:&str = "cranker_1.0";
-pub const CRANKER_V_3_0:&str = "cranker_3.0";
+pub const CRANKER_V_1_0: &str = "cranker_1.0";
+pub const CRANKER_V_3_0: &str = "cranker_3.0";
 
 #[derive(Clone)]
 struct VersionNegotiate {
@@ -59,6 +60,34 @@ lazy_static! {
         let mut s = HashMap::new();
         s.insert(_VER_1_0, CRANKER_V_1_0);
         s.insert(_VER_3_0, CRANKER_V_3_0);
+        s
+    };
+
+    static ref HOP_BY_HOP_HEADERS: HashSet<&'static str> =  {
+        let mut s = HashSet::new();
+        [
+            "keep-alive",
+            "transfer-encoding",
+            "te",
+            "connection",
+            "trailer",
+            "upgrade",
+            "proxy-authorization",
+            "proxy-authenticate"
+        ].iter().for_each(|h| {s.insert(*h);});
+        s
+    };
+
+    static ref REPRESSED_HEADERS: HashSet<&'static str> = {
+        let mut s = HOP_BY_HOP_HEADERS.clone();
+        [
+            // expect is already handled by mu server, so if it's forwarded it will break stuff
+            "expect",
+
+            // Headers that mucranker will overwrite
+            "forwarded", "x-forwarded-by", "x-forwarded-for", "x-forwarded-host",
+            "x-forwarded-proto", "x-forwarded-port", "x-forwarded-server", "via"
+        ].iter().for_each(|h|{s.insert(*h);});
         s
     };
 }
@@ -130,8 +159,11 @@ async fn portal(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    // axum_req
-    let has_body = body.is_end_stream();
+    // FIXME: How to judge if has body or not
+    // Get should have no body but not required
+    info!("size lower bound: {}", body.size_hint().lower());
+    let has_body = body.size_hint().lower() > 0;
+    info!("Has body? {}", has_body);
     let mut body_data_stream = body.into_data_stream();
     let mut boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, Error>>;
 
@@ -202,7 +234,7 @@ async fn cranker_register_handler(
     State(app_state): State<TSState>,
     ws: WebSocketUpgrade,
     Extension(ext_map): Extension<HashMap<String, String>>,
-    Extension(ver_neg):Extension<VersionNegotiate>,
+    Extension(ver_neg): Extension<VersionNegotiate>,
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -280,6 +312,8 @@ async fn take_and_store_websocket(wss: WebSocket,
     // let a: Arc<Box<u64>> = Arc::new(Box::new(64));
     debug!("Going to split wss");
     let (mut tx, mut rx) = wss.split();
+    let mut tx = Box::pin(tx);
+    let mut rx = Box::pin(rx);
     debug!("going to gen router socket id");
     let router_socket_id = Uuid::new_v4().to_string();
     match state.try_read() {
@@ -382,7 +416,7 @@ async fn validate_route_domain_and_cranker_version(
     ext_hashmap.insert("route".to_string(), route.to_string());
     ext_hashmap.insert("domain".to_string(), domain.to_string());
     // extension_test.insert("version".to_string(), dealt_version);
-    let ext_ver_neg = VersionNegotiate { dealt: dealt_version};
+    let ext_ver_neg = VersionNegotiate { dealt: dealt_version };
     request.extensions_mut().insert(ext_ver_neg);
 
     // app_state.route_to_connector_id_map

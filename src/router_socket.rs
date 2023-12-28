@@ -1,5 +1,6 @@
 use std::fmt::Display;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::atomic::Ordering::SeqCst;
@@ -11,17 +12,14 @@ use axum::http::{HeaderMap, Method, Response, StatusCode};
 use axum::http::uri::PathAndQuery;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use futures::stream::{BoxStream, SplitSink, SplitStream};
+use futures::stream::{SplitSink, SplitStream};
 use log::{debug, error};
 use tokio::sync::{mpsc, Mutex};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::exceptions::CrankerRouterException;
-
-// use crate::proxy_listener::ProxyListener;
-// use crate::RouterSocketV1;
-// use crate::web_socket_farm::WebSocketFarm;
+use crate::REPRESSED_HEADERS;
 
 const RESPONSE_HEADERS_TO_NOT_SEND_BACK: &[&str] = &["server"];
 const HEADER_MAX_SIZE: usize = 64 * 1024; // 64KBytes
@@ -59,8 +57,8 @@ pub trait RouterSocket: Send + Sync {
 
 
 pub struct WebSocketListenerV1 {
-    ts_wss_tx: Arc<Mutex<SplitSink<WebSocket, Message>>>,
-    ts_wss_rx: Arc<Mutex<SplitStream<WebSocket>>>,
+    ts_wss_tx: Arc<Mutex<Pin<Box<SplitSink<WebSocket, Message>>>>>,
+    ts_wss_rx: Arc<Mutex<Pin<Box<SplitStream<WebSocket>>>>>,
     client_err_tx: mpsc::Sender<()>,
     target_err_tx: mpsc::Sender<()>,
 
@@ -79,8 +77,8 @@ pub struct RouterSocketV1 {
     // pub web_socket_farm: Option<Weak<Mutex<WebSocketFarm>>>,
     pub connector_instance_id: String,
     // pub proxy_listeners: Vec<&'static dyn ProxyListener>,
-    pub ts_wss_tx: Arc<Mutex<SplitSink<WebSocket, Message>>>,
-    pub ts_wss_rx: Arc<Mutex<SplitStream<WebSocket>>>,
+    pub ts_wss_tx: Arc<Mutex<Pin<Box<SplitSink<WebSocket, Message>>>>>,
+    pub ts_wss_rx: Arc<Mutex<Pin<Box<SplitStream<WebSocket>>>>>,
     // on_ready_for_action: &'static dyn Fn() -> (),
     pub remote_address: SocketAddr,
     pub is_removed: bool,
@@ -112,8 +110,8 @@ impl RouterSocketV1 {
                component_name: String,
                router_socket_id: String,
                connector_instance_id: String,
-               wss_tx: SplitSink<WebSocket, Message>,
-               wss_rx: SplitStream<WebSocket>,
+               wss_tx: Pin<Box<SplitSink<WebSocket, Message>>>,
+               wss_rx: Pin<Box<SplitStream<WebSocket>>>,
                remote_address: SocketAddr,
     ) -> Self {
         let ts_wss_tx = Arc::new(Mutex::new(wss_tx));
@@ -171,8 +169,8 @@ impl RouterSocketV1 {
 }
 
 impl WebSocketListenerV1 {
-    fn new(ts_wss_tx: Arc<Mutex<SplitSink<WebSocket, Message>>>,
-           ts_wss_rx: Arc<Mutex<SplitStream<WebSocket>>>,
+    fn new(ts_wss_tx: Arc<Mutex<Pin<Box<SplitSink<WebSocket, Message>>>>>,
+           ts_wss_rx: Arc<Mutex<Pin<Box<SplitStream<WebSocket>>>>>,
            client_err_tx: mpsc::Sender<()>,
            target_err_tx: mpsc::Sender<()>,
     ) -> Self {
@@ -245,15 +243,18 @@ impl WebSocketListener for WebSocketListenerV1 {
     }
 
     async fn on_ping(&self, ping_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
-        todo!()
+        // todo!()
+        Ok(())
     }
 
     async fn on_pong(&self, pong_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
-        todo!()
+        // todo!()
+        Ok(())
     }
 
     async fn on_close(&self, close_msg: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException> {
-        todo!()
+        // todo!()
+        Ok(())
     }
 }
 
@@ -267,22 +268,28 @@ impl RouterSocket for RouterSocketV1 {
     ) -> Result<Response<Body>, CrankerRouterException> {
         debug!("9");
         headers.iter().for_each(|(k, v)| {
-            self.client_request_headers.insert(k.to_owned(), v.to_owned());
+            debug!("Checking header {}", k.as_str());
+            if REPRESSED_HEADERS.contains(k.as_str().to_ascii_lowercase().as_str()) {
+                debug!("Repressed header: {}", k.as_str());
+                // NOP
+            } else {
+                self.client_request_headers.insert(k.to_owned(), v.to_owned());
+            }
         });
+        debug!("After filtering: ");
+        self.client_request_headers.iter().for_each(|(k, v)| debug!("{}", k.as_str()));
         let request_line = Self::build_request_line(method, path_and_query);
-        let cranker_req_bdr = CrankerProtocolRequestBuilder::new();
+        let cranker_req_bdr = CrankerProtocolRequestBuilder::new()
+            .with_request_line(request_line)
+            .with_request_headers(&self.client_request_headers);
         let cranker_req = match opt_body.is_some() {
             false => {
                 cranker_req_bdr
-                    .with_request_line(request_line)
-                    .with_request_headers(headers)
                     .with_request_has_no_body()
                     .build()?
             }
             true => {
                 cranker_req_bdr
-                    .with_request_line(request_line)
-                    .with_request_headers(headers)
                     .with_request_body_pending()
                     .build()?
             }
@@ -324,7 +331,9 @@ impl RouterSocket for RouterSocketV1 {
             None => {}
         }
 
+        debug!("Listening on connector ws message!");
         while let Some(Ok(msg)) = self.ts_wss_rx.lock().await.next().await {
+            debug!("[from-connector] Connector msg comes! {:?}", msg);
             match msg {
                 Message::Text(txt) => {
                     self.websocket_listener.write().await.on_text(txt).await;
@@ -343,9 +352,11 @@ impl RouterSocket for RouterSocketV1 {
                 }
             }
         }
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
-        let mut streamrx = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
-        while let Some(u) = streamrx.next().await {}
+        debug!("END OF Listening on connector ws message!");
+
+        // let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+        // let mut streamrx = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
+        // while let Some(u) = streamrx.next().await {}
 
         //todo
         Ok(Response::builder().status(StatusCode::OK).body(Body::new("OK!".to_string())).unwrap())
@@ -359,7 +370,8 @@ impl RouterSocket for RouterSocketV1 {
                            headers: &HeaderMap,
                            opt_body: Option<mpsc::Receiver<Bytes>>,
     ) -> Result<(), CrankerRouterException> {
-        todo!()
+        // todo!()
+        Ok(())
     }
 
     // fn on_target_res_error(&self, reason: String) {
