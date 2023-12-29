@@ -1,5 +1,9 @@
 use std::str::FromStr;
 
+use axum::http;
+use axum::response::Response;
+use log::warn;
+
 use crate::exceptions::CrankerRouterException;
 
 pub struct CrankerProtocolResponse {
@@ -42,10 +46,37 @@ impl CrankerProtocolResponse {
         })?;
         let headers = lines.into_iter().rev()
             .take(lines_len - 1)
+            .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .collect();
 
         Ok(Self { headers, status })
+    }
+
+    pub fn default_failed() -> Self {
+        Self {
+            headers: Vec::new(),
+            status: 500,
+        }
+    }
+
+    pub fn build(&self) -> Result<http::response::Builder, CrankerRouterException> {
+        let mut res = Response::builder().status(self.status);
+        for header_line in self.headers.iter() {
+            let colon_idx = header_line.find(":");
+            if colon_idx.is_none() {
+                let failed_reason = format!("failed to parse protocol response, header seems corrupted: {:?}", self.headers);
+                return Err(CrankerRouterException::new(failed_reason));
+            }
+            let colon_idx = colon_idx.unwrap();
+            let k = *&header_line[..colon_idx].trim();
+            let v = *&header_line[colon_idx + 1..].trim();
+            // looks like axum will not overwrite the date header if exists
+            // if k.eq_ignore_ascii_case("date") {
+            // }
+            res = res.header(k, v);
+        }
+        Ok(res)
     }
 }
 
@@ -54,14 +85,14 @@ mod tests {
     use crate::cranker_protocol_response::CrankerProtocolResponse;
 
     #[test]
-    fn test_parse(){
+    fn test_parse() {
         let msg = [
             "HTTP/1.1 200 OK",
             "User-Agent: curl/8.0"
         ].join("\n");
         let res = CrankerProtocolResponse::new(msg);
         assert!(res.is_ok());
-        let res=res.unwrap();
+        let res = res.unwrap();
         assert_eq!(res.status, 200);
         assert_eq!(res.headers.len(), 1);
     }

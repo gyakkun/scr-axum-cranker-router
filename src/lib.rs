@@ -296,7 +296,7 @@ async fn take_and_store_websocket(wss: WebSocket,
     let (mut from_rs_to_ws_tx, mut from_rs_to_ws_rx) = unbounded_channel::<Message>();
     let (mut wss_tx, mut wss_rx) = wss.split();
     let router_socket_id = Uuid::new_v4().to_string();
-    let (err_chan_tx, err_chan_rx) = unbounded_channel::<CrankerRouterException>();
+    let (mut err_chan_tx, mut err_chan_rx) = unbounded_channel::<CrankerRouterException>();
     let rs = Arc::new(RwLock::new(RouterSocketV1::new(
         route.clone(),
         component_name.clone(),
@@ -319,7 +319,7 @@ async fn take_and_store_websocket(wss: WebSocket,
         let write_guard = state.write().await;
         let _ = write_guard.counter.fetch_add(1, SeqCst);
     }
-    websocket_exchange(from_rs_to_ws_rx, from_ws_to_rs_tx, wss_tx, wss_rx).await;
+    websocket_exchange(from_rs_to_ws_rx, from_ws_to_rs_tx, wss_tx, wss_rx, err_chan_rx).await;
 }
 
 async fn websocket_exchange(
@@ -327,38 +327,40 @@ async fn websocket_exchange(
     mut from_ws_to_rs_tx: UnboundedSender<Message>,
     mut wss_tx: SplitSink<WebSocket, Message>,
     mut wss_rx: SplitStream<WebSocket>,
+    mut err_chan_from_rs: UnboundedReceiver<CrankerRouterException>,
 ) {
     debug!("Listening on connector ws message!");
     let (mut notify_ch_close_tx, mut notify_ch_close_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let mut notify_ch_close_tx_clone = notify_ch_close_tx.clone();
-    while let Some(from_rs) = from_rs_to_ws_rx.recv().await {
-        match from_rs {
-            Message::Text(txt) => {
-                let _ = wss_tx.send(Message::Text(txt)).await
-                    .map_err(|e| {
-                        let _ = from_ws_to_rs_tx.send(Message::Close(None));
-                        let _ = notify_ch_close_tx.send(());
-                    });
-            }
-            Message::Binary(bin) => {
-                let _ = wss_tx.send(Message::Binary(bin)).await
-                    .map_err(|e| {
-                        let _ = from_ws_to_rs_tx.send(Message::Close(None));
-                        let _ = notify_ch_close_tx.send(());
-                    });
-            }
-            Message::Close(_) => {}
-            _ => {}
-        }
-    }
 
     loop {
         tokio::select! {
                 Some(should_stop) = notify_ch_close_rx.recv() => {
                     break;
                 }
+                Some(err) = err_chan_from_rs.recv() => {
+                    error!("exception received in websocket_exchange: {:?}", err);
+                    notify_ch_close_tx.send(());
+                }
                 Some(from_rs) = from_rs_to_ws_rx.recv() => {
-                    // TODO
+                    match from_rs {
+                        Message::Text(txt) => {
+                            let _ = wss_tx.send(Message::Text(txt)).await
+                                .map_err(|e| {
+                                    let _ = from_ws_to_rs_tx.send(Message::Close(None));
+                                    let _ = notify_ch_close_tx.send(());
+                                });
+                        }
+                        Message::Binary(bin) => {
+                            let _ = wss_tx.send(Message::Binary(bin)).await
+                                .map_err(|e| {
+                                    let _ = from_ws_to_rs_tx.send(Message::Close(None));
+                                    let _ = notify_ch_close_tx.send(());
+                                });
+                        }
+                        Message::Close(_) => {}
+                        _ => {}
+                    }
                 }
                 from_wss_nullable = wss_rx.next() => {
                     match from_wss_nullable {
