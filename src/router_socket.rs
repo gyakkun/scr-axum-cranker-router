@@ -1,21 +1,16 @@
-use std::fmt::{Display, format};
+use std::fmt::Display;
 use std::net::SocketAddr;
-use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::atomic::Ordering::SeqCst;
-use std::sync::mpsc::Receiver;
-use std::sync::RwLock;
 
 use axum::{async_trait, BoxError, Error};
 use axum::body::Body;
 use axum::extract::ws::{CloseFrame, Message};
 use axum::http::{HeaderMap, Method, Response, StatusCode};
 use axum::http::uri::PathAndQuery;
-use axum::response::IntoResponse;
 use bytes::Bytes;
-use futures::{SinkExt, Stream, StreamExt, TryFutureExt};
-use log::{debug, error, info};
-use tokio::io::AsyncWrite;
+use futures::{SinkExt, TryFutureExt};
+use log::{debug, error};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -254,18 +249,14 @@ impl RouterSocket for RouterSocketV1 {
                            headers: &HeaderMap,
                            opt_body: Option<UnboundedReceiver<Result<Bytes, Error>>>,
     ) -> Result<Response<Body>, CrankerRouterException> {
-        debug!("9");
         headers.iter().for_each(|(k, v)| {
-            debug!("Checking header {}", k.as_str());
             if REPRESSED_HEADERS.contains(k.as_str().to_ascii_lowercase().as_str()) {
-                debug!("Repressed header: {}", k.as_str());
                 // NOP
             } else {
                 self.client_request_headers.insert(k.to_owned(), v.to_owned());
             }
         });
-        debug!("After filtering: ");
-        self.client_request_headers.iter().for_each(|(k, v)| debug!("{}", k.as_str()));
+
         let request_line = Self::build_request_line(method, path_and_query);
         let cranker_req_bdr = CrankerProtocolRequestBuilder::new()
             .with_request_line(request_line)
@@ -282,15 +273,14 @@ impl RouterSocket for RouterSocketV1 {
                     .build()?
             }
         };
-        debug!("10");
+
         self.router_socket_wss_message_listener.send_text(cranker_req.clone()).await?;
 
 
         match opt_body { // req body
             None => { /*no body*/ }
             Some(mut body) => {
-                info!("Sending req body to target");
-                while let Some(r) =  body.recv().await {
+                while let Some(r) = body.recv().await {
                     match r {
                         Ok(b) => {
                             self.router_socket_wss_message_listener.send_binary(b.to_vec()).await?

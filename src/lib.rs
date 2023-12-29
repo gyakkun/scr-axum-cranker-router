@@ -4,10 +4,10 @@ use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 
-use axum::{BoxError, Error, Extension, Router, ServiceExt};
+use axum::{BoxError, Error, Extension, http, Router, ServiceExt};
 use axum::body::{Body, HttpBody};
 use axum::extract::{ConnectInfo, OriginalUri, Query, State, WebSocketUpgrade};
 use axum::extract::ws::{Message, WebSocket};
@@ -20,7 +20,7 @@ use axum_macros::debug_handler;
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
-use futures::stream::BoxStream;
+use futures::stream::{BoxStream, SplitSink, SplitStream};
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
 use log::LevelFilter::Debug;
@@ -28,7 +28,6 @@ use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::RwLock;
-use tokio_util::io::StreamReader;
 use tower_http::limit;
 use uuid::Uuid;
 
@@ -52,7 +51,7 @@ pub const _VER_3_0: &str = "3.0";
 pub const CRANKER_V_1_0: &str = "cranker_1.0";
 pub const CRANKER_V_3_0: &str = "cranker_3.0";
 
-#[derive(Clone)]
+#[derive(Clone,Debug)]
 struct VersionNegotiate {
     dealt: &'static str,
 }
@@ -139,18 +138,11 @@ async fn main() {
         .await
         .unwrap();
 
-    debug!("listening on {}", reg_listener.local_addr().unwrap());
     tokio::spawn(async {
         axum::serve(reg_listener, registration_portal).await.unwrap()
     });
 
-    axum::serve(visit_listener, visit_portal)
-        .await
-        .unwrap();
-}
-
-struct Hi<'t> {
-    body_data_stream: BoxStream<'t, Result<Bytes, Error>>,
+    axum::serve(visit_listener, visit_portal).await.unwrap();
 }
 
 #[debug_handler]
@@ -159,44 +151,38 @@ async fn portal(
     method: Method,
     original_uri: OriginalUri,
     headers: HeaderMap,
-    body: Body,
+    req: axum::http::Request<Body>,
 ) -> Response {
     // FIXME: How to judge if has body or not
     // Get should have no body but not required
-    info!("size lower bound: {}", body.size_hint().lower());
-    let has_body = body.size_hint().lower() > 0;
-    info!("Has body? {}", has_body);
+    let http_ver = req.version();
+    debug!("Http version {:?}", http_ver);
+    let body = req.into_body();
+    let has_body = judge_has_body_from_header_http_1(&headers) || !body.is_end_stream();
+
     let mut body_data_stream = body.into_data_stream();
     let mut boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, Error>>;
 
     let path = original_uri.path().to_string();
     let route = DEFAULT_ROUTE_RESOLVER.resolve(&app_state.read().await.route_to_socket, path.clone());
     let expected_err = CrankerRouterException::new("No router socket available".to_string());
-    debug!("1");
+
     match app_state.read().await.route_to_socket.get_mut(&route) {
         None => {
-            debug!("2");
             return expected_err.clone().into_response();
         }
         Some(mut v) => {
             match v.value_mut().pop_front() {
                 None => {
-                    debug!("3");
                     return expected_err.clone().into_response();
                 }
                 Some(mut am_rs) => {
-                    debug!("4");
                     let mut opt_body = None;
                     if has_body {
-                        debug!("5");
                         let (mut pipe_tx, mut pipe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, Error>>();
                         opt_body = Some(pipe_rx);
-                        // tok
                         tokio::spawn(pipe_body_data_stream_to_a_mpsc_sender(boxed_stream, pipe_tx));
-                    } else {
-                        debug!("6");
                     }
-
                     match am_rs.write().await.on_client_req(
                         method,
                         original_uri.path_and_query(),
@@ -204,11 +190,9 @@ async fn portal(
                         opt_body,
                     ).await {
                         Ok(res) => {
-                            debug!("7");
                             return res;
                         }
                         Err(e) => {
-                            debug!("8");
                             return e.into_response();
                         }
                     }
@@ -216,11 +200,20 @@ async fn portal(
             }
         }
     };
-    Response::new(Body::new("hi there".to_string()))
+}
+
+fn judge_has_body_from_header_http_1(headers: &HeaderMap) -> bool {
+    if let Some(content_length) = headers.get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| i64::from_str(v).ok())
+    {
+        return content_length > 0;
+    }
+    headers.contains_key(http::header::TRANSFER_ENCODING)
 }
 
 async fn pipe_body_data_stream_to_a_mpsc_sender(mut stream: BoxStream<'_, Result<Bytes, Error>>,
-                                                mut sender: tokio::sync::mpsc::UnboundedSender<Result<Bytes, Error>>
+                                                mut sender: UnboundedSender<Result<Bytes, Error>>,
 ) -> Result<(), CrankerRouterException>
 {
     while let Some(frag) = stream.next().await {
@@ -247,27 +240,11 @@ async fn cranker_register_handler(
     headers: HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     req: Request<Body>,
-    // ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
-    info!("ws : {:?}", ws);
-    info!("req : {:?}", req);
-    info!("params : {:?}", params);
-    info!("headers : {:?}", headers);
-    info!("ext_map : {:?}", ext_map);
     let route = ext_map.get(&"route".to_string()).unwrap();
     let domain = ext_map.get(&"domain".to_string()).unwrap();
-    info!("domain from ext: {:?}", domain);
-    info!("route from ext: {:?}", route);
-
-    // let connector_id_set = app_state.route_to_connector_id_map.get(&"route".to_string());
-    //
-    // assert!(connector_id_set.is_some());
-    //
-    // for i in connector_id_set.unwrap().iter() {
-    //     info!("connector id from state: {:?}",i.to_string())
-    // }
-
-
+    info!("ext map: {:?}", ext_map);
+    info!("ver neg: {:?}", ver_neg);
     // Extract component name and connector id
     let connector_id = params.get("connectorId")
         .map(|s| s.to_string())
@@ -317,21 +294,9 @@ async fn take_and_store_websocket(wss: WebSocket,
     info!("Connector registered! connector_id: {}", connector_id.clone());
     let (mut from_ws_to_rs_tx, mut from_ws_to_rs_rx): (UnboundedSender<Message>, UnboundedReceiver<Message>) = unbounded_channel::<Message>();
     let (mut from_rs_to_ws_tx, mut from_rs_to_ws_rx) = unbounded_channel::<Message>();
-    // tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-    // let a: Arc<Box<u64>> = Arc::new(Box::new(64));
-    debug!("Going to split wss");
     let (mut wss_tx, mut wss_rx) = wss.split();
-    debug!("going to gen router socket id");
     let router_socket_id = Uuid::new_v4().to_string();
-    match state.try_read() {
-        Ok(_) => debug!("state is not locking"),
-        Err(_) => debug!("!!! state now is locking !!!")
-    }
-    {
-        info!("before registration, state route size: {}", state.read().await.route_to_socket.len());
-    }
     let (err_chan_tx, err_chan_rx) = unbounded_channel::<CrankerRouterException>();
-
     let rs = Arc::new(RwLock::new(RouterSocketV1::new(
         route.clone(),
         component_name.clone(),
@@ -342,8 +307,6 @@ async fn take_and_store_websocket(wss: WebSocket,
         err_chan_tx,
         addr,
     )));
-
-
     {
         state.write().await
             .route_to_socket
@@ -352,50 +315,45 @@ async fn take_and_store_websocket(wss: WebSocket,
             .push_back(rs.clone());
     }
     {
-        match state.try_read() {
-            Ok(_) => {}
-            Err(_) => debug!("!!! state is still locking after inserting something !!!")
-        }
-    }
-    {
-        info!("after registration, state route size: {}", state.read().await.route_to_socket.len());
-    }
-
-    {
         // Prepare for some counter
         let write_guard = state.write().await;
-        write_guard.counter.compare_exchange_weak(write_guard.counter.load(SeqCst), write_guard.counter.load(SeqCst) + 1, SeqCst, SeqCst);
+        let _ = write_guard.counter.fetch_add(1, SeqCst);
+    }
+    websocket_exchange(from_rs_to_ws_rx, from_ws_to_rs_tx, wss_tx, wss_rx).await;
+}
+
+async fn websocket_exchange(
+    mut from_rs_to_ws_rx: UnboundedReceiver<Message>,
+    mut from_ws_to_rs_tx: UnboundedSender<Message>,
+    mut wss_tx: SplitSink<WebSocket, Message>,
+    mut wss_rx: SplitStream<WebSocket>,
+) {
+    debug!("Listening on connector ws message!");
+    let (mut notify_ch_close_tx, mut notify_ch_close_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let mut notify_ch_close_tx_clone = notify_ch_close_tx.clone();
+    while let Some(from_rs) = from_rs_to_ws_rx.recv().await {
+        match from_rs {
+            Message::Text(txt) => {
+                let _ = wss_tx.send(Message::Text(txt)).await
+                    .map_err(|e| {
+                        let _ = from_ws_to_rs_tx.send(Message::Close(None));
+                        let _ = notify_ch_close_tx.send(());
+                    });
+            }
+            Message::Binary(bin) => {
+                let _ = wss_tx.send(Message::Binary(bin)).await
+                    .map_err(|e| {
+                        let _ = from_ws_to_rs_tx.send(Message::Close(None));
+                        let _ = notify_ch_close_tx.send(());
+                    });
+            }
+            Message::Close(_) => {}
+            _ => {}
+        }
     }
 
-    {
-        debug!("Listening on connector ws message!");
-        let (mut notify_ch_close_tx, mut notify_ch_close_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let mut notify_ch_close_tx_clone = notify_ch_close_tx.clone();
-
-
-        while let Some(from_rs) = from_rs_to_ws_rx.recv().await {
-            match from_rs {
-                Message::Text(txt) => {
-                    let _ = wss_tx.send(Message::Text(txt)).await
-                        .map_err(|e| {
-                            let _ = from_ws_to_rs_tx.send(Message::Close(None));
-                            let _ = notify_ch_close_tx.send(());
-                        });
-                }
-                Message::Binary(bin) => {
-                    let _ = wss_tx.send(Message::Binary(bin)).await
-                        .map_err(|e| {
-                            let _ = from_ws_to_rs_tx.send(Message::Close(None));
-                            let _ = notify_ch_close_tx.send(());
-                        });
-                }
-                Message::Close(_) => {}
-                _ => {}
-            }
-        }
-
-        loop {
-            tokio::select! {
+    loop {
+        tokio::select! {
                 Some(should_stop) = notify_ch_close_rx.recv() => {
                     break;
                 }
@@ -418,16 +376,14 @@ async fn take_and_store_websocket(wss: WebSocket,
                     }
                 }
             }
-        }
-        // stop receiving from router socket
-        from_rs_to_ws_rx.close();
-        // drop receiver from router socket
-        drop(from_rs_to_ws_rx);
-        // drop sender to router socket
-        drop(from_ws_to_rs_tx);
-
-        debug!("END OF Listening on connector ws message!");
     }
+    // stop receiving from router socket
+    from_rs_to_ws_rx.close();
+    // drop receiver from router socket
+    drop(from_rs_to_ws_rx);
+    // drop sender to router socket
+    drop(from_ws_to_rs_tx);
+    debug!("END OF Listening on connector ws message!");
 }
 
 async fn pipe_msg_from_wss_to_router_socket(
@@ -508,7 +464,6 @@ async fn validate_route_domain_and_cranker_version(
     let dealt_version: &'static str;
     match extract_cranker_version(&SUPPORTED_CRANKER_VERSION, &headers) {
         Ok(v) => {
-            debug!("Version negotiated: {}", v);
             dealt_version = v;
         }
         Err(err) => {
@@ -523,22 +478,14 @@ async fn validate_route_domain_and_cranker_version(
     let mut ext_hashmap = HashMap::<String, String>::new();
     ext_hashmap.insert("route".to_string(), route.to_string());
     ext_hashmap.insert("domain".to_string(), domain.to_string());
-    // extension_test.insert("version".to_string(), dealt_version);
     let ext_ver_neg = VersionNegotiate { dealt: dealt_version };
     request.extensions_mut().insert(ext_ver_neg);
 
-    // app_state.route_to_connector_id_map
-    //     .entry("route".to_string())
-    //     .or_insert(DashSet::<String>::new())
-    //     .insert(Uuid::new_v4().to_string());
     request.extensions_mut().insert(ext_hashmap);
-    info!("Domain: {:?}",domain);
-    info!("Route: {:?}",route);
 
     let response = next.run(request).await;
 
     // do something with `response`...
-
     response
 }
 
@@ -564,7 +511,6 @@ fn extract_cranker_version(
                 let trimmed = v.trim().replace("cranker_", "");
                 let trimmed = trimmed.as_str();
                 if supported_cranker_version_set.contains_key(trimmed) {
-                    debug!("selected in sub_protocols: {}", trimmed);
                     let res: &'static str = *supported_cranker_version_set.get(trimmed).unwrap();
                     return Ok(res);
                 }
@@ -577,7 +523,6 @@ fn extract_cranker_version(
         Some(lph) => {
             let lp = lph.to_str().ok().unwrap();
             if supported_cranker_version_set.contains_key(lp) {
-                debug!("selected in legacy protocol header: {}", lp);
                 let res: &'static str = *supported_cranker_version_set.get(lp).unwrap();
                 return Ok(res);
             }
