@@ -28,7 +28,7 @@ use log::LevelFilter::Debug;
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tower::Service;
 use tower_http::limit;
 use uuid::Uuid;
@@ -103,7 +103,7 @@ pub struct CrankerRouterState {
     route_to_socket: RwLock<DashMap<String, VecDeque<Arc<RwLock<dyn RouterSocket>>>>>,
 
     waiting_socket_key_generator: AtomicU64,
-    waiting_socket_hashmap: DashMap<u64, WorkaroundRustcAsyncTraitBug>,
+    waiting_socket_hashmap: RwLock<DashMap<u64, WorkaroundRustcAsyncTraitBug>>,
 }
 
 pub type TSCRState = Arc<CrankerRouterState>;
@@ -149,7 +149,7 @@ impl CrankerRouter {
                 counter: AtomicU64::new(0),
                 route_to_socket: RwLock::new(DashMap::new()),
                 waiting_socket_key_generator: AtomicU64::new(0),
-                waiting_socket_hashmap: DashMap::new(),
+                waiting_socket_hashmap: RwLock::new(DashMap::new()),
             })
         }
     }
@@ -244,13 +244,24 @@ impl CrankerRouter {
         };
         // return expected_err.into_response();
 
+        debug!("Waiting for socket from waiting_socket_hashmap");
+
         // No socket queue / socket available immediately
         let (mut waiting_task_tx, mut waiting_task_rx) = tokio::sync::mpsc::channel::<Arc<RwLock<dyn RouterSocket>>>(1);
         let waiting_task_id = app_state.waiting_socket_key_generator.fetch_add(1, SeqCst);
-        app_state.waiting_socket_hashmap.insert(waiting_task_id, WorkaroundRustcAsyncTraitBug(waiting_task_tx));
+        {
+            app_state.waiting_socket_hashmap.write().await.insert(waiting_task_id, WorkaroundRustcAsyncTraitBug(waiting_task_tx));
+        }
+        debug!("After inserting task");
         let timeout = tokio::time::timeout(Duration::from_secs(5), waiting_task_rx.recv()).await;
         match timeout {
             Ok(Some(socket)) => {
+
+                waiting_task_rx.close();
+                {
+                    app_state.waiting_socket_hashmap.write().await.remove(&waiting_task_id);
+                }
+
                 let mut opt_body = None;
                 if has_body {
                     let (mut pipe_tx, mut pipe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, Error>>();
@@ -272,8 +283,12 @@ impl CrankerRouter {
                 }
             }
             _ => {
+                debug!("Desperate but nothing get from waiting.");
                 waiting_task_rx.close();
-                app_state.waiting_socket_hashmap.remove(&waiting_task_id);
+                {
+                    app_state.waiting_socket_hashmap.write().await.remove(&waiting_task_id);
+                }
+                debug!("After removing the task id");
                 return expected_err.into_response();
             }
         };
@@ -402,23 +417,27 @@ async fn take_and_store_websocket(wss: WebSocket,
     //         }
     //     }
 
-    if let Some(task) = state.waiting_socket_hashmap.iter().next() {
+    if let Some(task) = state.waiting_socket_hashmap.read().await.iter().next() {
         debug!("Found task waiting for socket");
         let id = task.key();
         debug!("before sending to receiver");
         let _ = task.value().0.send(rs.clone()).await;
         debug!("after sending to receiver");
-       state.waiting_socket_hashmap.remove(id);
-    } else
-    {
+        // {
+        //     state.waiting_socket_hashmap.write().await.remove(id);
+        // }
+        // debug!("Removed task id after sending to receiver");
+    } else {
         debug!("No task waiting. Sending to vecdeq");
-        state
-            .route_to_socket
-            .write()
-            .await
-            .entry(route.clone())
-            .or_insert(VecDeque::new())
-            .push_back(rs.clone());
+        {
+            state
+                .route_to_socket
+                .write()
+                .await
+                .entry(route.clone())
+                .or_insert(VecDeque::new())
+                .push_back(rs.clone());
+        }
         debug!("After sending to vecdeq. lock should released");
     }
     {
