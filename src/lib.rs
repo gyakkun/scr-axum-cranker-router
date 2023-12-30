@@ -19,6 +19,7 @@ use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use bytes::Bytes;
+use dashmap::DashMap;
 use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
 use futures::stream::{BoxStream, SplitSink, SplitStream};
 use lazy_static::lazy_static;
@@ -26,8 +27,8 @@ use log::{debug, error, info, warn};
 use log::LevelFilter::Debug;
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, RwLock};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::RwLock;
 use tower::Service;
 use tower_http::limit;
 use uuid::Uuid;
@@ -99,10 +100,10 @@ struct WorkaroundRustcAsyncTraitBug(tokio::sync::mpsc::Sender<Arc<RwLock<dyn Rou
 
 pub struct CrankerRouterState {
     counter: AtomicU64,
-    route_to_socket: RwLock<HashMap<String, Mutex<VecDeque<Arc<RwLock<dyn RouterSocket>>>>>>,
+    route_to_socket: RwLock<DashMap<String, VecDeque<Arc<RwLock<dyn RouterSocket>>>>>,
 
     waiting_socket_key_generator: AtomicU64,
-    waiting_socket_hashmap: RwLock<HashMap<u64, WorkaroundRustcAsyncTraitBug>>,
+    waiting_socket_hashmap: RwLock<DashMap<u64, WorkaroundRustcAsyncTraitBug>>,
 }
 
 pub type TSCRState = Arc<CrankerRouterState>;
@@ -146,9 +147,9 @@ impl CrankerRouter {
         Self {
             state: Arc::new(CrankerRouterState {
                 counter: AtomicU64::new(0),
-                route_to_socket: RwLock::new(HashMap::new()),
+                route_to_socket: RwLock::new(DashMap::new()),
                 waiting_socket_key_generator: AtomicU64::new(0),
-                waiting_socket_hashmap: RwLock::new(HashMap::new()),
+                waiting_socket_hashmap: RwLock::new(DashMap::new()),
             })
         }
     }
@@ -206,7 +207,7 @@ impl CrankerRouter {
                 // should_wait = true;
             }
             Some(mut v) => {
-                match v.lock().await.pop_front() {
+                match v.value_mut().pop_front() {
                     None => {
                         debug!("No socket available!");
                         // should_wait = true;
@@ -418,9 +419,9 @@ async fn take_and_store_websocket(wss: WebSocket,
 
     if let Some(task) = state.waiting_socket_hashmap.read().await.iter().next() {
         debug!("Found task waiting for socket");
-        let id = task.0;
+        let id = task.key();
         debug!("before sending to receiver");
-        let _ = task.1.0.send(rs.clone()).await;
+        let _ = task.value().0.send(rs.clone()).await;
         debug!("after sending to receiver");
         // {
         //     state.waiting_socket_hashmap.write().await.remove(id);
@@ -434,9 +435,7 @@ async fn take_and_store_websocket(wss: WebSocket,
                 .write()
                 .await
                 .entry(route.clone())
-                .or_insert(Mutex::new(VecDeque::new()))
-                .lock()
-                .await
+                .or_insert(VecDeque::new())
                 .push_back(rs.clone());
         }
         debug!("After sending to vecdeq. lock should released");
