@@ -1,16 +1,16 @@
 use std::fmt::Display;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
 use std::sync::atomic::Ordering::SeqCst;
 
 use axum::{async_trait, BoxError, Error};
 use axum::body::Body;
 use axum::extract::ws::{CloseFrame, Message};
-use axum::http::{HeaderMap, Method, Response, response, StatusCode};
+use axum::http::{HeaderMap, Method, Response, StatusCode};
 use axum::http::uri::PathAndQuery;
 use bytes::Bytes;
 use futures::{SinkExt, TryFutureExt};
-use log::{debug, error};
+use log::{debug, error, info};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -26,8 +26,8 @@ const HEADER_MAX_SIZE: usize = 64 * 1024; // 64KBytes
 pub trait WssMessageListener: Send + Sync {
     // this should be done in on_upgrade, so ignore it
     // fn on_connect(&self, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;
-    async fn on_text(&mut self, text_msg: String) -> Result<(), CrankerRouterException>;
-    async fn on_binary(&mut self, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException>;
+    async fn on_text(&self, text_msg: String) -> Result<(), CrankerRouterException>;
+    async fn on_binary(&self, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException>;
     async fn on_ping(&self, ping_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
         let decoded = std::str::from_utf8(ping_msg.as_slice()).unwrap_or("INVALID PONG MSG");
         debug!("pinged: {}", decoded);
@@ -40,7 +40,7 @@ pub trait WssMessageListener: Send + Sync {
     }
     async fn on_close(&self, close_msg: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException>;
 
-    async fn on_error(&self, err: CrankerRouterException) -> Result<(), CrankerRouterException> {
+    fn on_error(&self, err: CrankerRouterException) -> Result<(), CrankerRouterException> {
         error!("error: {:?}", err); // FIXME: Swallow the error by default
         Ok(())
     }
@@ -64,6 +64,7 @@ pub trait RouterSocket: Send + Sync {
     ) -> Result<(), CrankerRouterException>;
 
     async fn on_target_res_error(&self, reason: CrankerRouterException);
+
 }
 
 
@@ -216,12 +217,12 @@ impl RSv1WssExchange {
 
 #[async_trait]
 impl WssMessageListener for RSv1WssExchange {
-    async fn on_text(&mut self, txt: String) -> Result<(), CrankerRouterException> {
+    async fn on_text(&self, txt: String) -> Result<(), CrankerRouterException> {
         debug!("Text coming! {}", txt);
         self.target_res_header_received.store(true, SeqCst);
         if self.target_res_body_received.load(SeqCst) {
             let failed_reason = "res body already received but still receiving text message which is not expected!".to_string();
-            self.on_error(CrankerRouterException::new(failed_reason.clone())).await;
+            self.on_error(CrankerRouterException::new(failed_reason.clone()));
             return Err(CrankerRouterException::new(failed_reason));
             // self.on_target_res_error(failed_reason.clone());
             // return Err(CrankerRouterException::new(failed_reason));
@@ -230,7 +231,7 @@ impl WssMessageListener for RSv1WssExchange {
         if text_len + self.header_string_buf.read().await.len() > HEADER_MAX_SIZE {
             let failed_reason = format!("Header too large after appending: before {} bytes, after {} bytes, max {} bytes",
                                         text_len, self.header_string_buf.read().await.len(), HEADER_MAX_SIZE);
-            self.on_error(CrankerRouterException::new(failed_reason.clone()).into()).await;
+            self.on_error(CrankerRouterException::new(failed_reason.clone()).into());
             // self.on_target_res_error(failed_reason.clone());
             return Err(CrankerRouterException::new(failed_reason));
         }
@@ -238,11 +239,11 @@ impl WssMessageListener for RSv1WssExchange {
         Ok(())
     }
 
-    async fn on_binary(&mut self, bin: Vec<u8>) -> Result<(), CrankerRouterException> {
+    async fn on_binary(&self, bin: Vec<u8>) -> Result<(), CrankerRouterException> {
         debug!("binary coming! {}", bin.len());
         if !self.target_res_header_received.load(SeqCst) {
             let failed_reason = "res header not received yet but binary comes first which is not expected!".to_string();
-            self.on_error(CrankerRouterException::new(failed_reason.clone()).into()).await;
+            let _ = self.on_error(CrankerRouterException::new(failed_reason.clone()).into());
             return Err(CrankerRouterException::new(failed_reason));
         }
         // FIXME: Seems the text message always comes with one frame / one message
@@ -263,7 +264,7 @@ impl WssMessageListener for RSv1WssExchange {
         Ok(())
     }
 
-    async fn on_error(&self, err: CrankerRouterException) -> Result<(), CrankerRouterException> {
+    fn on_error(&self, err: CrankerRouterException) -> Result<(), CrankerRouterException> {
         self.err_chan_to_ws.send(err)
             .map_err(|se| CrankerRouterException::new(format!(
                 "failed to send error to ws: {:?}", se
@@ -306,7 +307,6 @@ impl RouterSocket for RouterSocketV1 {
 
         self.wss_exchange.send_text(cranker_req.clone()).await?;
 
-
         match opt_body { // req body
             None => { /*no body*/ }
             Some(mut body) => {
@@ -327,24 +327,23 @@ impl RouterSocket for RouterSocketV1 {
 
         let (mut res_body_chan_tx, mut res_body_chan_rx)
             = mpsc::unbounded_channel::<Result<Bytes, CrankerRouterException>>();
-        // Should i spawn it somewhere earlier?
+        // Should i spawn it somewhere earlier? yes you should
         let mut cranker_res: Option<CrankerProtocolResponse> = None;
-        // let mut res_builder: Option<response::Builder> = None;
+        let msg_counter = AtomicUsize::new(0);
         while let Some(msg) = self.wss_exchange.from_ws_to_rs_rx.recv().await {
+            msg_counter.fetch_add(1, SeqCst);
             match msg {
                 Message::Text(txt) => {
                     // FIXME: LARGE header handling, chunking handling
+                    // self.wss_exchange.on_text(txt);
                     cranker_res = cranker_res.or(CrankerProtocolResponse::new(txt).ok());
-                    // if cranker_res.is_some() {
-                    //    res_builder = cranker_res.unwrap().build().ok();
-                    // }
                 }
                 Message::Binary(bin) => {
                     if cranker_res.is_none() {
                         let failed_reason = "receiving binary from wss before header arrives!".to_string();
                         error!("{}", failed_reason);
                         let err = CrankerRouterException::new(failed_reason);
-                        let send_err_err = self.wss_exchange.on_error(err.clone()).await;
+                        let send_err_err = self.wss_exchange.on_error(err.clone());
                         let _ = res_body_chan_tx.send(Err(err));
                         if send_err_err.is_err() {
                             let _ = res_body_chan_tx.send(Err(send_err_err.err().unwrap()));
@@ -358,12 +357,13 @@ impl RouterSocket for RouterSocketV1 {
                     }
                 }
                 Message::Close(_) => {
-                    let _ = res_body_chan_tx.closed();
+                    drop(res_body_chan_tx);
                     break;
                 }
                 _ => {}
             }
         }
+        info!("Received {} messages in router_socket_id={}", msg_counter.load(SeqCst), self.router_socket_id);
         if cranker_res.is_none() {
             return Ok(Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR).body(Body::new(
                 "failed to build response from protocol response".to_string()
@@ -401,4 +401,5 @@ impl RouterSocket for RouterSocketV1 {
     async fn on_client_req_error(&self, err: CrankerRouterException) {
         let _ = self.err_chan_to_wss.send(err);
     }
+
 }

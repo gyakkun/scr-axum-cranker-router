@@ -4,19 +4,19 @@ use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicI64, AtomicUsize};
 use std::sync::atomic::Ordering::SeqCst;
 
 use axum::{BoxError, Error, Extension, http, Router, ServiceExt};
 use axum::body::{Body, HttpBody};
 use axum::extract::{ConnectInfo, OriginalUri, Query, State, WebSocketUpgrade};
+use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
 use axum::extract::ws::{Message, WebSocket};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use axum_macros::debug_handler;
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
@@ -28,6 +28,7 @@ use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::RwLock;
+use tower::Service;
 use tower_http::limit;
 use uuid::Uuid;
 
@@ -51,7 +52,7 @@ pub const _VER_3_0: &str = "3.0";
 pub const CRANKER_V_1_0: &str = "cranker_1.0";
 pub const CRANKER_V_3_0: &str = "cranker_3.0";
 
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 struct VersionNegotiate {
     dealt: &'static str,
 }
@@ -94,12 +95,17 @@ lazy_static! {
 }
 
 // Our shared state
-struct AppState {
+pub struct CrankerRouterState {
     counter: AtomicI64,
     route_to_socket: DashMap<String, VecDeque<Arc<RwLock<dyn RouterSocket>>>>,
 }
 
-type TSState = Arc<RwLock<AppState>>;
+pub type TSCRState = Arc<RwLock<CrankerRouterState>>;
+
+pub struct CrankerRouter {
+    state: TSCRState,
+}
+
 
 #[tokio::test]
 async fn main() {
@@ -110,26 +116,7 @@ async fn main() {
         .unwrap();
 
 
-    let app_state = Arc::new(RwLock::new(AppState {
-        counter: AtomicI64::new(0),
-        route_to_socket: DashMap::new(),
-    }));
-    let registration_portal = Router::new()
-        .route("/register", any(cranker_register_handler)
-            .layer(from_fn_with_state(app_state.clone(), validate_route_domain_and_cranker_version)),
-        )
-        .route("/register/", any(cranker_register_handler)
-            .layer(from_fn_with_state(app_state.clone(), validate_route_domain_and_cranker_version)),
-        )
-        .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
-        .with_state(app_state.clone())
-        .into_make_service_with_connect_info::<SocketAddr>();
-
-    let visit_portal = Router::new()
-        // .route("/*any", get(|| async {}));
-        .route("/*any", any(portal))
-        .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
-        .with_state(app_state.clone());
+    let cranker_router = CrankerRouter::new();
 
     let reg_listener = TcpListener::bind("127.0.0.1:3000")
         .await
@@ -138,69 +125,159 @@ async fn main() {
         .await
         .unwrap();
 
+    let reg_router = cranker_router.registration_axum_router();
+    let visit_router = cranker_router.visit_portal_axum_router();
+
     tokio::spawn(async {
-        axum::serve(reg_listener, registration_portal).await.unwrap()
+        axum::serve(reg_listener, reg_router).await.unwrap()
     });
 
-    axum::serve(visit_listener, visit_portal).await.unwrap();
+    axum::serve(visit_listener, visit_router).await.unwrap();
 }
 
-#[debug_handler]
-async fn portal(
-    State(app_state): State<TSState>,
-    method: Method,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-    req: axum::http::Request<Body>,
-) -> Response {
-    // FIXME: How to judge if has body or not
-    // Get should have no body but not required
-    let http_ver = req.version();
-    debug!("Http version {:?}", http_ver);
-    let body = req.into_body();
-    let has_body = judge_has_body_from_header_http_1(&headers) || !body.is_end_stream();
 
-    let mut body_data_stream = body.into_data_stream();
-    let mut boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, Error>>;
-
-    let path = original_uri.path().to_string();
-    let route = DEFAULT_ROUTE_RESOLVER.resolve(&app_state.read().await.route_to_socket, path.clone());
-    let expected_err = CrankerRouterException::new("No router socket available".to_string());
-
-    match app_state.read().await.route_to_socket.get_mut(&route) {
-        None => {
-            return expected_err.clone().into_response();
+impl CrankerRouter {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(RwLock::new(CrankerRouterState {
+                counter: AtomicI64::new(0),
+                route_to_socket: DashMap::new(),
+            }))
         }
-        Some(mut v) => {
-            match v.value_mut().pop_front() {
-                None => {
-                    return expected_err.clone().into_response();
-                }
-                Some(mut am_rs) => {
-                    let mut opt_body = None;
-                    if has_body {
-                        let (mut pipe_tx, mut pipe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, Error>>();
-                        opt_body = Some(pipe_rx);
-                        tokio::spawn(pipe_body_data_stream_to_a_mpsc_sender(boxed_stream, pipe_tx));
+    }
+
+    pub fn registration_axum_router(&self) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
+        let res = Router::new()
+            .route("/register", any(CrankerRouter::register_handler)
+                .layer(from_fn_with_state(self.state(), validate_route_domain_and_cranker_version)),
+            )
+            .route("/register/", any(CrankerRouter::register_handler)
+                .layer(from_fn_with_state(self.state(), validate_route_domain_and_cranker_version)),
+            )
+            .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
+            .with_state(self.state())
+            .into_make_service_with_connect_info::<SocketAddr>();
+        return res;
+    }
+
+    pub fn visit_portal_axum_router(&self) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
+        let res = Router::new()
+            .route("/*any", any(CrankerRouter::visit_portal))
+            .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
+            .with_state(self.state())
+            .into_make_service_with_connect_info::<SocketAddr>();
+        return res;
+    }
+    pub fn state(&self) -> TSCRState { self.state.clone() }
+
+    // #[debug_handler]
+    pub async fn visit_portal(
+        State(app_state): State<TSCRState>,
+        method: Method,
+        original_uri: OriginalUri,
+        headers: HeaderMap,
+        req: axum::http::Request<Body>,
+    ) -> Response
+    {
+        // FIXME: How to judge if has body or not
+        // Get should have no body but not required
+        let http_ver = req.version();
+        debug!("Http version {:?}", http_ver);
+        let body = req.into_body();
+        let has_body = judge_has_body_from_header_http_1(&headers) || !body.is_end_stream();
+
+        let mut body_data_stream = body.into_data_stream();
+        let mut boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, Error>>;
+
+        let path = original_uri.path().to_string();
+        let route = DEFAULT_ROUTE_RESOLVER.resolve(&app_state.read().await.route_to_socket, path.clone());
+        let expected_err = CrankerRouterException::new("No router socket available".to_string());
+
+        match app_state.read().await.route_to_socket.get_mut(&route) {
+            None => {
+                return expected_err.clone().into_response();
+            }
+            Some(mut v) => {
+                match v.value_mut().pop_front() {
+                    None => {
+                        return expected_err.clone().into_response();
                     }
-                    match am_rs.write().await.on_client_req(
-                        method,
-                        original_uri.path_and_query(),
-                        &headers,
-                        opt_body,
-                    ).await {
-                        Ok(res) => {
-                            return res;
+                    Some(mut am_rs) => {
+                        let mut opt_body = None;
+                        if has_body {
+                            let (mut pipe_tx, mut pipe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, Error>>();
+                            opt_body = Some(pipe_rx);
+                            tokio::spawn(pipe_body_data_stream_to_a_mpsc_sender(boxed_stream, pipe_tx));
                         }
-                        Err(e) => {
-                            return e.into_response();
+                        match am_rs.write().await.on_client_req(
+                            method,
+                            original_uri.path_and_query(),
+                            &headers,
+                            opt_body,
+                        ).await {
+                            Ok(res) => {
+                                return res;
+                            }
+                            Err(e) => {
+                                return e.into_response();
+                            }
                         }
                     }
                 }
             }
-        }
-    };
+        };
+    }
+
+    // #[debug_handler]
+    pub async fn register_handler(
+        State(app_state): State<TSCRState>,
+        ws: WebSocketUpgrade,
+        Extension(ext_map): Extension<HashMap<String, String>>,
+        Extension(ver_neg): Extension<VersionNegotiate>,
+        Query(params): Query<HashMap<String, String>>,
+        headers: HeaderMap,
+        ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ) -> impl IntoResponse
+    {
+        let route = ext_map.get(&"route".to_string()).unwrap();
+        let domain = ext_map.get(&"domain".to_string()).unwrap();
+        debug!("ext map: {:?}", ext_map);
+        debug!("ver neg: {:?}", ver_neg);
+        // Extract component name and connector id
+        let connector_id = params.get("connectorInstanceID")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                let uuid = Uuid::new_v4().to_string();
+                // TODO: Maybe we need to check if the connector id already exists here or not
+                warn!("Connector id is not specified. Generating a random uuid for it: {}", uuid);
+                uuid
+            });
+
+        let component_name = params.get("componentName")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                let sub_uuid = connector_id.chars().take(5).collect::<String>();
+                warn!("Component name is not set. Name it as unknown-{}.",sub_uuid);
+                // TODO: What's the best practice of a SAFE and NEVER-FAIL substring function in rust?
+                "unknown-".to_string() + sub_uuid.as_str()
+            });
+
+        // TODO: Error handling - what if all these fields not exists?
+        let domain = ext_map.get("domain").unwrap().to_string();
+        let route = ext_map.get("route").unwrap().to_owned();
+
+        debug!("connector id : {:?}", connector_id);
+        debug!("component name : {:?}", component_name);
+
+        ws
+            .protocols([ver_neg.dealt])
+            .on_upgrade(move |socket| take_and_store_websocket(
+                socket, app_state.clone(), connector_id, component_name, ver_neg.dealt.to_string(), domain, route,
+                addr,
+            ))
+    }
 }
+
 
 fn judge_has_body_from_header_http_1(headers: &HeaderMap) -> bool {
     if let Some(content_length) = headers.get(http::header::CONTENT_LENGTH)
@@ -230,60 +307,12 @@ async fn pipe_body_data_stream_to_a_mpsc_sender(mut stream: BoxStream<'_, Result
     Ok(())
 }
 
-#[debug_handler]
-async fn cranker_register_handler(
-    State(app_state): State<TSState>,
-    ws: WebSocketUpgrade,
-    Extension(ext_map): Extension<HashMap<String, String>>,
-    Extension(ver_neg): Extension<VersionNegotiate>,
-    Query(params): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    req: Request<Body>,
-) -> impl IntoResponse {
-    let route = ext_map.get(&"route".to_string()).unwrap();
-    let domain = ext_map.get(&"domain".to_string()).unwrap();
-    info!("ext map: {:?}", ext_map);
-    info!("ver neg: {:?}", ver_neg);
-    // Extract component name and connector id
-    let connector_id = params.get("connectorId")
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            let uuid = Uuid::new_v4().to_string();
-            // TODO: Maybe we need to check if the connector id already exists here or not
-            warn!("Connector id is not specified. Generating a random uuid for it: {}", uuid);
-            uuid
-        });
-
-    let component_name = params.get("componentName")
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            let sub_uuid = connector_id.chars().take(5).collect::<String>();
-            warn!("Component name is not set. Name it as unknown-{}.",sub_uuid);
-            // TODO: What's the best practice of a SAFE and NEVER-FAIL substring function in rust?
-            "unknown-".to_string() + sub_uuid.as_str()
-        });
-
-    // TODO: Error handling - what if all these fields not exists?
-    let domain = ext_map.get("domain").unwrap().to_string();
-    let route = ext_map.get("route").unwrap().to_owned();
-
-    info!("connector id : {:?}", connector_id);
-    info!("component name : {:?}", component_name);
-
-    ws
-        .protocols([ver_neg.dealt])
-        .on_upgrade(move |socket| take_and_store_websocket(
-            socket, app_state.clone(), connector_id, component_name, ver_neg.dealt.to_string(), domain, route,
-            addr,
-        ))
-}
 
 // This function deals with a single websocket connection, i.e., a single
 // connected client / user, for which we will spawn two independent tasks (for
 // receiving / sending chat messages).
 async fn take_and_store_websocket(wss: WebSocket,
-                                  state: TSState,
+                                  state: TSCRState,
                                   connector_id: String,
                                   component_name: String,
                                   cranker_version: String,
@@ -291,7 +320,6 @@ async fn take_and_store_websocket(wss: WebSocket,
                                   route: String,
                                   addr: SocketAddr,
 ) {
-    info!("Connector registered! connector_id: {}", connector_id.clone());
     let (mut from_ws_to_rs_tx, mut from_ws_to_rs_rx): (UnboundedSender<Message>, UnboundedReceiver<Message>) = unbounded_channel::<Message>();
     let (mut from_rs_to_ws_tx, mut from_rs_to_ws_rx) = unbounded_channel::<Message>();
     let (mut wss_tx, mut wss_rx) = wss.split();
@@ -307,6 +335,7 @@ async fn take_and_store_websocket(wss: WebSocket,
         err_chan_tx,
         addr,
     )));
+    info!("Connector registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
     {
         state.write().await
             .route_to_socket
@@ -319,31 +348,41 @@ async fn take_and_store_websocket(wss: WebSocket,
         let write_guard = state.write().await;
         let _ = write_guard.counter.fetch_add(1, SeqCst);
     }
-    websocket_exchange(from_rs_to_ws_rx, from_ws_to_rs_tx, wss_tx, wss_rx, err_chan_rx).await;
+    websocket_exchange(
+        connector_id.clone(), router_socket_id.clone(),
+        from_rs_to_ws_rx, from_ws_to_rs_tx, wss_tx, wss_rx, err_chan_rx
+    ).await;
 }
 
 async fn websocket_exchange(
+    connector_id: String,
+    router_socket_id: String,
     mut from_rs_to_ws_rx: UnboundedReceiver<Message>,
     mut from_ws_to_rs_tx: UnboundedSender<Message>,
     mut wss_tx: SplitSink<WebSocket, Message>,
     mut wss_rx: SplitStream<WebSocket>,
     mut err_chan_from_rs: UnboundedReceiver<CrankerRouterException>,
-) {
+)
+{
     debug!("Listening on connector ws message!");
     let (mut notify_ch_close_tx, mut notify_ch_close_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let mut notify_ch_close_tx_clone = notify_ch_close_tx.clone();
-
+    let msg_counter_lib = AtomicUsize::new(0);
     loop {
         tokio::select! {
                 Some(should_stop) = notify_ch_close_rx.recv() => {
+                    info!("should stop looping now! router_socket_id: {}", router_socket_id);
                     break;
                 }
                 Some(err) = err_chan_from_rs.recv() => {
-                    error!("exception received in websocket_exchange: {:?}", err);
+                    error!(
+                        "exception received in websocket_exchange: {:?}. connector_id: {}, router_socket_id: {}",
+                        err, connector_id, router_socket_id
+                    );
                     notify_ch_close_tx.send(());
                 }
-                Some(from_rs) = from_rs_to_ws_rx.recv() => {
-                    match from_rs {
+                Some(to_ws) = from_rs_to_ws_rx.recv() => {
+                    match to_ws {
                         Message::Text(txt) => {
                             let _ = wss_tx.send(Message::Text(txt)).await
                                 .map_err(|e| {
@@ -358,22 +397,40 @@ async fn websocket_exchange(
                                     let _ = notify_ch_close_tx.send(());
                                 });
                         }
-                        Message::Close(_) => {}
-                        _ => {}
+                        Message::Ping(msg) | Message::Pong(msg) => {
+                            error!("unexpected message comes from rs_to_ws chan: {:?}. connector_id: {}, router_socket_id: {}",
+                                    msg , connector_id, router_socket_id
+                            )
+                        }
+                        Message::Close(msg) => {
+                            error!("unexpected message comes from rs_to_ws chan: {:?}. connector_id: {}, router_socket_id: {}",
+                                    msg , connector_id, router_socket_id
+                            )
+                        }
                     }
                 }
                 from_wss_nullable = wss_rx.next() => {
                     match from_wss_nullable {
                         None => {
-                            warn!("Receive None from wss_rx, seems wss closed!");
+                            warn!(
+                                "Receive None from wss_rx, seems wss closed! connector_id: {}, router_socket_id: {}",
+                                connector_id, router_socket_id
+                            );
                             let _ = from_ws_to_rs_tx.send(Message::Close(None));
                             let _ = notify_ch_close_tx_clone.send(());
                         }
+                        Some(Ok(Message::Ping(_))) => {
+                            let _ = wss_tx.send(Message::Pong(Vec::new()));
+                        }
                         Some(may_err) => {
+                            msg_counter_lib.fetch_add(1,SeqCst);
                             // FIXME: Let's believe cloning these channels equals cloning their inner Arc, which is super cheap!
                             let mut from_ws_to_rs_tx = from_ws_to_rs_tx.clone();
                             let mut notify_ch_close_tx = notify_ch_close_tx.clone();
-                            tokio::spawn(pipe_msg_from_wss_to_router_socket(may_err, from_ws_to_rs_tx, notify_ch_close_tx));
+                            tokio::spawn(pipe_msg_from_wss_to_router_socket(
+                                connector_id.clone(), router_socket_id.clone(),
+                                may_err, from_ws_to_rs_tx, notify_ch_close_tx
+                            ));
                         }
                     }
                 }
@@ -385,17 +442,23 @@ async fn websocket_exchange(
     drop(from_rs_to_ws_rx);
     // drop sender to router socket
     drop(from_ws_to_rs_tx);
-    debug!("END OF Listening on connector ws message!");
+    debug!("END OF Listening on connector ws message! msg count lib: {}", msg_counter_lib.load(SeqCst));
 }
 
 async fn pipe_msg_from_wss_to_router_socket(
+    connector_id: String,
+    router_socket_id: String,
     may_err: Result<Message, Error>,
     from_ws_to_rs_tx: UnboundedSender<Message>,
     notify_ch_close_tx: UnboundedSender<()>,
-) {
+)
+{
     match may_err {
         Err(e) => {
-            error!("Error from wss: {:?}", e);
+            error!(
+                "Error from wss: {:?}. connector_id: {}, router_socket_id: {}",
+                e, connector_id, router_socket_id
+            );
             notify_ch_close_tx.send(());
         }
         Ok(msg) => {
@@ -406,15 +469,18 @@ async fn pipe_msg_from_wss_to_router_socket(
                 Message::Binary(bin) => {
                     from_ws_to_rs_tx.send(Message::Binary(bin));
                 }
-                Message::Ping(_) => debug!("pinged!"),
                 Message::Pong(_) => debug!("ponged!"),
                 Message::Close(opt_close_frame) => {
                     if let Some(clo_fra) = opt_close_frame {
-                        warn!("Closing from connector: code={}, {:?}", clo_fra.code, clo_fra.reason);
+                        warn!(
+                            "Closing from connector: code={}, {:?}. connector_id: {}, router_socket_id: {}",
+                            clo_fra.code, clo_fra.reason, connector_id, router_socket_id
+                        );
                     }
                     from_ws_to_rs_tx.send(Message::Close(None));
                     notify_ch_close_tx.send(());
                 }
+                _ => {}
             }
         }
     }
@@ -423,11 +489,12 @@ async fn pipe_msg_from_wss_to_router_socket(
 /// Domain and route is mandatory so add a middleware to check.
 /// Return BAD_REQUEST if illegal
 async fn validate_route_domain_and_cranker_version(
-    State(appstate): State<TSState>,
+    State(appstate): State<TSCRState>,
     headers: HeaderMap,
     mut request: Request<Body>,
     next: Next,
-) -> Response {
+) -> Response
+{
     info!("We got someone registering. Let's examine its info.");
     // TODO: Put in the catch all method
     let resolved_route = resolve_route(appstate.clone());
@@ -541,7 +608,7 @@ fn extract_cranker_version(
 }
 
 
-fn resolve_route(app_state: TSState) -> String {
+fn resolve_route(app_state: TSCRState) -> String {
     // TODO
     "example".into()
 }
