@@ -368,6 +368,24 @@ async fn websocket_exchange(
     let (mut notify_ch_close_tx, mut notify_ch_close_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let mut notify_ch_close_tx_clone = notify_ch_close_tx.clone();
     let msg_counter_lib = AtomicUsize::new(0);
+
+    // queue the task to wss_tx
+    let (mut wss_send_task_tx, mut wss_send_task_rx) = unbounded_channel::<Message>();
+    {
+        let notify_ch_close_tx = notify_ch_close_tx.clone();
+        let from_ws_to_rs_tx = from_ws_to_rs_tx.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = wss_send_task_rx.recv().await {
+                let _ = wss_tx.send(msg).await.map_err(|e| {
+                    let _ = from_ws_to_rs_tx.send(Message::Close(None));
+                    let _ = notify_ch_close_tx.send(());
+                });
+            }
+            drop(notify_ch_close_tx);
+            drop(from_ws_to_rs_tx);
+        });
+    }
+
     loop {
         tokio::select! {
                 Some(should_stop) = notify_ch_close_rx.recv() => {
@@ -384,18 +402,10 @@ async fn websocket_exchange(
                 Some(to_ws) = from_rs_to_ws_rx.recv() => {
                     match to_ws {
                         Message::Text(txt) => {
-                            let _ = wss_tx.send(Message::Text(txt)).await
-                                .map_err(|e| {
-                                    let _ = from_ws_to_rs_tx.send(Message::Close(None));
-                                    let _ = notify_ch_close_tx.send(());
-                                });
+                            wss_send_task_tx.send(Message::Text(txt));
                         }
                         Message::Binary(bin) => {
-                            let _ = wss_tx.send(Message::Binary(bin)).await
-                                .map_err(|e| {
-                                    let _ = from_ws_to_rs_tx.send(Message::Close(None));
-                                    let _ = notify_ch_close_tx.send(());
-                                });
+                            wss_send_task_tx.send(Message::Binary(bin));
                         }
                         Message::Ping(msg) | Message::Pong(msg) => {
                             error!("unexpected message comes from rs_to_ws chan: {:?}. connector_id: {}, router_socket_id: {}",
@@ -420,7 +430,7 @@ async fn websocket_exchange(
                             let _ = notify_ch_close_tx_clone.send(());
                         }
                         Some(Ok(Message::Ping(_))) => {
-                            let _ = wss_tx.send(Message::Pong(Vec::new()));
+                            let _ = wss_send_task_tx.send(Message::Pong(Vec::new()));
                         }
                         Some(may_err) => {
                             msg_counter_lib.fetch_add(1,SeqCst);
@@ -428,10 +438,10 @@ async fn websocket_exchange(
                             let mut from_ws_to_rs_tx = from_ws_to_rs_tx.clone();
                             let mut notify_ch_close_tx = notify_ch_close_tx.clone();
                             // tokio::spawn(
-                            pipe_msg_from_wss_to_router_socket(
-                                connector_id.clone(), router_socket_id.clone(),
-                                may_err, from_ws_to_rs_tx, notify_ch_close_tx
-                            ).await;
+                                pipe_msg_from_wss_to_router_socket(
+                                    connector_id.clone(), router_socket_id.clone(),
+                                    may_err, from_ws_to_rs_tx, notify_ch_close_tx
+                                ).await;
                             // );
                         }
                     }
@@ -444,6 +454,7 @@ async fn websocket_exchange(
     drop(from_rs_to_ws_rx);
     // drop sender to router socket
     drop(from_ws_to_rs_tx);
+    drop(notify_ch_close_tx_clone);
     debug!("END OF Listening on connector ws message! msg count lib: {}", msg_counter_lib.load(SeqCst));
 }
 
