@@ -112,33 +112,6 @@ pub struct CrankerRouter {
 }
 
 
-#[tokio::test]
-async fn main() {
-    SimpleLogger::new()
-        .with_local_timestamps()
-        .with_level(Debug)
-        .init()
-        .unwrap();
-
-
-    let cranker_router = CrankerRouter::new();
-
-    let reg_listener = TcpListener::bind("127.0.0.1:3000")
-        .await
-        .unwrap();
-    let visit_listener = TcpListener::bind("127.0.0.1:3002")
-        .await
-        .unwrap();
-
-    let reg_router = cranker_router.registration_axum_router();
-    let visit_router = cranker_router.visit_portal_axum_router();
-
-    tokio::spawn(async {
-        axum::serve(reg_listener, reg_router).await.unwrap()
-    });
-
-    axum::serve(visit_listener, visit_router).await.unwrap();
-}
 
 
 impl CrankerRouter {
@@ -199,6 +172,7 @@ impl CrankerRouter {
         let path = original_uri.path().to_string();
         let route = DEFAULT_ROUTE_RESOLVER.resolve(&*(app_state.route_to_socket.read().await), path.clone());
         let expected_err = CrankerRouterException::new("No router socket available".to_string());
+        // FIXME: May deadlock if using read here! Change when needed
         match app_state.route_to_socket.write().await.get(&route) {
             None => {
                 debug!("No socket vecdeq available!");

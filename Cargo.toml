@@ -24,12 +24,14 @@ lazy_static = "1.4.0"
 axum-macros = { version = "0.4" }
 rand = { version = "0.8.5" }
 thiserror = "1.0"
+simple_logger = "4.0"
 
 [lib]
 crate-type = ["lib"]
 
-[dev-dependencies]
-simple_logger = "4.2.0"
+[[example]]
+name = "simple_v1"
+crate-type = ["bin"]
 
 [profile.dev]
 panic = 'abort'
