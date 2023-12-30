@@ -200,7 +200,7 @@ impl CrankerRouter {
         let path = original_uri.path().to_string();
         let route = DEFAULT_ROUTE_RESOLVER.resolve(&*(app_state.route_to_socket.read().await), path.clone());
         let expected_err = CrankerRouterException::new("No router socket available".to_string());
-        match app_state.route_to_socket.read().await.get_mut(&route) {
+        match app_state.route_to_socket.write().await.get_mut(&route) {
             None => {
                 debug!("No socket vecdeq available!");
                 // return expected_err.clone().into_response();
