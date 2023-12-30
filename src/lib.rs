@@ -4,8 +4,9 @@ use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicUsize};
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::atomic::Ordering::SeqCst;
+use std::time::Duration;
 
 use axum::{BoxError, Error, Extension, http, Router, ServiceExt};
 use axum::body::{Body, HttpBody};
@@ -27,7 +28,7 @@ use log::LevelFilter::Debug;
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, MutexGuard, RwLock, TryLockError};
 use tower::Service;
 use tower_http::limit;
 use uuid::Uuid;
@@ -95,12 +96,17 @@ lazy_static! {
 }
 
 // Our shared state
+struct WorkaroundRustcAsyncTraitBug(tokio::sync::mpsc::Sender<Arc<RwLock<dyn RouterSocket>>>);
+
 pub struct CrankerRouterState {
-    counter: AtomicI64,
-    route_to_socket: DashMap<String, VecDeque<Arc<RwLock<dyn RouterSocket>>>>,
+    counter: AtomicU64,
+    route_to_socket: DashMap<String, Mutex<VecDeque<Arc<RwLock<dyn RouterSocket>>>>>,
+
+    waiting_socket_key_generator: AtomicU64,
+    waiting_socket_hashmap: DashMap<u64, WorkaroundRustcAsyncTraitBug>,
 }
 
-pub type TSCRState = Arc<RwLock<CrankerRouterState>>;
+pub type TSCRState = Arc<CrankerRouterState>;
 
 pub struct CrankerRouter {
     state: TSCRState,
@@ -139,10 +145,12 @@ async fn main() {
 impl CrankerRouter {
     pub fn new() -> Self {
         Self {
-            state: Arc::new(RwLock::new(CrankerRouterState {
-                counter: AtomicI64::new(0),
+            state: Arc::new(CrankerRouterState {
+                counter: AtomicU64::new(0),
                 route_to_socket: DashMap::new(),
-            }))
+                waiting_socket_key_generator: AtomicU64::new(0),
+                waiting_socket_hashmap: DashMap::new(),
+            })
         }
     }
 
@@ -190,25 +198,42 @@ impl CrankerRouter {
         let mut boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, Error>>;
 
         let path = original_uri.path().to_string();
-        let route = DEFAULT_ROUTE_RESOLVER.resolve(&app_state.read().await.route_to_socket, path.clone());
+        let route = DEFAULT_ROUTE_RESOLVER.resolve(&app_state.route_to_socket, path.clone());
         let expected_err = CrankerRouterException::new("No router socket available".to_string());
-
-        match app_state.read().await.route_to_socket.get_mut(&route) {
+        match app_state.route_to_socket.get_mut(&route) {
             None => {
-                return expected_err.clone().into_response();
+                debug!("No socket vecdeq available!");
+                // return expected_err.clone().into_response();
+                // should_wait = true;
             }
             Some(mut v) => {
-                match v.value_mut().pop_front() {
+                {
+                    match v.value().try_lock() {
+                        Ok(_) => {
+                            debug!("vecdeq not locked!");
+                        }
+                        Err(_) => {
+                            debug!("vecdeq locked!");
+                        }
+                    }
+                }
+                match v.value().lock().await.pop_front() {
                     None => {
-                        return expected_err.clone().into_response();
+                        debug!("No socket available!");
+                        // should_wait = true;
+                        // return expected_err.clone().into_response();
                     }
                     Some(mut am_rs) => {
+                        debug!("Get a socket");
                         let mut opt_body = None;
                         if has_body {
                             let (mut pipe_tx, mut pipe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, Error>>();
                             opt_body = Some(pipe_rx);
                             tokio::spawn(pipe_body_data_stream_to_a_mpsc_sender(boxed_stream, pipe_tx));
                         }
+                        debug!("Has body ? {:?}", opt_body);
+                        debug!("Ready to lock on router socket");
+
                         match am_rs.write().await.on_client_req(
                             method,
                             original_uri.path_and_query(),
@@ -216,14 +241,51 @@ impl CrankerRouter {
                             opt_body,
                         ).await {
                             Ok(res) => {
+                                debug!("received body!");
                                 return res;
                             }
                             Err(e) => {
+                                debug!("received error! {:?}", e);
                                 return e.into_response();
                             }
                         }
                     }
                 }
+            }
+        };
+        // return expected_err.into_response();
+
+        // No socket queue / socket available immediately
+        let (mut waiting_task_tx, mut waiting_task_rx) = tokio::sync::mpsc::channel::<Arc<RwLock<dyn RouterSocket>>>(1);
+        let waiting_task_id = app_state.waiting_socket_key_generator.fetch_add(1, SeqCst);
+        app_state.waiting_socket_hashmap.insert(waiting_task_id, WorkaroundRustcAsyncTraitBug(waiting_task_tx));
+        let timeout = tokio::time::timeout(Duration::from_secs(5), waiting_task_rx.recv()).await;
+        match timeout {
+            Ok(Some(socket)) => {
+                let mut opt_body = None;
+                if has_body {
+                    let (mut pipe_tx, mut pipe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, Error>>();
+                    opt_body = Some(pipe_rx);
+                    tokio::spawn(pipe_body_data_stream_to_a_mpsc_sender(boxed_stream, pipe_tx));
+                }
+                {
+                    let res = socket.write().await
+                        .on_client_req(method, original_uri.path_and_query(), &headers, opt_body)
+                        .await;
+                    match res {
+                        Ok(res) => {
+                            return res;
+                        }
+                        Err(e) => {
+                            return e.into_response();
+                        }
+                    }
+                }
+            }
+            _ => {
+                waiting_task_rx.close();
+                app_state.waiting_socket_hashmap.remove(&waiting_task_id);
+                return expected_err.into_response();
             }
         };
     }
@@ -336,21 +398,49 @@ async fn take_and_store_websocket(wss: WebSocket,
         addr,
     )));
     info!("Connector registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
-    {
-        state.write().await
+    debug!("Before Spawned websocket_exchange");
+    // tokio::spawn(
+    //     websocket_exchange(
+    //         connector_id.clone(), router_socket_id.clone(),
+    //         from_rs_to_ws_rx, from_ws_to_rs_tx, wss_tx, wss_rx, err_chan_rx,
+    //     )
+    // );
+    debug!("After Spawned websocket_exchange");
+
+    //     if let Some(task_id) = state.read().await.waiting_socket_hashmap.into_read_only().keys().next() {
+    //         if let Some((_, task)) = state.waiting_socket_hashmap.remove(task_id) {
+    //             task.send(rs.clone()).await;
+    //         }
+    //     }
+
+    if let Some(task) = state.waiting_socket_hashmap.iter().next() {
+        debug!("Found task waiting for socket");
+        let id = task.key();
+        debug!("before sending to receiver");
+        let _ = task.value().0.send(rs.clone()).await;
+        debug!("after sending to receiver");
+        state.waiting_socket_hashmap.remove(id);
+    } else {
+        debug!("No task waiting. Sending to vecdeq");
+        state
             .route_to_socket
             .entry(route.clone())
-            .or_insert(VecDeque::new())
+            .or_insert(Mutex::new(VecDeque::new()))
+            .value()
+            .lock()
+            .await
             .push_back(rs.clone());
+        // deadlocked here
+        debug!("After sending to vecdeq");
     }
     {
         // Prepare for some counter
-        let write_guard = state.write().await;
-        let _ = write_guard.counter.fetch_add(1, SeqCst);
+        // let write_guard = state.write().await;
+        // let _ = write_guard.counter.fetch_add(1, SeqCst);
     }
     websocket_exchange(
         connector_id.clone(), router_socket_id.clone(),
-        from_rs_to_ws_rx, from_ws_to_rs_tx, wss_tx, wss_rx, err_chan_rx
+        from_rs_to_ws_rx, from_ws_to_rs_tx, wss_tx, wss_rx, err_chan_rx,
     ).await;
 }
 
