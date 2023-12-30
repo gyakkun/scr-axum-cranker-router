@@ -28,7 +28,7 @@ use log::LevelFilter::Debug;
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::sync::{Mutex, MutexGuard, RwLock, TryLockError};
+use tokio::sync::{Mutex, RwLock};
 use tower::Service;
 use tower_http::limit;
 use uuid::Uuid;
@@ -100,7 +100,7 @@ struct WorkaroundRustcAsyncTraitBug(tokio::sync::mpsc::Sender<Arc<RwLock<dyn Rou
 
 pub struct CrankerRouterState {
     counter: AtomicU64,
-    route_to_socket: DashMap<String, Mutex<VecDeque<Arc<RwLock<dyn RouterSocket>>>>>,
+    route_to_socket: RwLock<DashMap<String, VecDeque<Arc<RwLock<dyn RouterSocket>>>>>,
 
     waiting_socket_key_generator: AtomicU64,
     waiting_socket_hashmap: DashMap<u64, WorkaroundRustcAsyncTraitBug>,
@@ -147,7 +147,7 @@ impl CrankerRouter {
         Self {
             state: Arc::new(CrankerRouterState {
                 counter: AtomicU64::new(0),
-                route_to_socket: DashMap::new(),
+                route_to_socket: RwLock::new(DashMap::new()),
                 waiting_socket_key_generator: AtomicU64::new(0),
                 waiting_socket_hashmap: DashMap::new(),
             })
@@ -198,26 +198,16 @@ impl CrankerRouter {
         let mut boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, Error>>;
 
         let path = original_uri.path().to_string();
-        let route = DEFAULT_ROUTE_RESOLVER.resolve(&app_state.route_to_socket, path.clone());
+        let route = DEFAULT_ROUTE_RESOLVER.resolve(&*(app_state.route_to_socket.read().await), path.clone());
         let expected_err = CrankerRouterException::new("No router socket available".to_string());
-        match app_state.route_to_socket.get_mut(&route) {
+        match app_state.route_to_socket.read().await.get_mut(&route) {
             None => {
                 debug!("No socket vecdeq available!");
                 // return expected_err.clone().into_response();
                 // should_wait = true;
             }
             Some(mut v) => {
-                {
-                    match v.value().try_lock() {
-                        Ok(_) => {
-                            debug!("vecdeq not locked!");
-                        }
-                        Err(_) => {
-                            debug!("vecdeq locked!");
-                        }
-                    }
-                }
-                match v.value().lock().await.pop_front() {
+                match v.value_mut().pop_front() {
                     None => {
                         debug!("No socket available!");
                         // should_wait = true;
@@ -233,7 +223,6 @@ impl CrankerRouter {
                         }
                         debug!("Has body ? {:?}", opt_body);
                         debug!("Ready to lock on router socket");
-
                         match am_rs.write().await.on_client_req(
                             method,
                             original_uri.path_and_query(),
@@ -408,7 +397,7 @@ async fn take_and_store_websocket(wss: WebSocket,
     debug!("After Spawned websocket_exchange");
 
     //     if let Some(task_id) = state.read().await.waiting_socket_hashmap.into_read_only().keys().next() {
-    //         if let Some((_, task)) = state.waiting_socket_hashmap.remove(task_id) {
+    //         if let Some((_, task)) = state.read().await.waiting_socket_hashmap.remove(task_id) {
     //             task.send(rs.clone()).await;
     //         }
     //     }
@@ -419,24 +408,23 @@ async fn take_and_store_websocket(wss: WebSocket,
         debug!("before sending to receiver");
         let _ = task.value().0.send(rs.clone()).await;
         debug!("after sending to receiver");
-        state.waiting_socket_hashmap.remove(id);
-    } else {
+       state.waiting_socket_hashmap.remove(id);
+    } else
+    {
         debug!("No task waiting. Sending to vecdeq");
         state
             .route_to_socket
-            .entry(route.clone())
-            .or_insert(Mutex::new(VecDeque::new()))
-            .value()
-            .lock()
+            .write()
             .await
+            .entry(route.clone())
+            .or_insert(VecDeque::new())
             .push_back(rs.clone());
-        // deadlocked here
-        debug!("After sending to vecdeq");
+        debug!("After sending to vecdeq. lock should released");
     }
     {
         // Prepare for some counter
-        // let write_guard = state.write().await;
-        // let _ = write_guard.counter.fetch_add(1, SeqCst);
+        let write_guard = state.clone();
+        let _ = write_guard.counter.fetch_add(1, SeqCst);
     }
     websocket_exchange(
         connector_id.clone(), router_socket_id.clone(),
