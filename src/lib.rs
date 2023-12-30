@@ -427,10 +427,12 @@ async fn websocket_exchange(
                             // FIXME: Let's believe cloning these channels equals cloning their inner Arc, which is super cheap!
                             let mut from_ws_to_rs_tx = from_ws_to_rs_tx.clone();
                             let mut notify_ch_close_tx = notify_ch_close_tx.clone();
-                            tokio::spawn(pipe_msg_from_wss_to_router_socket(
+                            // tokio::spawn(
+                            pipe_msg_from_wss_to_router_socket(
                                 connector_id.clone(), router_socket_id.clone(),
                                 may_err, from_ws_to_rs_tx, notify_ch_close_tx
-                            ));
+                            ).await;
+                            // );
                         }
                     }
                 }
