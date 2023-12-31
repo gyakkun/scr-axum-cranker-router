@@ -55,15 +55,7 @@ pub trait RouterSocket: Send + Sync {
                            headers: &HeaderMap,
                            opt_body: Option<UnboundedReceiver<Result<Bytes, Error>>>,
     ) -> Result<Response<Body>, CrankerRouterException>;
-    async fn on_client_req_error(&self, reason: CrankerRouterException);
-
-    // accept response from target
-    async fn on_target_res(&self,
-                           headers: &HeaderMap,
-                           opt_body: Option<mpsc::Receiver<Bytes>>,
-    ) -> Result<(), CrankerRouterException>;
-
-    async fn on_target_res_error(&self, reason: CrankerRouterException);
+    async fn on_error(&self, reason: CrankerRouterException);
 
 }
 
@@ -379,26 +371,7 @@ impl RouterSocket for RouterSocketV1 {
             ))
     }
 
-    // async fn on_client_req_error(&self, reason: String) {
-    //    self.ts_wss_tx.lock().await.send(Message::Close(None));
-    // }
-
-    async fn on_target_res(&self,
-                           headers: &HeaderMap,
-                           opt_body: Option<mpsc::Receiver<Bytes>>,
-    ) -> Result<(), CrankerRouterException> {
-        // todo!()
-        Ok(())
-    }
-
-    // fn on_target_res_error(&self, reason: String) {
-    //    todo!()
-    // }
-
-    async fn on_target_res_error(&self, err: CrankerRouterException) {
-        let _ = self.err_chan_to_wss.send(err);
-    }
-    async fn on_client_req_error(&self, err: CrankerRouterException) {
+    async fn on_error(&self, err: CrankerRouterException) {
         let _ = self.err_chan_to_wss.send(err);
     }
 

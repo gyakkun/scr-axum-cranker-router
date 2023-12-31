@@ -169,27 +169,21 @@ impl CrankerRouter {
         let route = DEFAULT_ROUTE_RESOLVER.resolve(&app_state.route_to_socket_chan, path.clone());
         let expected_err = CrankerRouterException::new("No router socket available".to_string());
         let receiver = app_state.route_to_socket_chan.get(&route);
+        // mu-cranker-router here responses with 404 immediately
         if receiver.is_none() {
-            debug!("1");
             let notifier = app_state.route_notifier
                 .entry(route.clone())
                 .or_insert(Notify::new());
-            debug!("2");
             let route_timeout = tokio::time::timeout(Duration::from_secs(5), notifier.value().notified()).await;
-            debug!("3");
             match route_timeout {
-                Err(e) => {
-                    debug!("4");
+                Err(_) => {
                     return expected_err.clone().into_response();
                 }
-                _ => {
-                    debug!("5");
-                }
+                _ => {}
             }
         }
         let receiver = receiver.unwrap().clone().1;
         let timeout = tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await;
-        // FIXME: May deadlock if using read here! Change when needed
         match timeout {
             Ok(Ok(am_rs)) => {
                 debug!("Get a socket");
