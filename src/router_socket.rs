@@ -1,23 +1,27 @@
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
 use std::sync::atomic::Ordering::SeqCst;
 use async_channel::{Receiver, Sender};
 
 use axum::{async_trait, BoxError, Error};
 use axum::body::Body;
-use axum::extract::ws::{CloseFrame, Message};
+use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::http::{HeaderMap, Method, Response, StatusCode};
 use axum::http::uri::PathAndQuery;
 use bytes::Bytes;
-use futures::{SinkExt, TryFutureExt};
-use log::{debug, error, info};
-use tokio::sync::{mpsc, Mutex};
+use dashmap::mapref::entry::Entry;
+use futures::{SinkExt, StreamExt, TryFutureExt};
+use futures::stream::{SplitSink, SplitStream};
+use log::{debug, error, info, warn};
+use tokio::sync::{mpsc, Mutex, RwLock};
+use uuid::Uuid;
 
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::cranker_protocol_response::CrankerProtocolResponse;
 use crate::exceptions::CrankerRouterException;
-use crate::REPRESSED_HEADERS;
+use crate::{REPRESSED_HEADERS, TSCRState};
 
 const RESPONSE_HEADERS_TO_NOT_SEND_BACK: &[&str] = &["server"];
 const HEADER_MAX_SIZE: usize = 64 * 1024; // 64KBytes
@@ -363,4 +367,228 @@ fn build_request_line(method: Method, path_and_query: Option<&PathAndQuery>) -> 
         _ => {}
     }
     res
+}
+
+
+// This function deals with a single websocket connection, i.e., a single
+// connected client / user, for which we will spawn two independent tasks (for
+// receiving / sending chat messages).
+pub async fn take_and_store_websocket(wss: WebSocket,
+                                  state: TSCRState,
+                                  connector_id: String,
+                                  component_name: String,
+                                  cranker_version: String,
+                                  domain: String,
+                                  route: String,
+                                  addr: SocketAddr,
+) {
+    let (from_ws_to_rs_tx, from_ws_to_rs_rx) = async_channel::unbounded::<Message>();
+    let (from_rs_to_ws_tx, from_rs_to_ws_rx) = async_channel::unbounded::<Message>();
+    let (wss_tx, wss_rx) = wss.split();
+    let router_socket_id = Uuid::new_v4().to_string();
+    let (err_chan_tx, err_chan_rx) = async_channel::unbounded::<CrankerRouterException>();
+    let rs = Arc::new(RouterSocketV1::new(
+        route.clone(),
+        component_name.clone(),
+        router_socket_id.clone(),
+        connector_id.clone(),
+        from_ws_to_rs_rx, // from websocket
+        from_rs_to_ws_tx, // to websocket
+        err_chan_tx,
+        addr,
+    ));
+    info!("Connector registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
+    debug!("Before Spawned websocket_exchange");
+    tokio::spawn(
+        websocket_exchange(
+            connector_id.clone(), router_socket_id.clone(),
+            from_rs_to_ws_rx, from_ws_to_rs_tx, wss_tx, wss_rx, err_chan_rx,
+        )
+    );
+    debug!("After Spawned websocket_exchange");
+
+    debug!("No task waiting. Sending to vecdeq");
+    {
+        let chan_pair = async_channel::unbounded();
+        let _ = state
+            .route_to_socket_chan
+            .entry(route.clone())
+            .or_insert(chan_pair)
+            .value()
+            .0
+            .send(rs.clone())
+            .await;
+    }
+    debug!("-1");
+    match state.route_notifier.entry(route.clone()) {
+        Entry::Occupied(notifier) => {
+            debug!("-2");
+            notifier.get().notify_waiters();
+        }
+        Entry::Vacant(_) => {
+            debug!("-3");
+        }
+    }
+    debug!("After sending to vecdeq. lock should released");
+    {
+        // Prepare for some counter
+        let write_guard = state.clone();
+        let _ = write_guard.counter.fetch_add(1, SeqCst);
+    }
+}
+
+async fn websocket_exchange(
+    connector_id: String,
+    router_socket_id: String,
+    mut from_rs_to_ws_rx: Receiver<Message>,
+    from_ws_to_rs_tx: Sender<Message>,
+    mut wss_tx: SplitSink<WebSocket, Message>,
+    mut wss_rx: SplitStream<WebSocket>,
+    mut err_chan_from_rs: Receiver<CrankerRouterException>,
+)
+{
+    debug!("Listening on connector ws message!");
+    let (notify_ch_close_tx, mut notify_ch_close_rx) = async_channel::unbounded::<()>();
+    let notify_ch_close_tx_clone = notify_ch_close_tx.clone();
+    let msg_counter_lib = AtomicUsize::new(0);
+
+    // queue the task to wss_tx
+    let (wss_send_task_tx, mut wss_send_task_rx) = async_channel::unbounded::<Message>();
+    {
+        let notify_ch_close_tx = notify_ch_close_tx.clone();
+        let from_ws_to_rs_tx = from_ws_to_rs_tx.clone();
+        let router_socket_id = router_socket_id.clone();
+        tokio::spawn(async move {
+            while let Ok(msg) = wss_send_task_rx.recv().await {
+                // if let Message::Close(opt_something) = msg {
+                //     debug!("++Sending close frame to connector");
+                //     let _ = wss_tx.send(Message::Close(opt_something));
+                // } else {
+                let _ = wss_tx.send(msg).await.map_err(|e| async {
+                    let _ = from_ws_to_rs_tx.send(Message::Close(None)).await;
+                    let _ = notify_ch_close_tx.send(()).await;
+                });
+                // }
+            }
+            drop(notify_ch_close_tx);
+            drop(from_ws_to_rs_tx);
+            info!("end of wss_send_task for router_socket_id={}", router_socket_id);
+        });
+    }
+
+    loop {
+        tokio::select! {
+                Ok(should_stop) = notify_ch_close_rx.recv() => {
+                    info!("should stop looping now! router_socket_id: {}", router_socket_id);
+                    break;
+                }
+                Ok(err) = err_chan_from_rs.recv() => {
+                    error!(
+                        "exception received in websocket_exchange: {:?}. connector_id: {}, router_socket_id: {}",
+                        err, connector_id, router_socket_id
+                    );
+                    notify_ch_close_tx.send(()).await;
+                }
+                Ok(to_ws) = from_rs_to_ws_rx.recv() => {
+                    match to_ws {
+                        Message::Text(txt) => {
+                            wss_send_task_tx.send(Message::Text(txt)).await;
+                        }
+                        Message::Binary(bin) => {
+                            wss_send_task_tx.send(Message::Binary(bin)).await;
+                        }
+                        Message::Ping(msg) | Message::Pong(msg) => {
+                            error!("unexpected message comes from rs_to_ws chan: {:?}. connector_id: {}, router_socket_id: {}",
+                                    msg , connector_id, router_socket_id
+                            )
+                        }
+                        Message::Close(msg) => {
+                            error!("unexpected message comes from rs_to_ws chan: {:?}. connector_id: {}, router_socket_id: {}",
+                                    msg , connector_id, router_socket_id
+                            )
+                        }
+                    }
+                }
+                from_wss_nullable = wss_rx.next() => {
+                    match from_wss_nullable {
+                        None => {
+                            warn!(
+                                "Receive None from wss_rx, seems wss closed! connector_id: {}, router_socket_id: {}",
+                                connector_id, router_socket_id
+                            );
+                            let _ = from_ws_to_rs_tx.send(Message::Close(None)).await;
+                            let _ = notify_ch_close_tx_clone.send(()).await;
+                        }
+                        Some(Ok(Message::Ping(_))) => {
+                            let _ = wss_send_task_tx.send(Message::Pong(Vec::new())).await;
+                        }
+                        Some(may_err) => {
+                            msg_counter_lib.fetch_add(1,SeqCst);
+                            // FIXME: Let's believe cloning these channels equals cloning their inner Arc, which is super cheap!
+                            let from_ws_to_rs_tx = from_ws_to_rs_tx.clone();
+                            let notify_ch_close_tx = notify_ch_close_tx.clone();
+                            let wss_send_task_tx = wss_send_task_tx.clone();
+                            // tokio::spawn(
+                                pipe_msg_from_wss_to_router_socket(
+                                    connector_id.clone(), router_socket_id.clone(),
+                                    may_err, from_ws_to_rs_tx, notify_ch_close_tx, wss_send_task_tx
+                                ).await;
+                            // );
+                        }
+                    }
+                }
+            }
+    }
+    // stop receiving from router socket
+    from_rs_to_ws_rx.close();
+    // drop receiver from router socket
+    drop(from_rs_to_ws_rx);
+    // drop sender to router socket
+    drop(from_ws_to_rs_tx);
+    drop(notify_ch_close_tx_clone);
+    debug!("END OF Listening on connector ws message! msg count lib: {}", msg_counter_lib.load(SeqCst));
+}
+
+async fn pipe_msg_from_wss_to_router_socket(
+    connector_id: String,
+    router_socket_id: String,
+    may_err: Result<Message, Error>,
+    from_ws_to_rs_tx: Sender<Message>,
+    notify_ch_close_tx: Sender<()>,
+    wss_send_task_tx: Sender<Message>,
+)
+{
+    match may_err {
+        Err(e) => {
+            error!(
+                "Error from wss: {:?}. connector_id: {}, router_socket_id: {}",
+                e, connector_id, router_socket_id
+            );
+            notify_ch_close_tx.send(()).await;
+        }
+        Ok(msg) => {
+            match msg {
+                Message::Text(txt) => {
+                    from_ws_to_rs_tx.send(Message::Text(txt)).await;
+                }
+                Message::Binary(bin) => {
+                    from_ws_to_rs_tx.send(Message::Binary(bin)).await;
+                }
+                Message::Pong(_) => debug!("ponged!"),
+                Message::Close(opt_close_frame) => {
+                    if let Some(clo_fra) = opt_close_frame {
+                        warn!(
+                            "Closing from connector: code={}, {:?}. connector_id: {}, router_socket_id: {}",
+                            clo_fra.code, clo_fra.reason, connector_id, router_socket_id
+                        );
+                    }
+                    // let _ = wss_send_task_tx.send(Message::Close(None)).await;
+                    debug!("Sending close to connector");
+                    let _ = from_ws_to_rs_tx.send(Message::Close(None)).await;
+                    let _ = notify_ch_close_tx.send(()).await;
+                }
+                _ => {}
+            }
+        }
+    }
 }
