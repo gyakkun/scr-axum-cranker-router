@@ -1,14 +1,16 @@
+use log::LevelFilter::Debug;
+use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
 
 use scr_axum_cranker_router::CrankerRouter;
 
-#[async_std::main]
+#[tokio::main]
 async fn main() {
-    // SimpleLogger::new()
-    //     .with_local_timestamps()
-    //     .with_level(Debug)
-    //     .init()
-    //     .unwrap();
+    SimpleLogger::new()
+        .with_local_timestamps()
+        .with_level(Debug)
+        .init()
+        .unwrap();
 
 
     let cranker_router = CrankerRouter::new();

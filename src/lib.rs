@@ -1,13 +1,12 @@
 use std::collections::{HashMap, HashSet};
-
 use std::net::SocketAddr;
-
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::atomic::Ordering::SeqCst;
 use std::time::Duration;
 
+use async_channel::{Receiver, Sender};
 use axum::{BoxError, Error, Extension, http, Router, ServiceExt};
 use axum::body::{Body, HttpBody};
 use axum::extract::{ConnectInfo, OriginalUri, Query, State, WebSocketUpgrade};
@@ -26,8 +25,6 @@ use futures::stream::{BoxStream, SplitSink, SplitStream};
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
 use tokio::sync::{Notify, RwLock};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-
 use tower_http::limit;
 use uuid::Uuid;
 
@@ -99,8 +96,8 @@ struct WorkaroundRustcAsyncTraitBug(tokio::sync::mpsc::Sender<Arc<RwLock<dyn Rou
 pub struct CrankerRouterState {
     counter: AtomicU64,
     route_to_socket_chan: DashMap<String, (
-        async_channel::Sender<Arc<RwLock<dyn RouterSocket>>>,
-        async_channel::Receiver<Arc<RwLock<dyn RouterSocket>>>
+        Sender<Arc<RwLock<dyn RouterSocket>>>,
+        Receiver<Arc<RwLock<dyn RouterSocket>>>
     )>,
     route_notifier: DashMap<String, Notify>,
 }
@@ -189,7 +186,7 @@ impl CrankerRouter {
                 debug!("Get a socket");
                 let mut opt_body = None;
                 if has_body {
-                    let (pipe_tx, pipe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, Error>>();
+                    let (pipe_tx, pipe_rx) = async_channel::unbounded::<Result<Bytes, Error>>();
                     opt_body = Some(pipe_rx);
                     tokio::spawn(pipe_body_data_stream_to_a_mpsc_sender(boxed_stream, pipe_tx));
                 }
@@ -281,11 +278,11 @@ fn judge_has_body_from_header_http_1(headers: &HeaderMap) -> bool {
 }
 
 async fn pipe_body_data_stream_to_a_mpsc_sender(mut stream: BoxStream<'_, Result<Bytes, Error>>,
-                                                sender: UnboundedSender<Result<Bytes, Error>>,
+                                                sender: Sender<Result<Bytes, Error>>,
 ) -> Result<(), CrankerRouterException>
 {
     while let Some(frag) = stream.next().await {
-        match sender.send(frag) {
+        match sender.send(frag).await {
             Err(e) => {
                 let failed_reason = format!("error when piping body data stream to mpsc sender, pipe will break: {:?}", e);
                 error!("{failed_reason}");
@@ -311,11 +308,11 @@ async fn take_and_store_websocket(wss: WebSocket,
                                   route: String,
                                   addr: SocketAddr,
 ) {
-    let (from_ws_to_rs_tx, from_ws_to_rs_rx): (UnboundedSender<Message>, UnboundedReceiver<Message>) = unbounded_channel::<Message>();
-    let (from_rs_to_ws_tx, from_rs_to_ws_rx) = unbounded_channel::<Message>();
+    let (from_ws_to_rs_tx, from_ws_to_rs_rx) = async_channel::unbounded::<Message>();
+    let (from_rs_to_ws_tx, from_rs_to_ws_rx) = async_channel::unbounded::<Message>();
     let (wss_tx, wss_rx) = wss.split();
     let router_socket_id = Uuid::new_v4().to_string();
-    let (err_chan_tx, err_chan_rx) = unbounded_channel::<CrankerRouterException>();
+    let (err_chan_tx, err_chan_rx) = async_channel::unbounded::<CrankerRouterException>();
     let rs = Arc::new(RwLock::new(RouterSocketV1::new(
         route.clone(),
         component_name.clone(),
@@ -369,34 +366,34 @@ async fn take_and_store_websocket(wss: WebSocket,
 async fn websocket_exchange(
     connector_id: String,
     router_socket_id: String,
-    mut from_rs_to_ws_rx: UnboundedReceiver<Message>,
-    from_ws_to_rs_tx: UnboundedSender<Message>,
+    mut from_rs_to_ws_rx: Receiver<Message>,
+    from_ws_to_rs_tx: Sender<Message>,
     mut wss_tx: SplitSink<WebSocket, Message>,
     mut wss_rx: SplitStream<WebSocket>,
-    mut err_chan_from_rs: UnboundedReceiver<CrankerRouterException>,
+    mut err_chan_from_rs: Receiver<CrankerRouterException>,
 )
 {
     debug!("Listening on connector ws message!");
-    let (notify_ch_close_tx, mut notify_ch_close_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (notify_ch_close_tx, mut notify_ch_close_rx) = async_channel::unbounded::<()>();
     let notify_ch_close_tx_clone = notify_ch_close_tx.clone();
     let msg_counter_lib = AtomicUsize::new(0);
 
     // queue the task to wss_tx
-    let (wss_send_task_tx, mut wss_send_task_rx) = unbounded_channel::<Message>();
+    let (wss_send_task_tx, mut wss_send_task_rx) = async_channel::unbounded::<Message>();
     {
         let notify_ch_close_tx = notify_ch_close_tx.clone();
         let from_ws_to_rs_tx = from_ws_to_rs_tx.clone();
         let router_socket_id = router_socket_id.clone();
         tokio::spawn(async move {
-            while let Some(msg) = wss_send_task_rx.recv().await {
+            while let Ok(msg) = wss_send_task_rx.recv().await {
                 // if let Message::Close(opt_something) = msg {
                 //     debug!("++Sending close frame to connector");
                 //     let _ = wss_tx.send(Message::Close(opt_something));
                 // } else {
-                    let _ = wss_tx.send(msg).await.map_err(|e| {
-                        let _ = from_ws_to_rs_tx.send(Message::Close(None));
-                        let _ = notify_ch_close_tx.send(());
-                    });
+                let _ = wss_tx.send(msg).await.map_err(|e| async {
+                    let _ = from_ws_to_rs_tx.send(Message::Close(None)).await;
+                    let _ = notify_ch_close_tx.send(()).await;
+                });
                 // }
             }
             drop(notify_ch_close_tx);
@@ -407,24 +404,24 @@ async fn websocket_exchange(
 
     loop {
         tokio::select! {
-                Some(should_stop) = notify_ch_close_rx.recv() => {
+                Ok(should_stop) = notify_ch_close_rx.recv() => {
                     info!("should stop looping now! router_socket_id: {}", router_socket_id);
                     break;
                 }
-                Some(err) = err_chan_from_rs.recv() => {
+                Ok(err) = err_chan_from_rs.recv() => {
                     error!(
                         "exception received in websocket_exchange: {:?}. connector_id: {}, router_socket_id: {}",
                         err, connector_id, router_socket_id
                     );
-                    notify_ch_close_tx.send(());
+                    notify_ch_close_tx.send(()).await;
                 }
-                Some(to_ws) = from_rs_to_ws_rx.recv() => {
+                Ok(to_ws) = from_rs_to_ws_rx.recv() => {
                     match to_ws {
                         Message::Text(txt) => {
-                            wss_send_task_tx.send(Message::Text(txt));
+                            wss_send_task_tx.send(Message::Text(txt)).await;
                         }
                         Message::Binary(bin) => {
-                            wss_send_task_tx.send(Message::Binary(bin));
+                            wss_send_task_tx.send(Message::Binary(bin)).await;
                         }
                         Message::Ping(msg) | Message::Pong(msg) => {
                             error!("unexpected message comes from rs_to_ws chan: {:?}. connector_id: {}, router_socket_id: {}",
@@ -445,11 +442,11 @@ async fn websocket_exchange(
                                 "Receive None from wss_rx, seems wss closed! connector_id: {}, router_socket_id: {}",
                                 connector_id, router_socket_id
                             );
-                            let _ = from_ws_to_rs_tx.send(Message::Close(None));
-                            let _ = notify_ch_close_tx_clone.send(());
+                            let _ = from_ws_to_rs_tx.send(Message::Close(None)).await;
+                            let _ = notify_ch_close_tx_clone.send(()).await;
                         }
                         Some(Ok(Message::Ping(_))) => {
-                            let _ = wss_send_task_tx.send(Message::Pong(Vec::new()));
+                            let _ = wss_send_task_tx.send(Message::Pong(Vec::new())).await;
                         }
                         Some(may_err) => {
                             msg_counter_lib.fetch_add(1,SeqCst);
@@ -482,9 +479,9 @@ async fn pipe_msg_from_wss_to_router_socket(
     connector_id: String,
     router_socket_id: String,
     may_err: Result<Message, Error>,
-    from_ws_to_rs_tx: UnboundedSender<Message>,
-    notify_ch_close_tx: UnboundedSender<()>,
-    wss_send_task_tx: UnboundedSender<Message>,
+    from_ws_to_rs_tx: Sender<Message>,
+    notify_ch_close_tx: Sender<()>,
+    wss_send_task_tx: Sender<Message>,
 )
 {
     match may_err {
@@ -493,15 +490,15 @@ async fn pipe_msg_from_wss_to_router_socket(
                 "Error from wss: {:?}. connector_id: {}, router_socket_id: {}",
                 e, connector_id, router_socket_id
             );
-            notify_ch_close_tx.send(());
+            notify_ch_close_tx.send(()).await;
         }
         Ok(msg) => {
             match msg {
                 Message::Text(txt) => {
-                    from_ws_to_rs_tx.send(Message::Text(txt));
+                    from_ws_to_rs_tx.send(Message::Text(txt)).await;
                 }
                 Message::Binary(bin) => {
-                    from_ws_to_rs_tx.send(Message::Binary(bin));
+                    from_ws_to_rs_tx.send(Message::Binary(bin)).await;
                 }
                 Message::Pong(_) => debug!("ponged!"),
                 Message::Close(opt_close_frame) => {
@@ -511,10 +508,10 @@ async fn pipe_msg_from_wss_to_router_socket(
                             clo_fra.code, clo_fra.reason, connector_id, router_socket_id
                         );
                     }
-                    // let _ = wss_send_task_tx.send(Message::Close(None));
+                    // let _ = wss_send_task_tx.send(Message::Close(None)).await;
                     debug!("Sending close to connector");
-                    let _ = from_ws_to_rs_tx.send(Message::Close(None));
-                    let _ = notify_ch_close_tx.send(());
+                    let _ = from_ws_to_rs_tx.send(Message::Close(None)).await;
+                    let _ = notify_ch_close_tx.send(()).await;
                 }
                 _ => {}
             }
