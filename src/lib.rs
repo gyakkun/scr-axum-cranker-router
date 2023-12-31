@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
@@ -19,14 +19,13 @@ use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use bytes::Bytes;
+use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
 use futures::stream::{BoxStream, SplitSink, SplitStream};
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
-use log::LevelFilter::Debug;
-use simple_logger::SimpleLogger;
-use tokio::net::TcpListener;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Notify, RwLock};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tower::Service;
 use tower_http::limit;
@@ -99,10 +98,11 @@ struct WorkaroundRustcAsyncTraitBug(tokio::sync::mpsc::Sender<Arc<RwLock<dyn Rou
 
 pub struct CrankerRouterState {
     counter: AtomicU64,
-    route_to_socket: RwLock<HashMap<String, Mutex<VecDeque<Arc<RwLock<dyn RouterSocket>>>>>>,
-
-    waiting_socket_key_generator: AtomicU64,
-    waiting_socket_hashmap: RwLock<HashMap<u64, WorkaroundRustcAsyncTraitBug>>,
+    route_to_socket_chan: DashMap<String, (
+        async_channel::Sender<Arc<RwLock<dyn RouterSocket>>>,
+        async_channel::Receiver<Arc<RwLock<dyn RouterSocket>>>
+    )>,
+    route_notifier: DashMap<String, Notify>,
 }
 
 pub type TSCRState = Arc<CrankerRouterState>;
@@ -111,17 +111,13 @@ pub struct CrankerRouter {
     state: TSCRState,
 }
 
-
-
-
 impl CrankerRouter {
     pub fn new() -> Self {
         Self {
             state: Arc::new(CrankerRouterState {
                 counter: AtomicU64::new(0),
-                route_to_socket: RwLock::new(HashMap::new()),
-                waiting_socket_key_generator: AtomicU64::new(0),
-                waiting_socket_hashmap: RwLock::new(HashMap::new()),
+                route_to_socket_chan: DashMap::new(),
+                route_notifier: DashMap::new(),
             })
         }
     }
@@ -170,99 +166,61 @@ impl CrankerRouter {
         let mut boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, Error>>;
 
         let path = original_uri.path().to_string();
-        let route = DEFAULT_ROUTE_RESOLVER.resolve(&*(app_state.route_to_socket.read().await), path.clone());
+        let route = DEFAULT_ROUTE_RESOLVER.resolve(&app_state.route_to_socket_chan, path.clone());
         let expected_err = CrankerRouterException::new("No router socket available".to_string());
-        // FIXME: May deadlock if using read here! Change when needed
-        match app_state.route_to_socket.write().await.get(&route) {
-            None => {
-                debug!("No socket vecdeq available!");
-                // return expected_err.clone().into_response();
-                // should_wait = true;
-            }
-            Some(mut v) => {
-                match v.lock().await.pop_front() {
-                    None => {
-                        debug!("No socket available!");
-                        // should_wait = true;
-                        // return expected_err.clone().into_response();
-                    }
-                    Some(mut am_rs) => {
-                        debug!("Get a socket");
-                        let mut opt_body = None;
-                        if has_body {
-                            let (mut pipe_tx, mut pipe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, Error>>();
-                            opt_body = Some(pipe_rx);
-                            tokio::spawn(pipe_body_data_stream_to_a_mpsc_sender(boxed_stream, pipe_tx));
-                        }
-                        debug!("Has body ? {:?}", opt_body);
-                        debug!("Ready to lock on router socket");
-                        match am_rs.write().await.on_client_req(
-                            method,
-                            original_uri.path_and_query(),
-                            &headers,
-                            opt_body,
-                        ).await {
-                            Ok(res) => {
-                                debug!("received body!");
-                                return res;
-                            }
-                            Err(e) => {
-                                debug!("received error! {:?}", e);
-                                return e.into_response();
-                            }
-                        }
-                    }
+        let receiver = app_state.route_to_socket_chan.get(&route);
+        if receiver.is_none() {
+            debug!("1");
+            let notifier = app_state.route_notifier
+                .entry(route.clone())
+                .or_insert(Notify::new());
+            debug!("2");
+            let route_timeout = tokio::time::timeout(Duration::from_secs(5), notifier.value().notified()).await;
+            debug!("3");
+            match route_timeout {
+                Err(e) => {
+                    debug!("4");
+                    return expected_err.clone().into_response();
+                }
+                _ => {
+                    debug!("5");
                 }
             }
-        };
-        // return expected_err.into_response();
-
-        debug!("Waiting for socket from waiting_socket_hashmap");
-
-        // No socket queue / socket available immediately
-        let (mut waiting_task_tx, mut waiting_task_rx) = tokio::sync::mpsc::channel::<Arc<RwLock<dyn RouterSocket>>>(1);
-        let waiting_task_id = app_state.waiting_socket_key_generator.fetch_add(1, SeqCst);
-        {
-            app_state.waiting_socket_hashmap.write().await.insert(waiting_task_id, WorkaroundRustcAsyncTraitBug(waiting_task_tx));
         }
-        debug!("After inserting task");
-        let timeout = tokio::time::timeout(Duration::from_secs(5), waiting_task_rx.recv()).await;
+        let receiver = receiver.unwrap().clone().1;
+        let timeout = tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await;
+        // FIXME: May deadlock if using read here! Change when needed
         match timeout {
-            Ok(Some(socket)) => {
-
-                waiting_task_rx.close();
-                {
-                    app_state.waiting_socket_hashmap.write().await.remove(&waiting_task_id);
-                }
-
+            Ok(Ok(am_rs)) => {
+                debug!("Get a socket");
                 let mut opt_body = None;
                 if has_body {
                     let (mut pipe_tx, mut pipe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, Error>>();
                     opt_body = Some(pipe_rx);
                     tokio::spawn(pipe_body_data_stream_to_a_mpsc_sender(boxed_stream, pipe_tx));
                 }
-                {
-                    let res = socket.write().await
-                        .on_client_req(method, original_uri.path_and_query(), &headers, opt_body)
-                        .await;
-                    match res {
-                        Ok(res) => {
-                            return res;
-                        }
-                        Err(e) => {
-                            return e.into_response();
-                        }
+                debug!("Has body ? {:?}", opt_body);
+                debug!("Ready to lock on router socket");
+                match am_rs.write().await.on_client_req(
+                    method,
+                    original_uri.path_and_query(),
+                    &headers,
+                    opt_body,
+                ).await {
+                    Ok(res) => {
+                        debug!("received body!");
+                        return res;
+                    }
+                    Err(e) => {
+                        debug!("received error! {:?}", e);
+                        return e.into_response();
                     }
                 }
             }
             _ => {
-                debug!("Desperate but nothing get from waiting.");
-                waiting_task_rx.close();
-                {
-                    app_state.waiting_socket_hashmap.write().await.remove(&waiting_task_id);
-                }
-                debug!("After removing the task id");
-                return expected_err.into_response();
+                debug!("No socket vecdeq available!");
+                return expected_err.clone().into_response();
+                // should_wait = true;
             }
         };
     }
@@ -376,54 +334,42 @@ async fn take_and_store_websocket(wss: WebSocket,
     )));
     info!("Connector registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
     debug!("Before Spawned websocket_exchange");
-    // tokio::spawn(
-    //     websocket_exchange(
-    //         connector_id.clone(), router_socket_id.clone(),
-    //         from_rs_to_ws_rx, from_ws_to_rs_tx, wss_tx, wss_rx, err_chan_rx,
-    //     )
-    // );
+    tokio::spawn(
+        websocket_exchange(
+            connector_id.clone(), router_socket_id.clone(),
+            from_rs_to_ws_rx, from_ws_to_rs_tx, wss_tx, wss_rx, err_chan_rx,
+        )
+    );
     debug!("After Spawned websocket_exchange");
 
-    //     if let Some(task_id) = state.read().await.waiting_socket_hashmap.into_read_only().keys().next() {
-    //         if let Some((_, task)) = state.read().await.waiting_socket_hashmap.remove(task_id) {
-    //             task.send(rs.clone()).await;
-    //         }
-    //     }
-
-    if let Some(task) = state.waiting_socket_hashmap.read().await.iter().next() {
-        debug!("Found task waiting for socket");
-        let id = task.0;
-        debug!("before sending to receiver");
-        let _ = task.1.0.send(rs.clone()).await;
-        debug!("after sending to receiver");
-        // {
-        //     state.waiting_socket_hashmap.write().await.remove(id);
-        // }
-        // debug!("Removed task id after sending to receiver");
-    } else {
-        debug!("No task waiting. Sending to vecdeq");
-        {
-            state
-                .route_to_socket
-                .write()
-                .await
-                .entry(route.clone())
-                .or_insert(Mutex::new(VecDeque::new()))
-                .lock()
-                .await
-                .push_back(rs.clone());
-        }
-        debug!("After sending to vecdeq. lock should released");
+    debug!("No task waiting. Sending to vecdeq");
+    {
+        let chan_pair = async_channel::unbounded();
+        let _ = state
+            .route_to_socket_chan
+            .entry(route.clone())
+            .or_insert(chan_pair)
+            .value()
+            .0
+            .send(rs.clone())
+            .await;
     }
+    debug!("-1");
+    match state.route_notifier.entry(route.clone()) {
+        Entry::Occupied(notifier) => {
+            debug!("-2");
+            notifier.get().notify_waiters();
+        }
+        Entry::Vacant(_) => {
+            debug!("-3");
+        }
+    }
+    debug!("After sending to vecdeq. lock should released");
     {
         // Prepare for some counter
         let write_guard = state.clone();
         let _ = write_guard.counter.fetch_add(1, SeqCst);
     }
-    websocket_exchange(
-        connector_id.clone(), router_socket_id.clone(),
-        from_rs_to_ws_rx, from_ws_to_rs_tx, wss_tx, wss_rx, err_chan_rx,
-    ).await;
 }
 
 async fn websocket_exchange(
@@ -446,15 +392,22 @@ async fn websocket_exchange(
     {
         let notify_ch_close_tx = notify_ch_close_tx.clone();
         let from_ws_to_rs_tx = from_ws_to_rs_tx.clone();
+        let router_socket_id = router_socket_id.clone();
         tokio::spawn(async move {
             while let Some(msg) = wss_send_task_rx.recv().await {
-                let _ = wss_tx.send(msg).await.map_err(|e| {
-                    let _ = from_ws_to_rs_tx.send(Message::Close(None));
-                    let _ = notify_ch_close_tx.send(());
-                });
+                // if let Message::Close(opt_something) = msg {
+                //     debug!("++Sending close frame to connector");
+                //     let _ = wss_tx.send(Message::Close(opt_something));
+                // } else {
+                    let _ = wss_tx.send(msg).await.map_err(|e| {
+                        let _ = from_ws_to_rs_tx.send(Message::Close(None));
+                        let _ = notify_ch_close_tx.send(());
+                    });
+                // }
             }
             drop(notify_ch_close_tx);
             drop(from_ws_to_rs_tx);
+            info!("end of wss_send_task for router_socket_id={}", router_socket_id);
         });
     }
 
@@ -509,10 +462,11 @@ async fn websocket_exchange(
                             // FIXME: Let's believe cloning these channels equals cloning their inner Arc, which is super cheap!
                             let mut from_ws_to_rs_tx = from_ws_to_rs_tx.clone();
                             let mut notify_ch_close_tx = notify_ch_close_tx.clone();
+                            let mut wss_send_task_tx = wss_send_task_tx.clone();
                             // tokio::spawn(
                                 pipe_msg_from_wss_to_router_socket(
                                     connector_id.clone(), router_socket_id.clone(),
-                                    may_err, from_ws_to_rs_tx, notify_ch_close_tx
+                                    may_err, from_ws_to_rs_tx, notify_ch_close_tx, wss_send_task_tx
                                 ).await;
                             // );
                         }
@@ -536,6 +490,7 @@ async fn pipe_msg_from_wss_to_router_socket(
     may_err: Result<Message, Error>,
     from_ws_to_rs_tx: UnboundedSender<Message>,
     notify_ch_close_tx: UnboundedSender<()>,
+    wss_send_task_tx: UnboundedSender<Message>,
 )
 {
     match may_err {
@@ -562,8 +517,10 @@ async fn pipe_msg_from_wss_to_router_socket(
                             clo_fra.code, clo_fra.reason, connector_id, router_socket_id
                         );
                     }
-                    from_ws_to_rs_tx.send(Message::Close(None));
-                    notify_ch_close_tx.send(());
+                    // let _ = wss_send_task_tx.send(Message::Close(None));
+                    debug!("Sending close to connector");
+                    let _ = from_ws_to_rs_tx.send(Message::Close(None));
+                    let _ = notify_ch_close_tx.send(());
                 }
                 _ => {}
             }

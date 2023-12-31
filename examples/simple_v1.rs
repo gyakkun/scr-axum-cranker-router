@@ -1,7 +1,8 @@
 use tokio::net::TcpListener;
+
 use scr_axum_cranker_router::CrankerRouter;
 
-#[tokio::main]
+#[async_std::main]
 async fn main() {
     // SimpleLogger::new()
     //     .with_local_timestamps()
@@ -22,9 +23,8 @@ async fn main() {
     let reg_router = cranker_router.registration_axum_router();
     let visit_router = cranker_router.visit_portal_axum_router();
 
-    tokio::spawn(async {
-        axum::serve(reg_listener, reg_router).await.unwrap()
-    });
-
-    axum::serve(visit_listener, visit_router).await.unwrap();
+    tokio::join!(
+        async {axum::serve(reg_listener, reg_router).await.unwrap(); },
+        async {axum::serve(visit_listener, visit_router).await.unwrap();}
+    );
 }
