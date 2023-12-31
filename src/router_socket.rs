@@ -1,4 +1,4 @@
-use std::fmt::Display;
+
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
 use std::sync::atomic::Ordering::SeqCst;
@@ -317,7 +317,7 @@ impl RouterSocket for RouterSocketV1 {
             }
         }
 
-        let (mut res_body_chan_tx, mut res_body_chan_rx)
+        let (mut res_body_chan_tx, res_body_chan_rx)
             = mpsc::unbounded_channel::<Result<Bytes, CrankerRouterException>>();
         // Should i spawn it somewhere earlier? yes you should
         let mut cranker_res: Option<CrankerProtocolResponse> = None;

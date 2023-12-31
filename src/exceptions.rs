@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use axum::body::Body;
-use axum::BoxError;
+
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 

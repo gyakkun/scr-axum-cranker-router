@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
+
 use std::net::SocketAddr;
-use std::ops::{Deref, DerefMut};
+
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
@@ -21,13 +21,13 @@ use axum::routing::any;
 use bytes::Bytes;
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
-use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
+use futures::{SinkExt, StreamExt, TryStreamExt};
 use futures::stream::{BoxStream, SplitSink, SplitStream};
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
 use tokio::sync::{Notify, RwLock};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tower::Service;
+
 use tower_http::limit;
 use uuid::Uuid;
 
@@ -162,8 +162,8 @@ impl CrankerRouter {
         let body = req.into_body();
         let has_body = judge_has_body_from_header_http_1(&headers) || !body.is_end_stream();
 
-        let mut body_data_stream = body.into_data_stream();
-        let mut boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, Error>>;
+        let body_data_stream = body.into_data_stream();
+        let boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, Error>>;
 
         let path = original_uri.path().to_string();
         let route = DEFAULT_ROUTE_RESOLVER.resolve(&app_state.route_to_socket_chan, path.clone());
@@ -189,7 +189,7 @@ impl CrankerRouter {
                 debug!("Get a socket");
                 let mut opt_body = None;
                 if has_body {
-                    let (mut pipe_tx, mut pipe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, Error>>();
+                    let (pipe_tx, pipe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, Error>>();
                     opt_body = Some(pipe_rx);
                     tokio::spawn(pipe_body_data_stream_to_a_mpsc_sender(boxed_stream, pipe_tx));
                 }
@@ -281,7 +281,7 @@ fn judge_has_body_from_header_http_1(headers: &HeaderMap) -> bool {
 }
 
 async fn pipe_body_data_stream_to_a_mpsc_sender(mut stream: BoxStream<'_, Result<Bytes, Error>>,
-                                                mut sender: UnboundedSender<Result<Bytes, Error>>,
+                                                sender: UnboundedSender<Result<Bytes, Error>>,
 ) -> Result<(), CrankerRouterException>
 {
     while let Some(frag) = stream.next().await {
@@ -311,11 +311,11 @@ async fn take_and_store_websocket(wss: WebSocket,
                                   route: String,
                                   addr: SocketAddr,
 ) {
-    let (mut from_ws_to_rs_tx, mut from_ws_to_rs_rx): (UnboundedSender<Message>, UnboundedReceiver<Message>) = unbounded_channel::<Message>();
-    let (mut from_rs_to_ws_tx, mut from_rs_to_ws_rx) = unbounded_channel::<Message>();
-    let (mut wss_tx, mut wss_rx) = wss.split();
+    let (from_ws_to_rs_tx, from_ws_to_rs_rx): (UnboundedSender<Message>, UnboundedReceiver<Message>) = unbounded_channel::<Message>();
+    let (from_rs_to_ws_tx, from_rs_to_ws_rx) = unbounded_channel::<Message>();
+    let (wss_tx, wss_rx) = wss.split();
     let router_socket_id = Uuid::new_v4().to_string();
-    let (mut err_chan_tx, mut err_chan_rx) = unbounded_channel::<CrankerRouterException>();
+    let (err_chan_tx, err_chan_rx) = unbounded_channel::<CrankerRouterException>();
     let rs = Arc::new(RwLock::new(RouterSocketV1::new(
         route.clone(),
         component_name.clone(),
@@ -370,19 +370,19 @@ async fn websocket_exchange(
     connector_id: String,
     router_socket_id: String,
     mut from_rs_to_ws_rx: UnboundedReceiver<Message>,
-    mut from_ws_to_rs_tx: UnboundedSender<Message>,
+    from_ws_to_rs_tx: UnboundedSender<Message>,
     mut wss_tx: SplitSink<WebSocket, Message>,
     mut wss_rx: SplitStream<WebSocket>,
     mut err_chan_from_rs: UnboundedReceiver<CrankerRouterException>,
 )
 {
     debug!("Listening on connector ws message!");
-    let (mut notify_ch_close_tx, mut notify_ch_close_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-    let mut notify_ch_close_tx_clone = notify_ch_close_tx.clone();
+    let (notify_ch_close_tx, mut notify_ch_close_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let notify_ch_close_tx_clone = notify_ch_close_tx.clone();
     let msg_counter_lib = AtomicUsize::new(0);
 
     // queue the task to wss_tx
-    let (mut wss_send_task_tx, mut wss_send_task_rx) = unbounded_channel::<Message>();
+    let (wss_send_task_tx, mut wss_send_task_rx) = unbounded_channel::<Message>();
     {
         let notify_ch_close_tx = notify_ch_close_tx.clone();
         let from_ws_to_rs_tx = from_ws_to_rs_tx.clone();
@@ -454,9 +454,9 @@ async fn websocket_exchange(
                         Some(may_err) => {
                             msg_counter_lib.fetch_add(1,SeqCst);
                             // FIXME: Let's believe cloning these channels equals cloning their inner Arc, which is super cheap!
-                            let mut from_ws_to_rs_tx = from_ws_to_rs_tx.clone();
-                            let mut notify_ch_close_tx = notify_ch_close_tx.clone();
-                            let mut wss_send_task_tx = wss_send_task_tx.clone();
+                            let from_ws_to_rs_tx = from_ws_to_rs_tx.clone();
+                            let notify_ch_close_tx = notify_ch_close_tx.clone();
+                            let wss_send_task_tx = wss_send_task_tx.clone();
                             // tokio::spawn(
                                 pipe_msg_from_wss_to_router_socket(
                                     connector_id.clone(), router_socket_id.clone(),

@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use axum::http;
 use axum::response::Response;
-use log::warn;
+
 
 use crate::exceptions::CrankerRouterException;
 
