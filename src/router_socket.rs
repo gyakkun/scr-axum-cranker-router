@@ -12,7 +12,7 @@ use axum::http::uri::PathAndQuery;
 use bytes::Bytes;
 use futures::{SinkExt, TryFutureExt};
 use log::{debug, error, info};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::cranker_protocol_response::CrankerProtocolResponse;
@@ -81,16 +81,15 @@ pub struct RouterSocketV1 {
     // pub proxy_listeners: Vec<&'static dyn ProxyListener>,
     // on_ready_for_action: &'static dyn Fn() -> (),
     pub remote_address: SocketAddr,
-    pub is_removed: bool,
-    pub has_response: bool,
+    pub is_removed: AtomicBool,
+    pub has_response: AtomicBool,
     pub bytes_received: AtomicI64,
     pub bytes_sent: AtomicI64,
     pub binary_frame_received: AtomicI64,
-    pub socket_wait_in_millis: i64,
-    pub error: Option<BoxError>,
-    pub duration_millis: i64,
+    pub socket_wait_in_millis: AtomicI64,
+    pub error: Mutex<Option<CrankerRouterException>>,
+    pub duration_millis: AtomicI64,
     pub wss_exchange: RSv1WssExchange,
-    pub err_chan_to_wss: Sender<CrankerRouterException>,
 
     // below should be private for inner routine
 
@@ -114,31 +113,19 @@ impl RouterSocketV1 {
             connector_instance_id,
             remote_address,
 
-            is_removed: false,
-            has_response: false,
+            is_removed: AtomicBool::new(false),
+            has_response: AtomicBool::new(false),
             bytes_received: AtomicI64::new(0),
             bytes_sent: AtomicI64::new(0),
             binary_frame_received: AtomicI64::new(0),
-            // response: None,
-            // client_request: None,
-            socket_wait_in_millis: -1,
-            error: None,
-            duration_millis: -1,
-            wss_exchange: RSv1WssExchange::new(from_web_socket, to_websocket, err_chan_to_websocket.clone()),
-            err_chan_to_wss: err_chan_to_websocket,
+            socket_wait_in_millis: AtomicI64::new(-1),
+            error: Mutex::new(None),
+            duration_millis: AtomicI64::new(-1),
+            wss_exchange: RSv1WssExchange::new(from_web_socket, to_websocket, err_chan_to_websocket),
         }
     }
 
-    fn build_request_line(method: Method, path_and_query: Option<&PathAndQuery>) -> String {
-        let mut res = String::new();
-        res.push_str(method.as_str());
-        res.push(' ');
-        match path_and_query {
-            Some(paq) => res.push_str(paq.as_str()),
-            _ => {}
-        }
-        res
-    }
+
 
 }
 
@@ -262,7 +249,7 @@ impl RouterSocket for RouterSocketV1 {
         });
         debug!("2");
 
-        let request_line = Self::build_request_line(method, path_and_query);
+        let request_line = build_request_line(method, path_and_query);
         let cranker_req_bdr = CrankerProtocolRequestBuilder::new()
             .with_request_line(request_line)
             .with_request_headers(&client_request_headers);
@@ -365,5 +352,15 @@ impl RouterSocket for RouterSocketV1 {
                 format!("failed to build body: {:?}", ie)
             ))
     }
+}
 
+fn build_request_line(method: Method, path_and_query: Option<&PathAndQuery>) -> String {
+    let mut res = String::new();
+    res.push_str(method.as_str());
+    res.push(' ');
+    match path_and_query {
+        Some(paq) => res.push_str(paq.as_str()),
+        _ => {}
+    }
+    res
 }
