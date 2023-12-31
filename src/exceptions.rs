@@ -8,12 +8,20 @@ use axum::response::{IntoResponse, Response};
 
 #[derive(Debug, Clone)]
 pub struct CrankerRouterException {
-    reason: String,
+    pub reason: String,
 }
 
 impl CrankerRouterException {
     pub fn new(reason: String) -> Self {
         Self { reason }
+    }
+
+    pub fn plus(self, another: CrankerRouterException) -> Self {
+        let mut reason = self.reason;
+        reason.push_str(another.reason.as_str());
+        Self {
+            reason
+        }
     }
 }
 
@@ -73,6 +81,15 @@ impl Display for CrankerProtocolVersionNotSupportedException {
 
 impl Error for CrankerProtocolVersionNotSupportedException {}
 
+pub fn compose_ex<ANY>(
+    opt_total_err: Option<CrankerRouterException>,
+    this_may_err: Result<ANY, CrankerRouterException>,
+) -> Option<CrankerRouterException> {
+    if let Err(ex) = this_may_err {
+        return Some(opt_total_err.map_or(ex.clone(), |some| some.plus(ex)));
+    }
+    return opt_total_err;
+}
 
 #[test]
 fn test_error() {
