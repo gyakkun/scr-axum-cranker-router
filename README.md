@@ -4,7 +4,8 @@
 but it's not so painful now, that's why this one is written from scratch again.
 
 ## TODO
-* [ ] Replace `VecDeque` with a timeout-able mpsc channel for polling router socket
+* [x] Replace `VecDeque` with a timeout-able mpsc channel for polling router socket
 * [ ] Define errors with `anyhow` crate
 * [ ] Wrap the whole thing into a tower service
 * [ ] V3 support
+* [ ] Handle invalid router socket.
