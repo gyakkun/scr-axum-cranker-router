@@ -19,6 +19,7 @@ use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use bytes::Bytes;
+use dashmap::DashMap;
 use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
 use futures::stream::{BoxStream, SplitSink, SplitStream};
 use lazy_static::lazy_static;
@@ -102,7 +103,7 @@ pub struct CrankerRouterState {
     route_to_socket: RwLock<HashMap<String, Mutex<VecDeque<Arc<RwLock<dyn RouterSocket>>>>>>,
 
     waiting_socket_key_generator: AtomicU64,
-    waiting_socket_hashmap: RwLock<HashMap<u64, WorkaroundRustcAsyncTraitBug>>,
+    waiting_socket_hashmap: DashMap<u64, WorkaroundRustcAsyncTraitBug>,
 }
 
 pub type TSCRState = Arc<CrankerRouterState>;
@@ -111,9 +112,6 @@ pub struct CrankerRouter {
     state: TSCRState,
 }
 
-
-
-
 impl CrankerRouter {
     pub fn new() -> Self {
         Self {
@@ -121,7 +119,7 @@ impl CrankerRouter {
                 counter: AtomicU64::new(0),
                 route_to_socket: RwLock::new(HashMap::new()),
                 waiting_socket_key_generator: AtomicU64::new(0),
-                waiting_socket_hashmap: RwLock::new(HashMap::new()),
+                waiting_socket_hashmap: DashMap::new()
             })
         }
     }
@@ -222,18 +220,19 @@ impl CrankerRouter {
         // No socket queue / socket available immediately
         let (mut waiting_task_tx, mut waiting_task_rx) = tokio::sync::mpsc::channel::<Arc<RwLock<dyn RouterSocket>>>(1);
         let waiting_task_id = app_state.waiting_socket_key_generator.fetch_add(1, SeqCst);
-        {
-            app_state.waiting_socket_hashmap.write().await.insert(waiting_task_id, WorkaroundRustcAsyncTraitBug(waiting_task_tx));
-        }
+        let app_state_clone = app_state.clone();
+        tokio::spawn(async move {
+            app_state_clone.waiting_socket_hashmap.insert(waiting_task_id, WorkaroundRustcAsyncTraitBug(waiting_task_tx));
+        });
         debug!("After inserting task");
         let timeout = tokio::time::timeout(Duration::from_secs(5), waiting_task_rx.recv()).await;
         match timeout {
             Ok(Some(socket)) => {
-
                 waiting_task_rx.close();
-                {
-                    app_state.waiting_socket_hashmap.write().await.remove(&waiting_task_id);
-                }
+                let app_state_clone = app_state.clone();
+                tokio::spawn(async move {
+                    app_state_clone.waiting_socket_hashmap.remove(&waiting_task_id);
+                });
 
                 let mut opt_body = None;
                 if has_body {
@@ -258,9 +257,10 @@ impl CrankerRouter {
             _ => {
                 debug!("Desperate but nothing get from waiting.");
                 waiting_task_rx.close();
-                {
-                    app_state.waiting_socket_hashmap.write().await.remove(&waiting_task_id);
-                }
+                let app_state_clone = app_state.clone();
+                tokio::spawn(async move {
+                    app_state_clone.waiting_socket_hashmap.remove(&waiting_task_id);
+                });
                 debug!("After removing the task id");
                 return expected_err.into_response();
             }
@@ -376,12 +376,12 @@ async fn take_and_store_websocket(wss: WebSocket,
     )));
     info!("Connector registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
     debug!("Before Spawned websocket_exchange");
-    // tokio::spawn(
-    //     websocket_exchange(
-    //         connector_id.clone(), router_socket_id.clone(),
-    //         from_rs_to_ws_rx, from_ws_to_rs_tx, wss_tx, wss_rx, err_chan_rx,
-    //     )
-    // );
+    tokio::spawn(
+        websocket_exchange(
+            connector_id.clone(), router_socket_id.clone(),
+            from_rs_to_ws_rx, from_ws_to_rs_tx, wss_tx, wss_rx, err_chan_rx,
+        )
+    );
     debug!("After Spawned websocket_exchange");
 
     //     if let Some(task_id) = state.read().await.waiting_socket_hashmap.into_read_only().keys().next() {
@@ -390,17 +390,22 @@ async fn take_and_store_websocket(wss: WebSocket,
     //         }
     //     }
 
-    if let Some(task) = state.waiting_socket_hashmap.read().await.iter().next() {
+    if let Some(task) = state.waiting_socket_hashmap.iter().next() {
         debug!("Found task waiting for socket");
-        let id = task.0;
+        let id = task.key();
         debug!("before sending to receiver");
-        let _ = task.1.0.send(rs.clone()).await;
+        // let rs_clone = rs.clone();
+        // tokio::spawn(async move {
+        let _ = task.value().0.send(rs).await;
+        // });
+        // let _ = .await;
         debug!("after sending to receiver");
         // {
         //     state.waiting_socket_hashmap.write().await.remove(id);
         // }
         // debug!("Removed task id after sending to receiver");
-    } else {
+    } else
+    {
         debug!("No task waiting. Sending to vecdeq");
         {
             state
@@ -420,10 +425,10 @@ async fn take_and_store_websocket(wss: WebSocket,
         let write_guard = state.clone();
         let _ = write_guard.counter.fetch_add(1, SeqCst);
     }
-    websocket_exchange(
-        connector_id.clone(), router_socket_id.clone(),
-        from_rs_to_ws_rx, from_ws_to_rs_tx, wss_tx, wss_rx, err_chan_rx,
-    ).await;
+    // websocket_exchange(
+    //     connector_id.clone(), router_socket_id.clone(),
+    //     from_rs_to_ws_rx, from_ws_to_rs_tx, wss_tx, wss_rx, err_chan_rx,
+    // ).await;
 }
 
 async fn websocket_exchange(

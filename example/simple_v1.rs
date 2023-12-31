@@ -1,7 +1,7 @@
 use tokio::net::TcpListener;
 use scr_axum_cranker_router::CrankerRouter;
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
     // SimpleLogger::new()
     //     .with_local_timestamps()
