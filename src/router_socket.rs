@@ -272,10 +272,10 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
 
     // recv nothing from underlying wss, implicating it already closed
     should_remove.store(true, SeqCst);
-    let _ = wss_recv_pipe_tx.close(); // close or drop?
-    let _ = err_chan_tx.send_blocking(CrankerRouterException::new(format!(
-        "underlying wss already closed. router_socket_id={}", router_socket_id
-    )));
+    // let _ = wss_recv_pipe_tx.close(); // close or drop?
+    // let _ = err_chan_tx.send_blocking(CrankerRouterException::new(format!(
+    //     "underlying wss already closed. router_socket_id={}", router_socket_id
+    // )));
 }
 
 async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
@@ -626,8 +626,7 @@ impl RouterSocket for RouterSocketV1 {
                 CrankerRouterException::new(format!(
                     "seems nothing received from tgt res hdr chan and it closed. router_socket_id={}", self.router_socket_id
                 ))
-            )?
-            .map_err(|e| e.plus_str(self.router_socket_id.as_str()))?
+            )??
         {
             cranker_res = Some(CrankerProtocolResponse::new(hdr_res)?);
         }
