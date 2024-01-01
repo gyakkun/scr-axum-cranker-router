@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
 use std::sync::atomic::Ordering::{AcqRel, SeqCst};
 
 use async_channel::{Receiver, Sender};
-use axum::{async_trait, http};
+use axum::async_trait;
 use axum::body::Body;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::http::{HeaderMap, Method, Response, StatusCode};
@@ -591,6 +591,15 @@ impl WebSocketListener for RouterSocketV1 {
         total_err = exceptions::compose_ex(total_err, may_ex);
         if total_err.is_some() {
             return Err(total_err.unwrap());
+        }
+        Ok(())
+    }
+
+    async fn on_ping(&self, ping_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
+        if let Err(e) = self.wss_send_task_tx.send(Message::Pong(ping_msg)).await {
+            return self.on_error(CrankerRouterException::new(format!(
+                "failed to pong back {:?}", e
+            )));
         }
         Ok(())
     }

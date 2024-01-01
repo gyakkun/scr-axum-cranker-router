@@ -259,8 +259,6 @@ impl CrankerRouter {
     {
         let route = ext_map.get(&"route".to_string()).unwrap();
         let domain = ext_map.get(&"domain".to_string()).unwrap();
-        debug!("ext map: {:?}", ext_map);
-        debug!("ver neg: {:?}", ver_neg);
         // Extract component name and connector id
         let connector_id = params.get("connectorInstanceID")
             .map(|s| s.to_string())
@@ -283,9 +281,6 @@ impl CrankerRouter {
         // TODO: Error handling - what if all these fields not exists?
         let domain = ext_map.get("domain").unwrap().to_string();
         let route = ext_map.get("route").unwrap().to_owned();
-
-        debug!("connector id : {:?}", connector_id);
-        debug!("component name : {:?}", component_name);
 
         ws
             .protocols([ver_neg.dealt])
@@ -327,7 +322,6 @@ async fn pipe_body_data_stream_to_channel_sender(
 /// Domain and route is mandatory so add a middleware to check.
 /// Return BAD_REQUEST if illegal
 async fn validate_route_domain_and_cranker_version(
-    State(appstate): State<TSCRState>,
     headers: HeaderMap,
     mut request: Request<Body>,
     next: Next,
@@ -347,7 +341,6 @@ async fn validate_route_domain_and_cranker_version(
             return (StatusCode::BAD_REQUEST, format!("Failed to convert Route header to str: {:?}", to_str_err)).into_response();
         }
     };
-
 
     let domain = match headers.get("Domain")
         .map(|r| r.to_str())
