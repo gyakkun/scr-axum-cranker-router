@@ -23,6 +23,22 @@ impl CrankerRouterException {
             reason
         }
     }
+
+    pub fn plus_string(self, further_reason: String) -> Self {
+        let mut reason = self.reason;
+        reason.push_str(further_reason.as_str());
+        Self {
+            reason
+        }
+    }
+
+    pub fn plus_str(self, further_reason: &str) -> Self {
+        let mut reason = self.reason;
+        reason.push_str(further_reason);
+        Self {
+            reason
+        }
+    }
 }
 
 impl Display for CrankerRouterException {

@@ -2,8 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
-use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
@@ -11,27 +10,25 @@ use axum::{BoxError, Error, Extension, http, Router, ServiceExt};
 use axum::body::{Body, HttpBody};
 use axum::extract::{ConnectInfo, OriginalUri, Query, State, WebSocketUpgrade};
 use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
-use axum::extract::ws::{Message, WebSocket};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use axum_macros::debug_handler;
 use bytes::Bytes;
 use dashmap::DashMap;
-use dashmap::mapref::entry::Entry;
 use futures::{SinkExt, StreamExt, TryStreamExt};
-use futures::stream::{BoxStream, SplitSink, SplitStream};
+use futures::stream::BoxStream;
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::Notify;
+use tokio_util::io::SinkWriter;
 use tower_http::limit;
 use uuid::Uuid;
 
 use crate::exceptions::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException, CrankerRouterException};
 use crate::route_resolver::{DEFAULT_ROUTE_RESOLVER, RouteResolver};
-use crate::router_socket::{RouterSocket, RouterSocketV1};
+use crate::router_socket::RouterSocket;
 
 pub mod cranker_protocol;
 pub mod router_socket;
@@ -158,15 +155,19 @@ impl CrankerRouter {
         let body = req.into_body();
         let has_body = judge_has_body_from_header_http_1(&headers) || !body.is_end_stream();
 
-        let body_data_stream = body.into_data_stream();
-        let boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, Error>>;
+        let body_data_stream = body.into_data_stream()
+            .map_err(|e| CrankerRouterException::new(format!(
+                "axum ex when piping cli res body: {:?}", e
+            )));
+        // The full qualified name is  Pin<Box<MapErr<BodyDataStream, fn(Error) -> CrankerRouterException>>> which is too long
+        let boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, CrankerRouterException>>;
 
         let path = original_uri.path().to_string();
         let route = DEFAULT_ROUTE_RESOLVER.resolve(&app_state.route_to_socket_chan, path.clone());
         let expected_err = CrankerRouterException::new("No router socket available".to_string());
-        let receiver = app_state.route_to_socket_chan.get(&route);
+        let opt_router_socket_receiver = app_state.route_to_socket_chan.get(&route);
         // mu-cranker-router here responses with 404 immediately
-        if receiver.is_none() {
+        if opt_router_socket_receiver.is_none() {
             let notifier = app_state.route_notifier
                 .entry(route.clone())
                 .or_insert(Notify::new());
@@ -178,20 +179,29 @@ impl CrankerRouter {
                 _ => {}
             }
         }
-        let receiver = receiver.unwrap().clone().1;
-        let timeout = tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await;
+        let router_socket_receiver = opt_router_socket_receiver.unwrap().clone().1;
+        let timeout = tokio::time::timeout(Duration::from_secs(5), async {
+             while let Ok(rs) = router_socket_receiver.recv().await {
+                 // skip socket that should be removed
+                 if rs.should_remove() {
+                     continue;
+                 }
+                 return Ok(rs);
+             }
+            Err(())
+        }).await;
         match timeout {
-            Ok(Ok(am_rs)) => {
+            Ok(Ok(rs)) => {
                 debug!("Get a socket");
                 let mut opt_body = None;
                 if has_body {
-                    let (pipe_tx, pipe_rx) = async_channel::unbounded::<Result<Bytes, Error>>();
+                    let (pipe_tx, pipe_rx) = async_channel::unbounded::<Result<Bytes, CrankerRouterException>>();
                     opt_body = Some(pipe_rx);
                     tokio::spawn(pipe_body_data_stream_to_channel_sender(boxed_stream, pipe_tx));
                 }
                 debug!("Has body ? {:?}", opt_body);
                 debug!("Ready to lock on router socket");
-                match am_rs.on_client_req(
+                match rs.on_client_req(
                     method,
                     original_uri.path_and_query(),
                     &headers,
@@ -208,9 +218,8 @@ impl CrankerRouter {
                 }
             }
             _ => {
-                debug!("No socket vecdeq available!");
+                debug!("No socket available!");
                 return expected_err.clone().into_response();
-                // should_wait = true;
             }
         };
     }
@@ -258,7 +267,7 @@ impl CrankerRouter {
 
         ws
             .protocols([ver_neg.dealt])
-            .on_upgrade(move |socket| router_socket::take_and_store_websocket(
+            .on_upgrade(move |socket| router_socket::take_wss_and_create_router_socket(
                 socket, app_state.clone(), connector_id, component_name, ver_neg.dealt.to_string(), domain, route,
                 addr,
             ))
@@ -277,24 +286,20 @@ fn judge_has_body_from_header_http_1(headers: &HeaderMap) -> bool {
 }
 
 async fn pipe_body_data_stream_to_channel_sender(
-    mut stream: BoxStream<'_, Result<Bytes, Error>>,
-    sender: Sender<Result<Bytes, Error>>,
+    mut stream: BoxStream<'_, Result<Bytes, CrankerRouterException>>,
+    sender: Sender<Result<Bytes, CrankerRouterException>>,
 ) -> Result<(), CrankerRouterException>
 {
     while let Some(frag) = stream.next().await {
-        match sender.send(frag).await {
-            Err(e) => {
-                let failed_reason = format!("error when piping body data stream to mpsc sender, pipe will break: {:?}", e);
-                error!("{failed_reason}");
-                return Err(CrankerRouterException::new(failed_reason));
-            }
-            _ => {}
+        if let Err(e) = sender.send(frag).await {
+            let failed_reason = format!("error when piping body data stream to mpsc sender, pipe will break: {:?}", e);
+            error!("{failed_reason}");
+            return Err(CrankerRouterException::new(failed_reason));
         }
     }
     drop(sender);
     Ok(())
 }
-
 
 
 /// Domain and route is mandatory so add a middleware to check.
