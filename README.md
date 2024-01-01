@@ -9,4 +9,7 @@ but it's not so painful now, that's why this one is written from scratch again.
 * [ ] Wrap the whole thing into a tower service
 * [ ] V3 support
 * [x] Handle invalid router socket.
-* [ ] Invoke listeners at hooking point
+* [ ] ~~Invoke listeners at hooking point~~ Invoke `on_failure_to_acquire_proxy_socket` in `ProxyListener`
+* [ ] Add health map for observability. To achieve this we need to change the current `Arc<dyn RouteSocket>` in 
+`route_to_socket_chan` to `Weak<_>`, and store the only Arc in a global map in the AppState. Reference `WebSocketFarm`
+in mu cranker router.
