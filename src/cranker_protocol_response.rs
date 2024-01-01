@@ -53,6 +53,10 @@ impl CrankerProtocolResponse {
         Ok(Self { headers, status })
     }
 
+    pub fn headers_map(&self){
+
+    }
+
     pub fn default_failed() -> Self {
         Self {
             headers: Vec::new(),

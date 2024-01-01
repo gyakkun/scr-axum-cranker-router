@@ -27,6 +27,7 @@ use tower_http::limit;
 use uuid::Uuid;
 
 use crate::exceptions::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException, CrankerRouterException};
+use crate::proxy_listener::ProxyListener;
 use crate::route_resolver::{DEFAULT_ROUTE_RESOLVER, RouteResolver};
 use crate::router_socket::{RouterSocket, RouterSocketV1};
 
@@ -39,6 +40,7 @@ pub mod cranker_protocol_request_builder;
 pub mod route_resolver;
 pub mod proxy_info;
 pub mod websocket_listener;
+pub mod proxy_listener;
 
 pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &'static str = "crankerprotocol";
 // should be CrankerProtocol, but axum all lower cased
@@ -104,6 +106,7 @@ pub struct CrankerRouterState {
         Receiver<Arc<dyn RouterSocket>>
     )>,
     route_notifier: DashMap<String, Notify>,
+    proxy_listeners: Vec<Arc<dyn ProxyListener>>
 }
 
 pub type TSCRState = Arc<CrankerRouterState>;
@@ -113,13 +116,17 @@ pub struct CrankerRouter {
 }
 
 impl CrankerRouter {
-    pub fn new() -> Self {
+    pub fn new(
+        proxy_listeners: Vec<Arc<dyn ProxyListener>>
+    ) -> Self {
+
         Self {
             state: Arc::new(CrankerRouterState {
                 counter: AtomicU64::new(0),
                 route_to_socket_chan: DashMap::new(),
                 route_notifier: DashMap::new(),
-            })
+                proxy_listeners
+            }),
         }
     }
 
@@ -219,14 +226,14 @@ impl CrankerRouter {
                     Ok(res) => {
                         debug!("recv tgt res bdy from rs!");
                         if !res.status().is_success() && !rs_clone.should_remove() {
-                            rs_clone.raise_completion_event();
+                            let _ = rs_clone.raise_completion_event();
                         }
                         return res;
                     }
                     Err(e) => {
                         debug!("recv err from rs, expect tgt res bdy: {:?}", e);
                         if !rs_clone.should_remove() {
-                            rs_clone.raise_completion_event();
+                            let _ = rs_clone.raise_completion_event();
                         }
                         return e.into_response();
                     }
@@ -284,7 +291,7 @@ impl CrankerRouter {
             .protocols([ver_neg.dealt])
             .on_upgrade(move |socket| router_socket::take_wss_and_create_router_socket(
                 socket, app_state.clone(), connector_id, component_name, ver_neg.dealt.to_string(), domain, route,
-                addr,
+                addr
             ))
     }
 }

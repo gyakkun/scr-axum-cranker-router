@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
 use std::sync::atomic::Ordering::{AcqRel, SeqCst};
 
 use async_channel::{Receiver, Sender};
-use axum::async_trait;
+use axum::{async_trait, http};
 use axum::body::Body;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::http::{HeaderMap, Method, Response, StatusCode};
@@ -25,6 +25,7 @@ use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::cranker_protocol_response::CrankerProtocolResponse;
 use crate::exceptions::CrankerRouterException;
 use crate::proxy_info::ProxyInfo;
+use crate::proxy_listener::ProxyListener;
 use crate::websocket_listener::WebSocketListener;
 
 pub const HEADER_MAX_SIZE: usize = 64 * 1024; // 64KBytes
@@ -35,8 +36,8 @@ pub(crate) trait RouterSocket: Send + Sync + ProxyInfo {
 
     fn cranker_version(&self) -> &'static str;
 
-    fn raise_completion_event(&self) {
-        ()
+    fn raise_completion_event(&self) -> Result<(), CrankerRouterException> {
+        Ok(())
     }
 
     // accept a client req
@@ -55,7 +56,7 @@ pub struct RouterSocketV1 {
     pub router_socket_id: String,
     // pub web_socket_farm: Option<Weak<Mutex<WebSocketFarm>>>,
     pub connector_instance_id: String,
-    // pub proxy_listeners: Vec<&'static dyn ProxyListener>,
+    pub proxy_listeners: Vec<Arc<dyn ProxyListener>>,
     pub remote_address: SocketAddr,
     pub should_remove: Arc<AtomicBool>,
     // previously `is_removed`, but actually we can't remove ourself from the mpmc channel so this is just a marker
@@ -99,6 +100,7 @@ impl RouterSocketV1 {
                remote_address: SocketAddr,
                underlying_wss_tx: SplitSink<WebSocket, Message>,
                underlying_wss_rx: SplitStream<WebSocket>,
+               proxy_listeners: Vec<Arc<dyn ProxyListener>>
     ) -> Self {
         let (tgt_res_hdr_tx, tgt_res_hdr_rx) = async_channel::unbounded();
         let (tgt_res_bdy_tx, tgt_res_bdy_rx) = async_channel::unbounded();
@@ -140,6 +142,7 @@ impl RouterSocketV1 {
             component_name,
             router_socket_id,
             connector_instance_id,
+            proxy_listeners,
             remote_address,
 
             should_remove: should_remove.clone(),
@@ -489,16 +492,37 @@ impl WebSocketListener for RouterSocketV1 {
     async fn on_binary(&self, bin: Vec<u8>) -> Result<(), CrankerRouterException> {
         // slightly different from mu cranker router that it will judge the current state of websocket / has_response first
         self.binary_frame_received.fetch_add(1, SeqCst);
-        if let Err(e) = self.cli_side_res_sender.send_target_response_body_binary_fragment_to_client(bin).await {
-            return self.on_error(e);
+        let mut res = Ok(());
+        let mut opt_bin_clone_for_listeners = None;
+
+        if !self.proxy_listeners.is_empty() {
+            // FIXME: Copy vec<u8> is expensive!
+            // it's inevitable to make a clone since the
+            // terminate method of wss_tx.send moves the whole Vec<u8>
+            opt_bin_clone_for_listeners = Some(bin.clone());
         }
-        Ok(())
+
+        if let Err(e) = self.cli_side_res_sender.send_target_response_body_binary_fragment_to_client(bin).await {
+            res = self.on_error(e);
+        }
+
+        if !self.proxy_listeners.is_empty(){
+            let bin_clone = Bytes::from(opt_bin_clone_for_listeners.unwrap());
+            for i in self.proxy_listeners.iter() {
+                let _ = i.on_response_body_chunk_received_from_target(self, &bin_clone);
+            }
+        }
+
+        res
     }
 
     // when receiving close frame (equals client close ?)
     // Theoretically, tungstenite should already reply a close frame to connector, but in practice chances are it wouldn't
     async fn on_close(&self, opt_close_frame: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException> {
-        // TODO: ProxyListener stuff
+        for i in self.proxy_listeners.iter() {
+            let _ = i.on_response_body_chunk_received(self);
+        }
+
         let mut code = 4000; // 4000-4999 is reserved
         let mut reason = String::new();
         let mut total_err: Option<CrankerRouterException> = None;
@@ -562,7 +586,8 @@ impl WebSocketListener for RouterSocketV1 {
         }
 
         self.should_remove.store(true, SeqCst);
-        self.raise_completion_event();
+        let may_ex = self.raise_completion_event();
+        total_err = exceptions::compose_ex(total_err, may_ex);
         if total_err.is_some() {
             return Err(total_err.unwrap());
         }
@@ -573,7 +598,7 @@ impl WebSocketListener for RouterSocketV1 {
         // The actual heavy burden is done in `pipe_and_queue_the_wss_send_task_and_handle_err_chan`
         self.err_chan_tx.send_blocking(err)
             .map(|ok| {
-                self.raise_completion_event();
+                let _ = self.raise_completion_event();
                 ok
             })
             .map_err(|se| CrankerRouterException::new(format!(
@@ -638,14 +663,17 @@ impl RouterSocket for RouterSocketV1 {
         return CRANKER_V_1_0;
     }
 
-    fn raise_completion_event(&self) {
+    fn raise_completion_event(&self) -> Result<(), CrankerRouterException> {
         let cli_sta = self.client_req_start_ts.load(SeqCst);
-        if cli_sta == 0 {
-            return;
+        if cli_sta == 0 || self.proxy_listeners.is_empty() {
+            return Ok(());
         }
-        // if self .proxyeventlistner_list .is not empty
         let dur = time_utils::current_time_millis() - self.client_req_start_ts.load(SeqCst);
         self.duration_millis.store(dur, SeqCst);
+        for i in self.proxy_listeners.iter() {
+            i.on_complete(self)?;
+        }
+        Ok(())
     }
 
     async fn on_client_req(self: Arc<Self>,
@@ -660,6 +688,11 @@ impl RouterSocket for RouterSocketV1 {
                 "try to handle cli req in a should_remove router socket. router_socket_id={}", &self.router_socket_id
             )));
         }
+
+        for i in self.proxy_listeners.iter() {
+            let _ = i.on_before_proxy_to_target(self.as_ref(), headers);
+        }
+
         let current_time_millis = time_utils::current_time_millis();
         self.socket_wait_in_millis.fetch_add(current_time_millis, SeqCst);
         self.client_req_start_ts.store(current_time_millis, SeqCst);
@@ -705,12 +738,17 @@ impl RouterSocket for RouterSocketV1 {
         // 5. Pipe cli req body to underlying wss
         debug!("5");
         if let Some(mut body) = opt_body {
-            while let Ok(r) = body.recv().await {
+            while let Ok(res_bdy_chunk) = body.recv().await {
                 debug!("6");
-                match r {
-                    Ok(b) => {
+                match res_bdy_chunk {
+                    Ok(bytes) => {
                         debug!("8");
-                        self.wss_send_task_tx.send(Message::Binary(b.to_vec())).await
+
+                        for i in self.proxy_listeners.iter() {
+                            let _ = i.on_request_body_chunk_sent_to_target(self.as_ref(), &bytes);
+                        }
+
+                        self.wss_send_task_tx.send(Message::Binary(bytes.to_vec())).await
                             .map_err(|e| {
                                 let failed_reason = format!(
                                     "error when sending req body to tgt: {:?}", e
@@ -734,6 +772,10 @@ impl RouterSocket for RouterSocketV1 {
             )))?;
         }
 
+        for i in self.proxy_listeners.iter() {
+            i.on_request_body_sent_to_target(self.as_ref())?;
+        }
+
         let mut cranker_res: Option<CrankerProtocolResponse> = None;
 
         // if the wss_recv_pipe chan is EMPTY AND CLOSED then err will come from this recv()
@@ -742,13 +784,15 @@ impl RouterSocket for RouterSocketV1 {
         tokio::spawn(listen_tgt_res_async(another_self));
 
         if let hdr_res = self.tgt_res_hdr_rx.recv().await
-            .map_err(|recve|
+            .map_err(|recv_err|
                 CrankerRouterException::new(format!(
-                    "seems nothing received from tgt res hdr chan and it closed. router_socket_id={}", self.router_socket_id
+                    "seems nothing received from tgt res hdr chan and it closed: {:?}. router_socket_id={}",
+                    recv_err, self.router_socket_id
                 ))
             )??
         {
-            cranker_res = Some(CrankerProtocolResponse::new(hdr_res)?);
+            let message_to_apply = hdr_res;
+            cranker_res = Some(CrankerProtocolResponse::new(message_to_apply)?);
         }
 
         if cranker_res.is_none() {
@@ -757,7 +801,17 @@ impl RouterSocket for RouterSocketV1 {
             ))).unwrap());
         }
 
-        let res_builder = cranker_res.unwrap().build()?;
+        let cranker_res = cranker_res.unwrap();
+        let status_code = cranker_res.status;
+        let res_builder = cranker_res.build()?;
+        {
+            for i in self.proxy_listeners.iter() {
+                let _ = i.on_before_responding_to_client(self.as_ref());
+                let _ = i.on_after_target_to_proxy_headers_received(
+                    self.as_ref(), status_code, res_builder.headers_ref(),
+                );
+            }
+        }
         let wrapped_stream = self.tgt_res_bdy_rx.clone();
         let stream_body = Body::from_stream(wrapped_stream);
         res_builder
@@ -804,6 +858,7 @@ pub async fn take_wss_and_create_router_socket(
         addr,
         wss_tx,
         wss_rx,
+        state.proxy_listeners.clone()
     ));
     info!("Connector registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
     let _ = state
@@ -823,4 +878,3 @@ pub async fn take_wss_and_create_router_socket(
         let _ = write_guard.counter.fetch_add(1, SeqCst);
     }
 }
-

@@ -12,8 +12,8 @@ async fn main() {
         .init()
         .unwrap();
 
-
-    let cranker_router = CrankerRouter::new();
+    let v = vec![];
+    let cranker_router = CrankerRouter::new(v);
 
     let reg_listener = TcpListener::bind("127.0.0.1:3000")
         .await
