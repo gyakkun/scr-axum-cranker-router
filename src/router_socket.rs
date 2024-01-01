@@ -30,21 +30,21 @@ const HEADER_MAX_SIZE: usize = 64 * 1024; // 64KBytes
 pub trait WebSocketListener: Send + Sync {
     // this should be done in on_upgrade, so ignore it
     // fn on_connect(&self, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;
-    async fn on_text(self: Arc<Self>, text_msg: String) -> Result<(), CrankerRouterException>;
-    async fn on_binary(self: Arc<Self>, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException>;
-    async fn on_ping(self: Arc<Self>, ping_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
+    async fn on_text(&self, text_msg: String) -> Result<(), CrankerRouterException>;
+    async fn on_binary(&self, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException>;
+    async fn on_ping(&self, ping_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
         let decoded = std::str::from_utf8(ping_msg.as_slice()).unwrap_or("INVALID PONG MSG");
         debug!("pinged: {}", decoded);
         Ok(())
     }
-    async fn on_pong(self: Arc<Self>, pong_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
+    async fn on_pong(&self, pong_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
         let decoded = std::str::from_utf8(pong_msg.as_slice()).unwrap_or("INVALID PONG MSG");
         debug!("ponged: {}", decoded);
         Ok(())
     }
-    async fn on_close(self: Arc<Self>, close_msg: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException>;
+    async fn on_close(&self, close_msg: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException>;
 
-    fn on_error(self: Arc<Self>, err: CrankerRouterException) -> Result<(), CrankerRouterException> {
+    fn on_error(&self, err: CrankerRouterException) -> Result<(), CrankerRouterException> {
         error!("error: {:?}", err); // FIXME: Swallow the error by default
         Ok(())
     }
@@ -57,7 +57,7 @@ pub trait RouterSocket: Send + Sync {
                            method: Method,
                            path_and_query: Option<&PathAndQuery>,
                            headers: &HeaderMap,
-                           opt_body: Option<Receiver<Result<Bytes, CrankerRouterException>>>,
+                           opt_body: Option<Receiver<Result<Bytes, Error>>>,
     ) -> Result<Response<Body>, CrankerRouterException>;
 }
 
@@ -96,7 +96,7 @@ pub struct RouterSocketV1 {
     tgt_res_bdy_rx: Receiver<Result<Vec<u8>, CrankerRouterException>>,
 
     wss_send_task_tx: Sender<Message>,
-    wss_send_task_join_handle: JoinHandle<()>,
+    wss_send_task_join_handle: JoinHandle<std::io::Result<u64>>,
 }
 
 impl RouterSocketV1 {
@@ -119,14 +119,14 @@ impl RouterSocketV1 {
         let (err_chan_tx, err_chan_rx) = async_channel::unbounded();
         let err_chan_tx_clone = err_chan_tx.clone();
         let wss_send_task_join_handle = tokio::spawn(async move {
-            while let Ok(msg) = wss_send_task_rx.recv().await {
+            while let Some(msg) = wss_send_task_rx.recv().await {
                 if let Err(e) = underlying_wss_tx.send(msg).await {
                     let _ = err_chan_tx_clone.send(CrankerRouterException::new(format!("{:?}", e))).await;
                 }
             }
         });
 
-        Self {
+        let res = Self {
             route,
             component_name,
             router_socket_id,
@@ -246,7 +246,7 @@ impl RSv1ClientSideResponseSender {
 #[async_trait]
 impl WebSocketListener for RouterSocketV1 {
     // NOT IN USE YET!
-    async fn on_text(self: Arc<Self>, txt: String) -> Result<(), CrankerRouterException> {
+    async fn on_text(&self, txt: String) -> Result<(), CrankerRouterException> {
         if let Err(e) = self.cli_side_res_sender.send_target_response_header_text_to_client(txt).await {
             return self.on_error(e);
         }
@@ -254,7 +254,7 @@ impl WebSocketListener for RouterSocketV1 {
     }
 
     // NOT IN USE YET!
-    async fn on_binary(self: Arc<Self>, bin: Vec<u8>) -> Result<(), CrankerRouterException> {
+    async fn on_binary(&self, bin: Vec<u8>) -> Result<(), CrankerRouterException> {
         if let Err(e) = self.cli_side_res_sender.send_target_response_body_binary_fragment_to_client(bin).await {
             return self.on_error(e);
         }
@@ -262,7 +262,7 @@ impl WebSocketListener for RouterSocketV1 {
     }
 
     // when receiving close frame
-    async fn on_close(self: Arc<Self>, opt_close_frame: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException> {
+    async fn on_close(&self, opt_close_frame: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException> {
         // TODO: ProxyListener stuff
         let mut code = 4000u16; // 4000-4999 is reserved
         let mut reason = "N/A".to_string();
@@ -323,8 +323,8 @@ impl WebSocketListener for RouterSocketV1 {
         Ok(())
     }
 
-    fn on_error(self: Arc<Self>, err: CrankerRouterException) -> Result<(), CrankerRouterException> {
-        self.err_chan_tx.send_blocking(err)
+    fn on_error(&self, err: CrankerRouterException) -> Result<(), CrankerRouterException> {
+        self.err_chan_to_ws.send_blocking(err)
             .map_err(|se| CrankerRouterException::new(format!(
                 "failed to send error to ws: {:?}", se
             )))
@@ -370,22 +370,25 @@ impl RouterSocket for RouterSocketV1 {
         };
         debug!("4");
 
-        self.wss_send_task_tx.send(Message::Text(cranker_req.clone())).await?;
+        self.cli_side_res_sender.send_text(cranker_req.clone()).await?;
         debug!("5");
 
-        if let Some(mut body) = opt_body {
-            while let Ok(r) = body.recv().await {
-                debug!("7");
-                match r {
-                    Ok(b) => {
-                        debug!("8");
-                        self.cli_side_res_sender.send_binary(b.to_vec()).await?
-                    }
-                    Err(e) => {
-                        debug!("9");
-                        let failed_reason = format!("error when sending body to target: {:?}", e);
-                        error!("{}", failed_reason.clone());
-                        return Err(CrankerRouterException::new(failed_reason));
+        match opt_body { // req body
+            None => { /*no body*/ }
+            Some(mut body) => {
+                while let Ok(r) = body.recv().await {
+                    debug!("7");
+                    match r {
+                        Ok(b) => {
+                            debug!("8");
+                            self.cli_side_res_sender.send_binary(b.to_vec()).await?
+                        }
+                        Err(e) => {
+                            debug!("9");
+                            let failed_reason = format!("error when sending body to target: {:?}", e);
+                            error!("{}", failed_reason.clone());
+                            return Err(CrankerRouterException::new(failed_reason));
+                        }
                     }
                 }
             }

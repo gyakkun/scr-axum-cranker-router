@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::io;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -26,10 +25,7 @@ use futures::{SinkExt, StreamExt, TryStreamExt};
 use futures::stream::{BoxStream, SplitSink, SplitStream};
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
-use tokio::fs::File;
-use tokio::io::BufWriter;
 use tokio::sync::{Notify, RwLock};
-use tokio_util::io::{SinkWriter, StreamReader};
 use tower_http::limit;
 use uuid::Uuid;
 
@@ -162,9 +158,8 @@ impl CrankerRouter {
         let body = req.into_body();
         let has_body = judge_has_body_from_header_http_1(&headers) || !body.is_end_stream();
 
-        let mut body_data_stream = body.into_data_stream().map_err(|err| io::Error::new(io::ErrorKind::Other, err));
-        let mut body_stream_reader = StreamReader::new(body_data_stream);
-        let mut boxed_stream = Box::pin(body_stream_reader);
+        let body_data_stream = body.into_data_stream();
+        let boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, Error>>;
 
         let path = original_uri.path().to_string();
         let route = DEFAULT_ROUTE_RESOLVER.resolve(&app_state.route_to_socket_chan, path.clone());
@@ -190,13 +185,9 @@ impl CrankerRouter {
                 debug!("Get a socket");
                 let mut opt_body = None;
                 if has_body {
-                    let (mut pipe_tx, mut pipe_rx) = async_channel::unbounded::<Bytes>();
+                    let (pipe_tx, pipe_rx) = async_channel::unbounded::<Result<Bytes, Error>>();
                     opt_body = Some(pipe_rx);
-                    // let pipe_tx_mapped_err = pipe_tx.
-                    // test
-                    let mut sink_writer = SinkWriter::new(pipe_tx);
-                    // end test
-                    tokio::spawn(tokio::io::copy(&mut boxed_stream, &mut sink_writer));
+                    tokio::spawn(pipe_body_data_stream_to_channel_sender(boxed_stream, pipe_tx));
                 }
                 debug!("Has body ? {:?}", opt_body);
                 debug!("Ready to lock on router socket");
