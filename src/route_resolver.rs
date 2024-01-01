@@ -1,16 +1,15 @@
 use dashmap::DashMap;
-
-use log::info;
+use log::debug;
 
 pub trait RouteResolver<T>: Sync + Send {
     fn resolve(&self, routes: &DashMap<String, T>, target: String) -> String {
         let split: Vec<&str> = target.split("/").collect();
 
         return if split.len() >= 2 && routes.contains_key(&split[1].to_string()) {
-            info!("route selected: {}", split[1]);
+            debug!("route selected for {}: {}", target, split[1]);
             split[1].to_string()
         } else {
-            info!("route selected: **catch all**");
+            debug!("route selected for {}: **catch all**", target);
             "*".to_string()
         };
     }

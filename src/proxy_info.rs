@@ -1,4 +1,5 @@
-use std::net::{IpAddr, SocketAddr};
+use std::fmt::Debug;
+use std::net::SocketAddr;
 
 use crate::exceptions::CrankerRouterException;
 

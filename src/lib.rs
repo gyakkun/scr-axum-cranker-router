@@ -333,7 +333,7 @@ async fn validate_route_domain_and_cranker_version(
     next: Next,
 ) -> Response
 {
-    info!("We got someone registering. Let's examine its info.");
+    debug!("We got someone registering. Let's examine its info: headers={:?}", &headers);
 
     let route = match headers.get("Route")
         .map(|r| r.to_str())

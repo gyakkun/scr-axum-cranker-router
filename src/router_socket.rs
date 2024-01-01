@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::fmt::{Debug, Formatter};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -48,7 +49,6 @@ pub(crate) trait RouterSocket: Send + Sync + ProxyInfo {
                            opt_body: Option<Receiver<Result<Bytes, CrankerRouterException>>>,
     ) -> Result<Response<Body>, CrankerRouterException>;
 }
-
 
 pub struct RouterSocketV1 {
     pub route: String,
@@ -354,6 +354,7 @@ async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
     }
 }
 
+#[derive(Debug)]
 pub struct RSv1ClientSideResponseSender {
     pub router_socket_id: String,
     pub bytes_sent: Arc<AtomicI64>,
