@@ -1,4 +1,3 @@
-
 use dashmap::DashMap;
 
 use log::info;
@@ -39,6 +38,7 @@ pub static DEFAULT_ROUTE_RESOLVER: DefaultRouteResolver = DefaultRouteResolver::
 
 #[test]
 fn test() {
+    use std::collections::VecDeque;
     let mut s = DashMap::new();
     let resolver = DefaultRouteResolver::new();
     s.insert("route".to_string(), VecDeque::<u64>::new());

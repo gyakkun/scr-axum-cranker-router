@@ -3,7 +3,7 @@ use std::str::FromStr;
 use axum::http;
 use axum::response::Response;
 
-
+use crate::{get_custom_hop_by_hop_headers, HOP_BY_HOP_HEADERS, RESPONSE_HEADERS_TO_NOT_SEND_BACK};
 use crate::exceptions::CrankerRouterException;
 
 pub struct CrankerProtocolResponse {
@@ -69,13 +69,34 @@ impl CrankerProtocolResponse {
                 return Err(CrankerRouterException::new(failed_reason));
             }
             let colon_idx = colon_idx.unwrap();
-            let k = *&header_line[..colon_idx].trim();
-            let v = *&header_line[colon_idx + 1..].trim();
+            let key = *&header_line[..colon_idx].trim();
+            let lowercase_key = key.to_ascii_lowercase();
+
             // looks like axum will not overwrite the date header if exists
-            // if k.eq_ignore_ascii_case("date") {
+            // if lowercaseKey.eq_ignore_ascii_case("date") {
             // }
-            res = res.header(k, v);
+
+            if !HOP_BY_HOP_HEADERS.contains(lowercase_key.as_str())
+                && RESPONSE_HEADERS_TO_NOT_SEND_BACK.contains(lowercase_key.as_str()) {
+                let value = *&header_line[(colon_idx + 1)..].trim();
+                res = res.header(key, value);
+            }
         }
+
+
+        // Case sensitive or insensitive?
+        if let Some(headers_ref) = res.headers_mut() {
+            headers_ref.get(http::header::CONNECTION)
+                .and_then(|conn_hdr| conn_hdr.to_str().ok())
+                .filter(|&conn_hdr_str| !conn_hdr_str.is_empty())
+                .map(|conn_hdr_str| get_custom_hop_by_hop_headers(conn_hdr_str.to_string()))
+                .map(|custom_hop_by_hop_headers| {
+                    for i in custom_hop_by_hop_headers {
+                        headers_ref.remove(i);
+                    }
+                });
+        }
+
         Ok(res)
     }
 }

@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use crate::exceptions::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException, CrankerRouterException};
 use crate::route_resolver::{DEFAULT_ROUTE_RESOLVER, RouteResolver};
-use crate::router_socket::RouterSocket;
+use crate::router_socket::{RouterSocket, RouterSocketV1};
 
 pub mod cranker_protocol;
 pub mod router_socket;
@@ -37,14 +37,16 @@ pub mod exceptions;
 pub mod cranker_protocol_response;
 pub mod cranker_protocol_request_builder;
 pub mod route_resolver;
+pub mod proxy_info;
+pub mod websocket_listener;
 
-pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &str = "crankerprotocol";
+pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &'static str = "crankerprotocol";
 // should be CrankerProtocol, but axum all lower cased
-pub const _VER_1_0: &str = "1.0";
-pub const _VER_3_0: &str = "3.0";
+pub const _VER_1_0: &'static str = "1.0";
+pub const _VER_3_0: &'static str = "3.0";
 
-pub const CRANKER_V_1_0: &str = "cranker_1.0";
-pub const CRANKER_V_3_0: &str = "cranker_3.0";
+pub const CRANKER_V_1_0: &'static str = "cranker_1.0";
+pub const CRANKER_V_3_0: &'static str = "cranker_3.0";
 
 #[derive(Clone, Debug)]
 struct VersionNegotiate {
@@ -56,6 +58,12 @@ lazy_static! {
         let mut s = HashMap::new();
         s.insert(_VER_1_0, CRANKER_V_1_0);
         s.insert(_VER_3_0, CRANKER_V_3_0);
+        s
+    };
+
+    static ref RESPONSE_HEADERS_TO_NOT_SEND_BACK: HashSet<&'static str> = {
+        let mut s = HashSet::new();
+        s.insert("server");
         s
     };
 
@@ -201,6 +209,7 @@ impl CrankerRouter {
                 }
                 debug!("Has body ? {:?}", opt_body);
                 debug!("Ready to lock on router socket");
+                let rs_clone = rs.clone();
                 match rs.on_client_req(
                     method,
                     original_uri.path_and_query(),
@@ -208,11 +217,17 @@ impl CrankerRouter {
                     opt_body,
                 ).await {
                     Ok(res) => {
-                        debug!("received body!");
+                        debug!("recv tgt res bdy from rs!");
+                        if !res.status().is_success() && !rs_clone.should_remove() {
+                            rs_clone.raise_completion_event();
+                        }
                         return res;
                     }
                     Err(e) => {
-                        debug!("received error! {:?}", e);
+                        debug!("recv err from rs, expect tgt res bdy: {:?}", e);
+                        if !rs_clone.should_remove() {
+                            rs_clone.raise_completion_event();
+                        }
                         return e.into_response();
                     }
                 }
@@ -414,4 +429,13 @@ fn extract_cranker_version(
     return Err(CrankerProtocolVersionNotSupportedException::new(
         format!("(sub protocols: {:?}, legacy protocols: {:?}", sub_protocols, legacy_protocol_header)
     ).into());
+}
+
+fn get_custom_hop_by_hop_headers(connection_header_value: String) -> HashSet<String> {
+    let mut res = HashSet::new();
+    let split = connection_header_value.split(",");
+    for s in split.into_iter() {
+        res.insert(s.trim().to_string());
+    }
+    return res;
 }
