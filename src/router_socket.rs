@@ -4,7 +4,8 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
-use std::sync::atomic::Ordering::{AcqRel, SeqCst};
+use std::sync::atomic::Ordering::{AcqRel, Relaxed, SeqCst};
+use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
 use axum::async_trait;
@@ -227,7 +228,7 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
             Err(wss_recv_err) => {
                 let _ = wss_recv_pipe_tx.close(); // close or drop?
                 let _ = err_chan_tx.send_blocking(CrankerRouterException::new(format!(
-                    "underlying wss recv err: {:?}. router_socket_id={}", wss_recv_err, router_socket_id
+                    "underlying wss recv err: {:?}.", wss_recv_err
                 )));
                 break;
             }
@@ -235,15 +236,14 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
                 if has_response.load(SeqCst) {
                     if let Err(e) = wss_recv_pipe_tx.send(msg).await {
                         let _ = err_chan_tx.send_blocking(CrankerRouterException::new(format!(
-                            "rare ex that failed to pipe underlying wss rx to wss recv pipe: {:?}. router_socket_id={}", e, router_socket_id
+                            "rare ex that failed to pipe underlying wss rx to wss recv pipe: {:?}.", e
                         )));
                         break;
                     }
                 } else {
                     match msg {
                         Message::Text(_) | Message::Binary(_) => {
-                            let failed_reason = format!("recv txt or bin before handle cli req. router_socket_id={}", router_socket_id);
-                            error!("{}", failed_reason);
+                            let failed_reason = "recv txt or bin before handle cli req.".to_string();
                             should_remove.store(true, SeqCst);
                             let _ = err_chan_tx.send_blocking(CrankerRouterException::new(failed_reason));
                             break;
@@ -266,8 +266,6 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
                             if code != 4000 {
                                 failed_reason = format!("{} code={}, reason={}.", failed_reason, code, reason);
                             }
-                            failed_reason = format!("{} router_socket_id={}", failed_reason, router_socket_id);
-                            error!("{}", failed_reason);
                             should_remove.store(true, SeqCst);
                             let _ = err_chan_tx.send_blocking(CrankerRouterException::new(failed_reason));
                             break;
@@ -279,12 +277,15 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
     }
 
     // recv nothing from underlying wss, implicating it already closed
-    should_remove.store(true, SeqCst);
     debug!("seems router socket normally closed. router_socket_id={}", router_socket_id);
-    // let _ = wss_recv_pipe_tx.close(); // close or drop?
-    // let _ = err_chan_tx.send_blocking(CrankerRouterException::new(format!(
-    //     "underlying wss already closed. router_socket_id={}", router_socket_id
-    // )));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    if !should_remove.load(SeqCst) {
+        // means the should_remove is still false, which is not expected
+        let _ = wss_recv_pipe_tx.close(); // close or drop?
+        let _ = err_chan_tx.send_blocking(CrankerRouterException::new(
+            "underlying wss already closed but should_remove=false after 100ms.".to_string()
+        ));
+    }
 }
 
 async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
@@ -401,9 +402,9 @@ impl RSv1ClientSideResponseSender {
         txt: String,
     ) -> Result<(), CrankerRouterException> {
         if !self.has_response.load(SeqCst) {
-            return Err(CrankerRouterException::new(format!(
-                "try to send txt prior then res. router_socket_id={}", self.router_socket_id
-            )));
+            return Err(CrankerRouterException::new(
+                "try to send txt prior then res.".to_string()
+            ));
         }
 
         // Ensure the header only sent once
@@ -413,15 +414,15 @@ impl RSv1ClientSideResponseSender {
             || self.is_tgt_res_hdr_received
             .compare_exchange(false, true, SeqCst, SeqCst).is_err()
         {
-            return Err(CrankerRouterException::new(format!(
-                "res header already handled! router_socket_id={}", self.router_socket_id
-            )));
+            return Err(CrankerRouterException::new(
+                "res header already handled!".to_string()
+            ));
         }
 
         if txt.len() > HEADER_MAX_SIZE {
-            return Err(CrankerRouterException::new(format!(
-                "response header too large: over 64 * 1024 bytes. router_socket_id={}", self.router_socket_id
-            )));
+            return Err(CrankerRouterException::new(
+                "response header too large: over 64 * 1024 bytes.".to_string()
+            ));
         }
 
         let txt_len = txt.len(); // bytes len, not chars len
@@ -432,7 +433,7 @@ impl RSv1ClientSideResponseSender {
             })
             .map_err(|e| {
                 let failed_reason = format!(
-                    "rare ex: failed to send txt to cli res chan: {:?}. router_socket_id={}", e, self.router_socket_id
+                    "rare ex: failed to send txt to cli res chan: {:?}. ", e
                 );
                 error!("{}",failed_reason);
                 CrankerRouterException::new(failed_reason)
@@ -446,9 +447,9 @@ impl RSv1ClientSideResponseSender {
         bin: Vec<u8>,
     ) -> Result<(), CrankerRouterException> {
         if !self.has_response.load(SeqCst) {
-            return Err(CrankerRouterException::new(format!(
-                "try to send bin prior then res. router_socket_id={}", self.router_socket_id
-            )));
+            return Err(CrankerRouterException::new(
+                "try to send bin prior then res.".to_string()
+            ));
         }
 
         // Ensure the header value already sent
@@ -796,7 +797,7 @@ impl RouterSocket for RouterSocketV1 {
         if let hdr_res = self.tgt_res_hdr_rx.recv().await
             .map_err(|recv_err|
                 CrankerRouterException::new(format!(
-                    "seems nothing received from tgt res hdr chan and it closed: {:?}. router_socket_id={}",
+                    "rare ex seems nothing received from tgt res hdr chan and it closed: {:?}. router_socket_id={}",
                     recv_err, self.router_socket_id
                 ))
             )??
@@ -806,8 +807,9 @@ impl RouterSocket for RouterSocketV1 {
         }
 
         if cranker_res.is_none() {
+            // Should never run into this line
             return Ok(Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR).body(Body::new(format!(
-                "failed to build response from protocol response. router_socket_id={}", self.router_socket_id
+                "rare ex failed to build response from protocol response. router_socket_id={}", self.router_socket_id
             ))).unwrap());
         }
 
