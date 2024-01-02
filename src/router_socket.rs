@@ -2,9 +2,9 @@ use std::borrow::Cow;
 use std::fmt::Debug;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
-use std::sync::atomic::Ordering::{AcqRel, Relaxed, SeqCst};
+use std::sync::atomic::Ordering::{AcqRel, SeqCst};
 use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
@@ -14,7 +14,6 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::http::{HeaderMap, Method, Response, StatusCode};
 use axum::http::uri::PathAndQuery;
 use bytes::Bytes;
-use dashmap::mapref::entry::Entry;
 use futures::{Sink, SinkExt, StreamExt, TryFutureExt};
 use futures::stream::{SplitSink, SplitStream};
 use log::{debug, error, info, trace};
@@ -28,6 +27,7 @@ use crate::cranker_protocol_response::CrankerProtocolResponse;
 use crate::exceptions::CrankerRouterException;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
+use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
 
 pub const HEADER_MAX_SIZE: usize = 64 * 1024; // 64KBytes
@@ -55,7 +55,7 @@ pub struct RouterSocketV1 {
     pub route: String,
     pub component_name: String,
     pub router_socket_id: String,
-    // pub web_socket_farm: Option<Weak<Mutex<WebSocketFarm>>>,
+    pub websocket_farm: Weak<WebSocketFarm>,
     pub connector_instance_id: String,
     pub proxy_listeners: Vec<Arc<dyn ProxyListener>>,
     pub remote_address: SocketAddr,
@@ -97,12 +97,13 @@ impl RouterSocketV1 {
     pub fn new(route: String,
                component_name: String,
                router_socket_id: String,
+               websocket_farm: Weak<WebSocketFarm>,
                connector_instance_id: String,
                remote_address: SocketAddr,
                underlying_wss_tx: SplitSink<WebSocket, Message>,
                underlying_wss_rx: SplitStream<WebSocket>,
-               proxy_listeners: Vec<Arc<dyn ProxyListener>>
-    ) -> Self {
+               proxy_listeners: Vec<Arc<dyn ProxyListener>>,
+    ) -> Arc<Self> {
         let (tgt_res_hdr_tx, tgt_res_hdr_rx) = async_channel::unbounded();
         let (tgt_res_bdy_tx, tgt_res_bdy_rx) = async_channel::unbounded();
         let (wss_send_task_tx, mut wss_send_task_rx) = async_channel::unbounded();
@@ -138,10 +139,11 @@ impl RouterSocketV1 {
         let router_socket_id_clone = router_socket_id.clone();
 
 
-        Self {
+        let arc_wrapped = Arc::new(Self {
             route,
             component_name,
             router_socket_id,
+            websocket_farm,
             connector_instance_id,
             proxy_listeners,
             remote_address,
@@ -174,7 +176,9 @@ impl RouterSocketV1 {
 
             wss_send_task_tx,
             wss_send_task_join_handle,
-        }
+        });
+        // arc_wrapped.
+        arc_wrapped
     }
 }
 
@@ -278,6 +282,8 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
 
     // recv nothing from underlying wss, implicating it already closed
     debug!("seems router socket normally closed. router_socket_id={}", router_socket_id);
+    // Here the should_remove is not set to true yet, and compare-and-set tends to infinite
+    // loop. So choose the dumb way to wait some milliseconds. // FIXME
     tokio::time::sleep(Duration::from_millis(50)).await;
     if !should_remove.load(SeqCst) {
         // means the should_remove is still false, which is not expected
@@ -508,7 +514,7 @@ impl WebSocketListener for RouterSocketV1 {
             res = self.on_error(e);
         }
 
-        if !self.proxy_listeners.is_empty(){
+        if !self.proxy_listeners.is_empty() {
             let bin_clone = Bytes::from(opt_bin_clone_for_listeners.unwrap());
             for i in self.proxy_listeners.iter() {
                 let _ = i.on_response_body_chunk_received_from_target(self, &bin_clone);
@@ -635,6 +641,10 @@ impl ProxyInfo for RouterSocketV1 {
         self.route.clone()
     }
 
+    fn router_socket_id(&self) -> String {
+        self.router_socket_id.clone()
+    }
+
     fn duration_millis(&self) -> i64 {
         self.duration_millis.load(SeqCst)
     }
@@ -675,6 +685,13 @@ impl RouterSocket for RouterSocketV1 {
     }
 
     fn raise_completion_event(&self) -> Result<(), CrankerRouterException> {
+        let mut i = 1;
+        if let Some(wsf) = self.websocket_farm.upgrade() {
+            wsf.remove_socket_in_background(
+                self.route.clone(), self.router_socket_id.clone(),
+                // Arc::new(|| { i = i + 1; }),
+            )
+        }
         let cli_sta = self.client_req_start_ts.load(SeqCst);
         if cli_sta == 0 || self.proxy_listeners.is_empty() {
             return Ok(());
@@ -862,28 +879,23 @@ pub async fn take_wss_and_create_router_socket(
 {
     let (wss_tx, wss_rx) = wss.split();
     let router_socket_id = Uuid::new_v4().to_string();
-    let rs = Arc::new(RouterSocketV1::new(
+    let weak_wsf = Arc::downgrade(&state.websocket_farm);
+    let rs = RouterSocketV1::new(
         route.clone(),
         component_name.clone(),
         router_socket_id.clone(),
+        weak_wsf,
         connector_id.clone(),
         addr,
         wss_tx,
         wss_rx,
-        state.proxy_listeners.clone()
-    ));
+        state.proxy_listeners.clone(),
+    );
     info!("Connector registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
-    let _ = state
-        .route_to_socket_chan
-        .entry(route.clone())
-        .or_insert(async_channel::unbounded())
-        .value()
-        .0
-        .send(rs.clone())
-        .await;
-    if let Entry::Occupied(notifier) = state.route_notifier.entry(route.clone()) {
-        notifier.get().notify_waiters();
-    }
+    state
+        .websocket_farm
+        .clone()
+        .add_socket_in_background(rs);
     {
         // Prepare for some counter
         let write_guard = state.clone();

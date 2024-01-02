@@ -1,11 +1,11 @@
-use dashmap::DashMap;
+use dashmap::DashSet;
 use log::debug;
 
-pub trait RouteResolver<T>: Sync + Send {
-    fn resolve(&self, routes: &DashMap<String, T>, target: String) -> String {
+pub trait RouteResolver: Sync + Send {
+    fn resolve(&self, routes: &DashSet<String>, target: &String) -> String {
         let split: Vec<&str> = target.split("/").collect();
 
-        return if split.len() >= 2 && routes.contains_key(&split[1].to_string()) {
+        return if split.len() >= 2 && routes.contains(&split[1].to_string()) {
             debug!("route selected for {}: {}", target, split[1]);
             split[1].to_string()
         } else {
@@ -21,12 +21,12 @@ impl DefaultRouteResolver {
     pub const fn new() -> Self { DefaultRouteResolver {} }
 }
 
-impl<T> RouteResolver<T> for DefaultRouteResolver {}
+impl RouteResolver for DefaultRouteResolver {}
 
-impl<F: Send + Sync + 'static, T> RouteResolver<T> for F
-    where F: Fn(&DashMap<String, T>, String) -> String
+impl<F: Send + Sync + 'static> RouteResolver for F
+    where F: Fn(&DashSet<String>, &String) -> String
 {
-    fn resolve(&self, routes: &DashMap<String, T>, target: String) -> String {
+    fn resolve(&self, routes: &DashSet<String>, target: &String) -> String {
         self(routes, target)
     }
 }
@@ -37,11 +37,10 @@ pub static DEFAULT_ROUTE_RESOLVER: DefaultRouteResolver = DefaultRouteResolver::
 
 #[test]
 fn test() {
-    use std::collections::VecDeque;
-    let mut s = DashMap::new();
+    let mut s = DashSet::new();
     let resolver = DefaultRouteResolver::new();
-    s.insert("route".to_string(), VecDeque::<u64>::new());
-    s.insert("router/v1/api".to_string(), VecDeque::new());
-    let res = resolver.resolve(&s, "/route".to_string());
+    s.insert("route".to_string());
+    s.insert("router/v1/api".to_string());
+    let res = resolver.resolve(&s, &"/route".to_string());
     assert_eq!(res, "route")
 }

@@ -8,6 +8,7 @@ pub trait ProxyInfo {
     fn connector_instance_id(&self) -> String;
     fn server_address(&self) -> SocketAddr;
     fn route(&self) -> String;
+    fn router_socket_id(&self) -> String;
 
     // fn request(&self) -> &Request<Body>;// TODO: Maybe arc mutex ?
     // fn response(&self) -> &Response;// TODO: Maybe arc mutex ?

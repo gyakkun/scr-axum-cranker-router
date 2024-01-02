@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
-use async_channel::{Receiver, Sender};
-use axum::{BoxError, Error, Extension, http, Router, ServiceExt};
+use async_channel::Sender;
+use axum::{BoxError, Extension, http, Router, ServiceExt};
 use axum::body::{Body, HttpBody};
 use axum::extract::{ConnectInfo, OriginalUri, Query, State, WebSocketUpgrade};
 use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
@@ -16,20 +16,18 @@ use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use bytes::Bytes;
-use dashmap::DashMap;
 use futures::{SinkExt, StreamExt, TryStreamExt};
 use futures::stream::BoxStream;
 use lazy_static::lazy_static;
-use log::{debug, error, info, warn};
-use tokio::sync::Notify;
-use tokio_util::io::SinkWriter;
+use log::{debug, error, warn};
 use tower_http::limit;
 use uuid::Uuid;
 
 use crate::exceptions::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException, CrankerRouterException};
 use crate::proxy_listener::ProxyListener;
-use crate::route_resolver::{DEFAULT_ROUTE_RESOLVER, RouteResolver};
-use crate::router_socket::{RouterSocket, RouterSocketV1};
+use crate::route_resolver::{DefaultRouteResolver, RouteResolver};
+use crate::router_socket::RouterSocket;
+use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 
 pub mod cranker_protocol;
 pub mod router_socket;
@@ -41,6 +39,7 @@ pub mod route_resolver;
 pub mod proxy_info;
 pub mod websocket_listener;
 pub mod proxy_listener;
+pub mod websocket_farm;
 
 pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &'static str = "crankerprotocol";
 // should be CrankerProtocol, but axum all lower cased
@@ -101,12 +100,13 @@ lazy_static! {
 // Our shared state
 pub struct CrankerRouterState {
     counter: AtomicU64,
-    route_to_socket_chan: DashMap<String, (
-        Sender<Arc<dyn RouterSocket>>,
-        Receiver<Arc<dyn RouterSocket>>
-    )>,
-    route_notifier: DashMap<String, Notify>,
-    proxy_listeners: Vec<Arc<dyn ProxyListener>>
+    websocket_farm: Arc<WebSocketFarm>,
+    // route_to_socket_chan: DashMap<String, (
+    //     Sender<Arc<dyn RouterSocket>>,
+    //     Receiver<Arc<dyn RouterSocket>>
+    // )>,
+
+    proxy_listeners: Vec<Arc<dyn ProxyListener>>,
 }
 
 pub type TSCRState = Arc<CrankerRouterState>;
@@ -117,15 +117,27 @@ pub struct CrankerRouter {
 
 impl CrankerRouter {
     pub fn new(
-        proxy_listeners: Vec<Arc<dyn ProxyListener>>
+        proxy_listeners: Vec<Arc<dyn ProxyListener>>,
+        routes_keep_time_millis: i64,
+        max_wait_time_millis: i64,
     ) -> Self {
-
+        let websocket_farm = WebSocketFarm::new(
+            Arc::new(DefaultRouteResolver::new()),
+            max_wait_time_millis,
+        );
+        let websocket_farm_clone = websocket_farm.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(routes_keep_time_millis as u64)).await;
+                websocket_farm_clone.clone().clean_routes_in_background(routes_keep_time_millis);
+            }
+        });
         Self {
             state: Arc::new(CrankerRouterState {
                 counter: AtomicU64::new(0),
-                route_to_socket_chan: DashMap::new(),
-                route_notifier: DashMap::new(),
-                proxy_listeners
+                websocket_farm,
+                // route_to_socket_chan: DashMap::new(),
+                proxy_listeners,
             }),
         }
     }
@@ -178,35 +190,9 @@ impl CrankerRouter {
         let boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, CrankerRouterException>>;
 
         let path = original_uri.path().to_string();
-        let route = DEFAULT_ROUTE_RESOLVER.resolve(&app_state.route_to_socket_chan, path.clone());
-        let expected_err = CrankerRouterException::new("No router socket available".to_string());
-        let opt_router_socket_receiver = app_state.route_to_socket_chan.get(&route);
-        // mu-cranker-router here responses with 404 immediately
-        if opt_router_socket_receiver.is_none() {
-            let notifier = app_state.route_notifier
-                .entry(route.clone())
-                .or_insert(Notify::new());
-            let route_timeout = tokio::time::timeout(Duration::from_secs(5), notifier.value().notified()).await;
-            match route_timeout {
-                Err(_) => {
-                    return expected_err.clone().into_response();
-                }
-                _ => {}
-            }
-        }
-        let router_socket_receiver = opt_router_socket_receiver.unwrap().clone().1;
-        let timeout = tokio::time::timeout(Duration::from_secs(5), async {
-             while let Ok(rs) = router_socket_receiver.recv().await {
-                 // skip socket that should be removed
-                 if rs.should_remove() {
-                     continue;
-                 }
-                 return Ok(rs);
-             }
-            Err(())
-        }).await;
-        match timeout {
-            Ok(Ok(rs)) => {
+        let socket_fut = app_state.websocket_farm.clone().get_router_socket_by_target_path(path.clone()).await;
+        match socket_fut {
+            Ok(rs) => {
                 debug!("Get a socket");
                 let mut opt_body = None;
                 if has_body {
@@ -239,9 +225,9 @@ impl CrankerRouter {
                     }
                 }
             }
-            _ => {
+            Err(e) => {
                 debug!("No socket available!");
-                return expected_err.clone().into_response();
+                return e.clone().into_response();
             }
         };
     }
@@ -286,7 +272,7 @@ impl CrankerRouter {
             .protocols([ver_neg.dealt])
             .on_upgrade(move |socket| router_socket::take_wss_and_create_router_socket(
                 socket, app_state.clone(), connector_id, component_name, ver_neg.dealt.to_string(), domain, route,
-                addr
+                addr,
             ))
     }
 }
