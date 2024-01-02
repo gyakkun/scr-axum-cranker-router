@@ -211,14 +211,14 @@ impl CrankerRouter {
                 ).await {
                     Ok(res) => {
                         debug!("recv tgt res bdy from rs!");
-                        if !res.status().is_success() && !rs_clone.should_remove() {
+                        if !res.status().is_success() && !rs_clone.is_removed() {
                             let _ = rs_clone.raise_completion_event();
                         }
                         return res;
                     }
                     Err(e) => {
                         debug!("recv err from rs, expect tgt res bdy: {:?}", e);
-                        if !rs_clone.should_remove() {
+                        if !rs_clone.is_removed() {
                             let _ = rs_clone.raise_completion_event();
                         }
                         return e.into_response();
