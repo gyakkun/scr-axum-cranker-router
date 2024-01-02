@@ -107,6 +107,12 @@ pub struct CrankerRouterState {
     // )>,
 
     proxy_listeners: Vec<Arc<dyn ProxyListener>>,
+
+    // config
+    routes_keep_time_millis: i64,
+    max_wait_time_millis: i64,
+    ping_sent_after_no_write_for_ms: i64,
+    idle_read_timeout_ms: i64,
 }
 
 pub type TSCRState = Arc<CrankerRouterState>;
@@ -120,7 +126,10 @@ impl CrankerRouter {
         proxy_listeners: Vec<Arc<dyn ProxyListener>>,
         routes_keep_time_millis: i64,
         max_wait_time_millis: i64,
+        ping_sent_after_no_write_for_ms: i64,
+        idle_read_timeout_ms: i64,
     ) -> Self {
+        check_proxy_listeners(&proxy_listeners);
         let websocket_farm = WebSocketFarm::new(
             Arc::new(DefaultRouteResolver::new()),
             max_wait_time_millis,
@@ -138,6 +147,11 @@ impl CrankerRouter {
                 websocket_farm,
                 // route_to_socket_chan: DashMap::new(),
                 proxy_listeners,
+
+                routes_keep_time_millis,
+                max_wait_time_millis,
+                ping_sent_after_no_write_for_ms,
+                idle_read_timeout_ms
             }),
         }
     }
@@ -274,6 +288,14 @@ impl CrankerRouter {
                 socket, app_state.clone(), connector_id, component_name, ver_neg.dealt.to_string(), domain, route,
                 addr,
             ))
+    }
+}
+
+fn check_proxy_listeners(proxy_listeners: &Vec<Arc<dyn ProxyListener>>) {
+    for i in proxy_listeners {
+        if i.really_need_on_response_body_chunk_received_from_target() {
+            error!("Detect a proxy listener really needs on_response_body_chunk_received_from_target hook. This hook is expensive.");
+        }
     }
 }
 

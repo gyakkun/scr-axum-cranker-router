@@ -21,8 +21,14 @@ async fn main() {
         .init()
         .unwrap();
 
-    let v:Vec<Arc<dyn ProxyListener>> = vec![Arc::new(DemoProxyListener::new())];
-    let cranker_router = CrankerRouter::new(v, 5000, 5000);
+    let listeners:Vec<Arc<dyn ProxyListener>> = vec![Arc::new(DemoProxyListener::new())];
+    let cranker_router = CrankerRouter::new(
+        listeners,
+        5_000,
+        5_000,
+        10_000, // 10s
+        5 * 60_000, // 5min
+    );
 
     let reg_listener = TcpListener::bind("127.0.0.1:3000")
         .await
@@ -57,4 +63,7 @@ impl ProxyListener for DemoProxyListener {
         Ok(())
     }
 
+    fn really_need_on_response_body_chunk_received_from_target(&self) -> bool {
+        false
+    }
 }
