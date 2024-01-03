@@ -83,12 +83,12 @@ pub struct RouterSocketV1 {
     cli_side_res_sender: RSv1ClientSideResponseSender,
     // Send any exception immediately to this chan in on_error so that when
     // the body not sent to client yet, we can response error to client early
-    tgt_res_hdr_tx: tokio::sync::mpsc::UnboundedSender<Result<String, CrankerRouterException>>,
-    tgt_res_hdr_rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Result<String, CrankerRouterException>>>,
+    tgt_res_hdr_tx: async_channel::Sender<Result<String, CrankerRouterException>>,
+    tgt_res_hdr_rx: async_channel::Receiver<Result<String, CrankerRouterException>>,
     // Send any exception immediately to this chan in on_error so that even
     // when body is streaming, we can end the stream early to save resource
-    tgt_res_bdy_tx: tokio::sync::mpsc::UnboundedSender<Result<Vec<u8>, CrankerRouterException>>,
-    tgt_res_bdy_rx: tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Result<Vec<u8>, CrankerRouterException>>>>,
+    tgt_res_bdy_tx: async_channel::Sender<Result<Vec<u8>, CrankerRouterException>>,
+    tgt_res_bdy_rx: async_channel::Receiver<Result<Vec<u8>, CrankerRouterException>>,
 
     wss_recv_pipe_join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 
@@ -112,8 +112,8 @@ impl RouterSocketV1 {
                idle_read_timeout_ms: i64,
                ping_sent_after_no_write_for_ms: i64,
     ) -> Arc<Self> {
-        let (tgt_res_hdr_tx, tgt_res_hdr_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (tgt_res_bdy_tx, tgt_res_bdy_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tgt_res_hdr_tx, tgt_res_hdr_rx) = async_channel::unbounded();
+        let (tgt_res_bdy_tx, tgt_res_bdy_rx) = async_channel::unbounded();
         let (wss_send_task_tx, wss_send_task_rx) = tokio::sync::mpsc::unbounded_channel();
         let (err_chan_tx, err_chan_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -161,9 +161,9 @@ impl RouterSocketV1 {
             ),
 
             tgt_res_hdr_tx,
-            tgt_res_hdr_rx: tokio::sync::Mutex::new(tgt_res_hdr_rx),
+            tgt_res_hdr_rx,
             tgt_res_bdy_tx,
-            tgt_res_bdy_rx: tokio::sync::Mutex::new(Some(tgt_res_bdy_rx)),
+            tgt_res_bdy_rx,
 
             wss_recv_pipe_join_handle: Arc::new(Mutex::new(None)),
 
@@ -462,8 +462,8 @@ pub struct RSv1ClientSideResponseSender {
     pub is_removed: Arc<AtomicBool>,
     pub has_response: Arc<AtomicBool>,
 
-    pub tgt_res_hdr_tx: tokio::sync::mpsc::UnboundedSender<Result<String, CrankerRouterException>>,
-    pub tgt_res_bdy_tx: tokio::sync::mpsc::UnboundedSender<Result<Vec<u8>, CrankerRouterException>>,
+    pub tgt_res_hdr_tx: async_channel::Sender<Result<String, CrankerRouterException>>,
+    pub tgt_res_bdy_tx: async_channel::Sender<Result<Vec<u8>, CrankerRouterException>>,
 
     pub is_tgt_res_hdr_received: AtomicBool,
     pub is_tgt_res_hdr_sent: AtomicBool,
@@ -478,8 +478,8 @@ impl RSv1ClientSideResponseSender {
         bytes_sent: Arc<AtomicI64>,
         is_removed: Arc<AtomicBool>,
         has_response: Arc<AtomicBool>,
-        tgt_res_hdr_tx: tokio::sync::mpsc::UnboundedSender<Result<String, CrankerRouterException>>,
-        tgt_res_bdy_tx: tokio::sync::mpsc::UnboundedSender<Result<Vec<u8>, CrankerRouterException>>,
+        tgt_res_hdr_tx: async_channel::Sender<Result<String, CrankerRouterException>>,
+        tgt_res_bdy_tx: async_channel::Sender<Result<Vec<u8>, CrankerRouterException>>,
     ) -> Self {
         Self {
             router_socket_id,
@@ -521,7 +521,7 @@ impl RSv1ClientSideResponseSender {
         }
 
         let txt_len = txt.len(); // bytes len, not chars len
-        let res = self.tgt_res_hdr_tx.send(Ok(txt))
+        let res = self.tgt_res_hdr_tx.send(Ok(txt)).await
             .map(|ok| {
                 self.bytes_sent.fetch_add(txt_len.try_into().unwrap(), SeqCst);
                 ok
@@ -559,7 +559,7 @@ impl RSv1ClientSideResponseSender {
 
         trace!("35.3");
         let bin_len = bin.len() as i64;
-        self.tgt_res_bdy_tx.send(Ok(bin))
+        self.tgt_res_bdy_tx.send(Ok(bin)).await
             .map(|ok| {
                 trace!("35.4");
                 self.bytes_sent.fetch_add(bin_len, SeqCst);
@@ -901,13 +901,13 @@ impl RouterSocket for RouterSocketV1 {
         let mut cranker_res: Option<CrankerProtocolResponse> = None;
         // if the wss_recv_pipe chan is EMPTY AND CLOSED then err will come from this recv()
         trace!("22");
-        match self.tgt_res_hdr_rx.lock().await.recv().await {
-            None => {
+        match self.tgt_res_hdr_rx.recv().await {
+            Err(recve) => {
                 return Err(CrankerRouterException::new(format!(
-                    "rare ex seems nothing received from tgt res hdr chan and it closed. router_socket_id={}", self.router_socket_id
+                    "rare ex seems nothing received from tgt res hdr chan and it closed:{:?}. router_socket_id={}", recve, self.router_socket_id
                 )));
             }
-            Some(r) => {
+            Ok(r) => {
                 match r {
                     Ok(message_to_apply) => {
                         cranker_res = Some(CrankerProtocolResponse::new(message_to_apply)?); // fast fail
@@ -935,18 +935,7 @@ impl RouterSocket for RouterSocketV1 {
             )?;
         }
 
-        let mut g = self.tgt_res_bdy_rx.lock().await;
-        if g.is_none() {
-            let failed_reason = "critical error that tgt_res_bdy_rx is not avail in mutex".to_string();
-            error!("{}", failed_reason);
-            return Err(CrankerRouterException::new("critical error that tgt_res_bdy_rx is not avail in mutex".to_string()));
-        }
-        let mut tgt_res_bdy_rx = g.take().unwrap();
-        *g = None;
-        drop(g);
-
-        let wrapped_stream = tokio_stream::wrappers::UnboundedReceiverStream::new(tgt_res_bdy_rx);
-        let stream_body = Body::from_stream(wrapped_stream);
+        let stream_body = Body::from_stream(self.tgt_res_bdy_rx.clone());
         res_builder
             .body(stream_body)
             .map_err(|ie| CrankerRouterException::new(

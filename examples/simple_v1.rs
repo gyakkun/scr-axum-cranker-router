@@ -15,11 +15,11 @@ use scr_axum_cranker_router::proxy_listener::ProxyListener;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
-    SimpleLogger::new()
-        .with_local_timestamps()
-        .with_level(Trace)
-        .init()
-        .unwrap();
+    // SimpleLogger::new()
+    //     .with_local_timestamps()
+    //     .with_level(Trace)
+    //     .init()
+    //     .unwrap();
 
     let listeners: Vec<Arc<dyn ProxyListener>> = vec![Arc::new(DemoProxyListener::new())];
     let cranker_router = CrankerRouterBuilder::new()
