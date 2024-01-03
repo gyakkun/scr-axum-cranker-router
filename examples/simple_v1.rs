@@ -4,22 +4,20 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use axum::http::HeaderMap;
 use log::info;
-use log::LevelFilter::{Debug, Info, Trace};
+use log::LevelFilter::Info;
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
 
-use scr_axum_cranker_router::{CrankerRouter, CrankerRouterBuilder, CrankerRouterConfig};
+use scr_axum_cranker_router::CrankerRouterBuilder;
 use scr_axum_cranker_router::exceptions::CrankerRouterException;
-use scr_axum_cranker_router::ip_validator::{AllowAll, IPValidator};
 use scr_axum_cranker_router::proxy_info::ProxyInfo;
 use scr_axum_cranker_router::proxy_listener::ProxyListener;
-use scr_axum_cranker_router::route_resolver::{DefaultRouteResolver, RouteResolver};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
     SimpleLogger::new()
         .with_local_timestamps()
-        .with_level(Debug)
+        .with_level(Info)
         .init()
         .unwrap();
 
@@ -46,7 +44,7 @@ async fn main() {
 }
 
 struct DemoProxyListener {
-    counter: AtomicU64
+    counter: AtomicU64,
 }
 
 impl DemoProxyListener {

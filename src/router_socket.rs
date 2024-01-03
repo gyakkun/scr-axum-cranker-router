@@ -66,8 +66,10 @@ pub struct RouterSocketV1 {
     pub remote_address: SocketAddr,
     pub is_removed: Arc<AtomicBool>,
     pub has_response: Arc<AtomicBool>,
-    pub bytes_received: Arc<AtomicI64>, // from cli
-    pub bytes_sent: Arc<AtomicI64>, // to cli
+    // from cli
+    pub bytes_received: Arc<AtomicI64>,
+    // to cli
+    pub bytes_sent: Arc<AtomicI64>,
     // but axum receive websocket in Message level. Let's treat it as frame now
     pub binary_frame_received: AtomicI64,
     pub socket_wait_in_millis: AtomicI64,
@@ -95,7 +97,7 @@ pub struct RouterSocketV1 {
     wss_send_task_join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 
     has_response_notify: Arc<Notify>,
-    really_need_on_response_body_chunk_received_from_target: bool
+    really_need_on_response_body_chunk_received_from_target: bool,
 }
 
 impl RouterSocketV1 {
@@ -128,7 +130,7 @@ impl RouterSocketV1 {
         let router_socket_id_clone = router_socket_id.clone();
         let has_response_notify = Arc::new(Notify::new());
         let really_need_on_response_body_chunk_received_from_target
-            = proxy_listeners.iter().any(|i|i.really_need_on_response_body_chunk_received_from_target());
+            = proxy_listeners.iter().any(|i| i.really_need_on_response_body_chunk_received_from_target());
 
         let arc_rs = Arc::new(Self {
             route,
@@ -171,7 +173,7 @@ impl RouterSocketV1 {
 
             has_response_notify,
 
-            really_need_on_response_body_chunk_received_from_target
+            really_need_on_response_body_chunk_received_from_target,
         });
         // Abort these two handles in Drop
         let wss_recv_pipe_join_handle = tokio::spawn(

@@ -6,27 +6,23 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
-use async_channel::Sender;
 use axum::{BoxError, Extension, http, Router, ServiceExt};
 use axum::body::{Body, HttpBody};
 use axum::extract::{ConnectInfo, OriginalUri, Query, State, WebSocketUpgrade};
 use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use axum::http::{Error, HeaderMap, HeaderValue, Method, Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use axum_core::body::BodyDataStream;
-use bytes::Bytes;
 use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
-use futures::stream::{BoxStream, MapErr};
 use lazy_static::lazy_static;
 use log::{debug, error, warn};
 use tower_http::limit;
 use uuid::Uuid;
 
-use crate::exceptions::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException, CrankerRouterException};
+use crate::exceptions::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException};
 use crate::ip_validator::{AllowAll, IPValidator};
 use crate::proxy_listener::ProxyListener;
 use crate::route_resolver::{DefaultRouteResolver, RouteResolver};
@@ -132,8 +128,8 @@ impl CrankerRouter {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(
-                        config.routes_keep_time_millis as u64
-                    )
+                    config.routes_keep_time_millis as u64
+                )
                 ).await;
                 websocket_farm_clone.clone()
                     .clean_routes_in_background(config.routes_keep_time_millis);
@@ -201,7 +197,6 @@ impl CrankerRouter {
         };
 
 
-
         let path = original_uri.path().to_string();
         let socket_fut = app_state.websocket_farm.clone().get_router_socket_by_target_path(path.clone()).await;
         match socket_fut {
@@ -259,7 +254,7 @@ impl CrankerRouter {
         let route = headers.get("Route")
             .and_then(|r| r.to_str().ok())
             .and_then(|s| Some(s.to_string()))
-            .unwrap_or_else(||{
+            .unwrap_or_else(|| {
                 warn!("[DeReg] No route specified. Fallback to \"*\"");
                 "*".to_string()
             });
@@ -288,8 +283,7 @@ impl CrankerRouter {
                 .clone()
                 .de_register_socket_in_background(route, addr, connector_id);
         }
-        let res = next.run(request).await;
-        res
+        next.run(request).await
     }
     pub async fn de_register_handler(
         Extension(connector_id): Extension<String>,
@@ -317,8 +311,6 @@ impl CrankerRouter {
         ConnectInfo(addr): ConnectInfo<SocketAddr>,
     ) -> impl IntoResponse
     {
-
-
         wsu
             .protocols([cif.negotiated_cranker_version])
             .on_upgrade(move |socket| router_socket::harvest_router_socket(
@@ -354,7 +346,7 @@ impl CrankerRouter {
         // Extract component name and connector id
         let connector_id = params.get("connectorInstanceID")
             .map(|s| s.to_string())
-            .unwrap_or_else(||{
+            .unwrap_or_else(|| {
                 let uuid = Uuid::new_v4().to_string();
                 warn!("Connector id is not specified. Generating a random uuid for it: {}", uuid);
                 uuid
@@ -363,7 +355,7 @@ impl CrankerRouter {
         let route = headers.get("Route")
             .and_then(|r| r.to_str().ok())
             .and_then(|s| Some(s.to_string()))
-            .unwrap_or_else(||{
+            .unwrap_or_else(|| {
                 warn!("No route specified for connector_id={}. Fallback to \"*\"", connector_id);
                 "*".to_string()
             });
@@ -378,7 +370,7 @@ impl CrankerRouter {
 
         let component_name = params.get("componentName")
             .map(|s| s.to_string())
-            .unwrap_or_else(||{
+            .unwrap_or_else(|| {
                 let sub_uuid = connector_id.chars().take(5).collect::<String>();
                 warn!(
                     "Component name is not set. Name it as unknown-{}. Route={}. Connector Id={}",
@@ -413,7 +405,7 @@ impl CrankerRouter {
             route,
             component_name,
             domain,
-            negotiated_cranker_version
+            negotiated_cranker_version,
         };
 
         request.extensions_mut().insert(connector_info);
@@ -437,7 +429,7 @@ struct CrankerConnectorInfo {
     route: String,
     component_name: String,
     domain: String,
-    negotiated_cranker_version: &'static str
+    negotiated_cranker_version: &'static str,
 }
 
 fn check_supported_cranker_version(versions: HashSet<String>) -> HashMap<&'static str, &'static str> {
