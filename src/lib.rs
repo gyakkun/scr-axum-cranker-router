@@ -171,6 +171,7 @@ impl CrankerRouter {
         let websocket_farm = WebSocketFarm::new(
             Arc::new(DefaultRouteResolver::new()),
             config.connector_max_wait_time_millis,
+            config.proxy_listeners.clone()
         );
         let websocket_farm_clone = websocket_farm.clone();
         tokio::spawn(async move {

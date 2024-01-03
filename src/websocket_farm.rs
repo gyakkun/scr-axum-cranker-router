@@ -7,12 +7,14 @@ use std::time::Duration;
 use async_channel::{Receiver, Sender, unbounded};
 use axum::async_trait;
 use dashmap::{DashMap, DashSet};
-use log::{debug, error, trace, warn};
+use log::{error, trace, warn};
 
+use crate::{LOCAL_IP, time_utils};
 use crate::exceptions::CrankerRouterException;
+use crate::proxy_info::ProxyInfo;
+use crate::proxy_listener::ProxyListener;
 use crate::route_resolver::RouteResolver;
 use crate::router_socket::RouterSocket;
-use crate::time_utils;
 
 const MU_ID: &str = "muid";
 
@@ -27,7 +29,7 @@ pub trait WebSocketFarmInterface: Sync + Send {
     fn remove_websocket_in_background(
         self: Arc<Self>, route: String,
         router_socket_id: String,
-        is_removed: Arc<AtomicBool>
+        is_removed: Arc<AtomicBool>,
     );
 
     fn add_socket_in_background(self: Arc<Self>, router_socket: Arc<dyn RouterSocket>);
@@ -58,6 +60,7 @@ pub struct WebSocketFarm {
     pub dark_hosts: DashSet<String>,
     pub has_catch_all: AtomicBool,
     pub max_wait_in_millis: i64,
+    pub proxy_listeners: Vec<Arc<dyn ProxyListener>>,
 }
 
 // unsafe impl<ANY> Send for WebSocketFarm<ANY>{}
@@ -67,6 +70,7 @@ impl WebSocketFarm {
     pub fn new(
         route_resolver: Arc<dyn RouteResolver>,
         max_wait_in_millis: i64,
+        proxy_listeners: Vec<Arc<dyn ProxyListener>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             route_resolver,
@@ -80,6 +84,7 @@ impl WebSocketFarm {
             dark_hosts: DashSet::new(),
             has_catch_all: AtomicBool::new(false),
             max_wait_in_millis,
+            proxy_listeners,
         })
     }
 }
@@ -98,6 +103,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
             ))); // 404 immediately
         }
         let router_socket_receiver = opt_chan.unwrap().clone().1;
+        let start_ts = time_utils::current_time_millis();
         let timeout = tokio::time::timeout(Duration::from_millis(self.max_wait_in_millis as u64), async {
             while let Ok(rs) = router_socket_receiver.recv().await {
                 if let Some(arc_rs) = rs.upgrade() {
@@ -119,6 +125,11 @@ impl WebSocketFarmInterface for WebSocketFarm {
                 Ok(arc_rs)
             }
             _ => {
+                let elapsed = time_utils::current_time_millis() - start_ts;
+                let epif = ErrorProxyInfo::new(resolved_route.clone(), elapsed);
+                for i in self.proxy_listeners.iter() {
+                    let _ = i.on_failure_to_acquire_proxy_socket(&epif);
+                }
                 Err(CrankerRouterException::new(format!(
                     "No cranker connector available in {}ms", self.max_wait_in_millis
                 )))
@@ -160,7 +171,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
     fn remove_websocket_in_background(
         self: Arc<Self>, route: String,
         router_socket_id: String,
-        is_removed: Arc<AtomicBool>
+        is_removed: Arc<AtomicBool>,
     ) {
         trace!("90 remove_websocket_in_background");
         tokio::spawn(async move {
@@ -220,5 +231,64 @@ impl WebSocketFarmInterface for WebSocketFarm {
                         });
                 })
         });
+    }
+}
+
+struct ErrorProxyInfo {
+    route: String,
+    socket_wait_in_millis: i64,
+}
+
+impl ErrorProxyInfo {
+    pub fn new(route: String, socket_wait_in_millis: i64) -> Self {
+        Self { route, socket_wait_in_millis }
+    }
+}
+
+impl ProxyInfo for ErrorProxyInfo {
+    fn is_catch_all(&self) -> bool {
+        self.route == "*"
+    }
+
+    fn connector_instance_id(&self) -> String {
+        "N/A".to_string()
+    }
+
+    fn server_address(&self) -> SocketAddr {
+        SocketAddr::new(LOCAL_IP.clone(), 0)
+    }
+
+    fn route(&self) -> String {
+        self.route.clone()
+    }
+
+    fn router_socket_id(&self) -> String {
+        "N/A".to_string()
+    }
+
+    fn duration_millis(&self) -> i64 {
+        0
+    }
+
+    fn bytes_received(&self) -> i64 {
+        0
+    }
+
+    fn bytes_sent(&self) -> i64 {
+        0
+    }
+
+    fn response_body_frames(&self) -> i64 {
+        0
+    }
+
+    fn error_if_any(&self) -> Option<CrankerRouterException> {
+        Some(CrankerRouterException::new(format!(
+            "failed to acquire connector socket in {}ms", self.socket_wait_in_millis
+        )))
+    }
+
+    fn socket_wait_in_millis(&self) -> i64 {
+        self.socket_wait_in_millis
     }
 }
