@@ -1,5 +1,7 @@
 use std::borrow::Cow;
-use std::fmt::Debug;
+use std::cmp::max;
+use std::collections::HashMap;
+use std::fmt::{Debug, Display, Formatter};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
@@ -8,12 +10,13 @@ use std::sync::atomic::Ordering::{AcqRel, SeqCst};
 use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
-use axum::async_trait;
+use axum::{async_trait, http};
 use axum::body::Body;
+use axum::extract::OriginalUri;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::handler::Handler;
-use axum::http::{HeaderMap, Method, Response, StatusCode};
-use axum::http::uri::PathAndQuery;
+use axum::http::{HeaderMap, Method, Response, StatusCode, Version};
+use axum::http::header::AsHeaderName;
 use bytes::Bytes;
 use futures::{Sink, SinkExt, StreamExt, TryFutureExt};
 use futures::stream::{SplitSink, SplitStream};
@@ -22,7 +25,7 @@ use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::{CRANKER_V_1_0, exceptions, REPRESSED_HEADERS, time_utils, TSCRState};
+use crate::{CRANKER_V_1_0, exceptions, get_custom_hop_by_hop_headers, LOCAL_IP, time_utils, TSCRState};
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::cranker_protocol_response::CrankerProtocolResponse;
 use crate::exceptions::CrankerRouterException;
@@ -45,9 +48,12 @@ pub(crate) trait RouterSocket: Send + Sync + ProxyInfo {
 
     // accept a client req
     async fn on_client_req(self: Arc<Self>,
-                           method: Method,
-                           path_and_query: Option<&PathAndQuery>,
+                           app_state: TSCRState,
+                           http_version: &Version,
+                           method: &Method,
+                           original_uri: &OriginalUri,
                            headers: &HeaderMap,
+                           addr: &SocketAddr,
                            opt_body: Option<Receiver<Result<Bytes, CrankerRouterException>>>,
     ) -> Result<Response<Body>, CrankerRouterException>;
 }
@@ -191,6 +197,272 @@ impl RouterSocketV1 {
 
         arc_wrapped
     }
+}
+
+fn set_target_request_headers(
+    cli_hdr: &HeaderMap,
+    mut hdr_to_tgt: &mut HeaderMap,
+    app_state: &TSCRState,
+    http_version: &Version,
+    cli_remote_addr: &SocketAddr,
+    orig_uri: &OriginalUri,
+) -> bool {
+    let custom_hop_by_hop = get_custom_hop_by_hop_headers(cli_hdr.get(http::header::CONNECTION));
+    let mut has_content_length_or_transfer_encoding = false;
+
+    cli_hdr.iter().for_each(|(k, v)| {
+        let lowercase_key = k.to_string().to_lowercase();
+        if app_state.config.do_not_proxy_headers.contains(lowercase_key.as_str())
+            || custom_hop_by_hop.contains(&lowercase_key) {
+            return; // @for_each
+        }
+        has_content_length_or_transfer_encoding |=
+            lowercase_key.eq(http::header::CONTENT_LENGTH.as_str())
+                || lowercase_key.eq(http::header::TRANSFER_ENCODING.as_str());
+        hdr_to_tgt.insert(k, v.clone());
+    });
+    let cli_all_via = header_map_get_all_ok_to_string(cli_hdr, http::header::VIA);
+
+
+    let new_via_val = get_new_via_value(
+        format!("{:?} {}", http_version, app_state.config.via_name),
+        cli_all_via,
+    );
+    if let Ok(p) = new_via_val.parse() {
+        hdr_to_tgt.append(http::header::VIA, p);
+    }
+
+    set_forwarded_headers(
+        cli_hdr,
+        hdr_to_tgt,
+        app_state.config.discard_client_forwarded_headers,
+        app_state.config.send_legacy_forwarded_headers,
+        cli_remote_addr,
+        orig_uri,
+    );
+
+    return has_content_length_or_transfer_encoding;
+}
+
+fn set_forwarded_headers(
+    cli_hdr: &HeaderMap,
+    hdr_to_tgt: &mut HeaderMap,
+    discard_client_forwarded_headers: bool,
+    send_legacy_forwarded_headers: bool,
+    cli_remote_addr: &SocketAddr,
+    cli_req_uri: &OriginalUri,
+) {
+    let mut forwarded_headers = Vec::new();
+    if !discard_client_forwarded_headers {
+        forwarded_headers = get_existing_forwarded_headers(cli_hdr);
+        for j in forwarded_headers.iter() {
+            if let Ok(parsed) = j.to_string().parse() {
+                hdr_to_tgt.append(http::header::FORWARDED, parsed);
+            }
+        }
+    }
+
+    let new_forwarded_hdr = create_forwarded_header_to_tgt(cli_hdr, cli_remote_addr, cli_req_uri);
+    if let Ok(parsed) = new_forwarded_hdr.to_string().parse() {
+        hdr_to_tgt.append(http::header::FORWARDED, parsed);
+    }
+
+    if send_legacy_forwarded_headers {
+        let first = if forwarded_headers.is_empty() { &new_forwarded_hdr } else { forwarded_headers.get(0).unwrap() };
+        set_x_forwarded_headers(hdr_to_tgt, first);
+    }
+}
+
+fn set_x_forwarded_headers(hdr_to_hdr: &mut HeaderMap, fh: &ForwardedHeader) {
+    let l = [fh.proto.as_ref(), fh.host.as_ref(), fh.for_value.as_ref()];
+    for v in l {
+        if let Some(Some(p)) = v.map(|s| s.parse().ok()) {
+            hdr_to_hdr.append(http::header::FORWARDED, p);
+        }
+    }
+}
+
+fn create_forwarded_header_to_tgt(
+    cli_hdr: &HeaderMap,
+    cli_remote_addr: &SocketAddr,
+    cli_req_uri: &OriginalUri,
+) -> ForwardedHeader {
+    let server_self_ip = LOCAL_IP.to_string();
+    ForwardedHeader {
+        by: Some(server_self_ip),
+        for_value: Some(cli_remote_addr.ip().to_string()),
+        host: cli_hdr.get(http::header::HOST)
+            .and_then(|i| i.to_str().ok())
+            .map(|j| j.to_string()),
+        proto: cli_req_uri.scheme_str().map(|i| i.to_string()),
+        extensions: None,
+    }
+}
+
+fn get_existing_forwarded_headers(hdr: &HeaderMap) -> Vec<ForwardedHeader> {
+    let all: Vec<String> = header_map_get_all_ok_to_string(hdr, http::header::FORWARDED);
+    let mut res = Vec::new();
+    if all.is_empty() {
+        let hosts = get_x_forwarded_value(hdr, "x-forwarded-host");
+        let ports = get_x_forwarded_value(hdr, "x-forwarded-port");
+        let protos = get_x_forwarded_value(hdr, "x-forwarded-proto");
+        let fors = get_x_forwarded_value(hdr, "x-forwarded-for");
+        let max = max(max(max(hosts.len(), protos.len()), fors.len()), ports.len());
+        if max == 0 {
+            return res;
+        }
+        let include_host = hosts.len() == max;
+        let include_port = ports.len() == max;
+        let include_proto = protos.len() == max;
+        let include_for = fors.len() == max;
+
+        let cur_host = if include_port && !include_host {
+            hdr.get(http::header::HOST)
+                .and_then(|j| j.to_str().ok())
+                .and_then(|k| Some(k.to_string()))
+        } else {
+            None
+        };
+
+        for i in 0..max {
+            let host = if include_host { hosts.get(i).and_then(|i| Some(i.clone())) } else { None };
+            let port = if include_port { ports.get(i).and_then(|i| Some(i.clone())) } else { None };
+            let proto = if include_proto { protos.get(i).and_then(|i| Some(i.clone())) } else { None };
+            let for_value = if include_for { fors.get(i).and_then(|i| Some(i.clone())) } else { None };
+            let use_default_port = port.is_none() ||
+                if port.is_some() { // and port.is_some()
+                    let po = port.clone().unwrap();
+                    let pr = port.clone().unwrap();
+                    (pr.eq_ignore_ascii_case("http") && po.eq("80"))
+                        || (pr.eq_ignore_ascii_case("https") && po.eq("443"))
+                } else {
+                    false
+                };
+            let host_to_use = if include_host { host } else if include_port { cur_host.clone() } else { None };
+            res.push(ForwardedHeader {
+                by: None,
+                for_value,
+                host: host_to_use,
+                proto,
+                extensions: None,
+            });
+        }
+    } else {
+        for s in all {
+            for t in rfc7239::parse(s.as_str()) {
+                if let Ok(u) = t {
+                    res.push(u.into());
+                }
+            }
+        }
+    }
+    res
+}
+
+#[derive(Default)]
+struct ForwardedHeader {
+    by: Option<String>,
+    for_value: Option<String>,
+    host: Option<String>,
+    proto: Option<String>,
+    extensions: Option<HashMap<String, String>>,
+}
+
+impl Display for ForwardedHeader {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut sb = String::new();
+        append_string_for_forwarded_header(&mut sb, "by", self.by.as_ref());
+        append_string_for_forwarded_header(&mut sb, "for", self.for_value.as_ref());
+        append_string_for_forwarded_header(&mut sb, "host", self.host.as_ref());
+        append_string_for_forwarded_header(&mut sb, "proto", self.proto.as_ref());
+        self.extensions.as_ref()
+            .map(|m| {
+                m.iter().for_each(|(k, v)| {
+                    append_string_for_forwarded_header(&mut sb, k.as_str(), Some(v));
+                });
+            });
+        write!(f, "{}", sb)
+    }
+}
+
+fn append_string_for_forwarded_header(sb: &mut String, k: &str, v: Option<&String>) {
+    if v.is_none() {
+        return;
+    }
+    if !sb.is_empty() {
+        sb.push(';');
+    }
+    let unwrapped = v.unwrap();
+    sb.push_str(k);
+    sb.push('=');
+    sb.push_str(quote_if_needed(unwrapped).as_str());
+}
+
+fn quote_if_needed(s: &String) -> String {
+    return if s.chars().any(is_t_char) {
+        let mut res = String::new();
+        let replaced = s.replace('"', "\\\"");
+        res.push('"');
+        res.push_str(replaced.as_str());
+        res.push('"');
+        res
+    } else {
+        s.clone()
+    };
+}
+
+fn is_t_char(c: char) -> bool {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9' || c == '!' ||
+        c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*' || c == '+' ||
+        c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~');
+}
+
+impl From<rfc7239::Forwarded<'_>> for ForwardedHeader {
+    fn from(rf: rfc7239::Forwarded) -> Self {
+        ForwardedHeader {
+            by: rf.forwarded_by.map(|i| i.to_string()),
+            for_value: rf.forwarded_for.map(|i| i.to_string()),
+            host: rf.host.map(|i| i.to_string()),
+            proto: rf.protocol.map(|i| i.to_string()),
+            extensions: None,
+        }
+    }
+}
+
+fn header_map_get_all_ok_to_string<K>(hdr: &HeaderMap, hdr_key: K)
+                                      -> Vec<String>
+    where K: AsHeaderName
+{
+    hdr.get_all(hdr_key).iter()
+        .map(|f| f.to_str())
+        .filter(|r| r.is_ok())
+        .map(|f| f.unwrap())
+        .map(|f| f.to_string())
+        .collect()
+}
+
+fn get_x_forwarded_value(hdr: &HeaderMap, xf_key: &str) -> Vec<String> {
+    let mut res = Vec::new();
+    let vals = header_map_get_all_ok_to_string(hdr, xf_key);
+    if !vals.is_empty() {
+        vals.iter()
+            .for_each(|i| {
+                i.split(",")
+                    .map(|j| j.trim())
+                    .map(|k| k.to_string())
+                    .for_each(|o| res.push(o));
+            });
+    }
+    res
+}
+
+fn get_new_via_value(this_server_via: String, prev_via_list: Vec<String>) -> String {
+    let mut res = prev_via_list.join(", ").to_string();
+    if !prev_via_list.is_empty() {
+        res.push_str(", ");
+    }
+    res.push_str(this_server_via.as_str());
+    return res;
 }
 
 async fn listen_tgt_res_async(another_self: Arc<RouterSocketV1>) -> Result<(), CrankerRouterException> {
@@ -373,7 +645,7 @@ async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
                     } else {
                         break;
                     }
-                },
+                }
                 _ => continue
             }
         }
@@ -701,6 +973,17 @@ impl WebSocketListener for RouterSocketV1 {
             .map_err(|se| CrankerRouterException::new(format!(
                 "rare error that failed to send error to err chan: {:?}", se
             )))
+
+        // the version below MAY causing recursive ex creation, test it later
+        // let err_clone = err.clone();
+        // return match self.err_chan_tx.send_blocking(err) {
+        //     Ok(_) => Err(err_clone),
+        //     Err(se) => {
+        //         Err(err_clone.plus_string(format!(
+        //             "rare error that failed to send error to err chan: {:?}", se
+        //         )))
+        //     }
+        // }
     }
 }
 
@@ -784,9 +1067,12 @@ impl RouterSocket for RouterSocketV1 {
     }
 
     async fn on_client_req(self: Arc<Self>,
-                           method: Method,
-                           path_and_query: Option<&PathAndQuery>,
-                           headers: &HeaderMap,
+                           app_state: TSCRState,
+                           http_version: &Version,
+                           method: &Method,
+                           orig_uri: &OriginalUri,
+                           cli_headers: &HeaderMap,
+                           addr: &SocketAddr,
                            opt_body: Option<Receiver<Result<Bytes, CrankerRouterException>>>,
     ) -> Result<Response<Body>, CrankerRouterException> {
         // 0. if is removed then should not run into this method
@@ -796,30 +1082,31 @@ impl RouterSocket for RouterSocketV1 {
             )));
         }
 
-        for i in self.proxy_listeners.iter() {
-            let _ = i.on_before_proxy_to_target(self.as_ref(), headers);
-        }
-
         let current_time_millis = time_utils::current_time_millis();
         self.socket_wait_in_millis.fetch_add(current_time_millis, SeqCst);
         self.client_req_start_ts.store(current_time_millis, SeqCst);
         self.duration_millis.store(-current_time_millis, SeqCst);
         // 1. Cli header processing
         debug!("1");
-        let mut client_request_headers = HeaderMap::new();
-        headers.iter().for_each(|(k, v)| {
-            if REPRESSED_HEADERS.contains(k.as_str().to_ascii_lowercase().as_str()) {
-                // NOP
-            } else {
-                client_request_headers.insert(k.to_owned(), v.to_owned());
-            }
-        });
+        let mut hdr_to_tgt = HeaderMap::new();
+        set_target_request_headers(cli_headers, &mut hdr_to_tgt, &app_state, http_version, addr, orig_uri);
         // 2. Build protocol request line / protocol header frame without endmarker
         debug!("2");
-        let request_line = build_request_line(method, path_and_query);
+        let request_line = create_request_line(method, &orig_uri);
         let cranker_req_bdr = CrankerProtocolRequestBuilder::new()
             .with_request_line(request_line)
-            .with_request_headers(&client_request_headers);
+            .with_request_headers(&hdr_to_tgt);
+
+        for i in self.proxy_listeners.iter() {
+            if let Err(e) = i.on_before_proxy_to_target(self.as_ref(), cli_headers) {
+                let ec = e.clone();
+                return if let Err(e) = self.on_error(e) {
+                    Err(ec.plus(e))
+                } else {
+                    Err(ec)
+                };
+            }
+        }
 
         // 3. Choose endmarker based on has body or not
         debug!("3");
@@ -934,14 +1221,15 @@ impl RouterSocket for RouterSocketV1 {
     }
 }
 
-fn build_request_line(method: Method, path_and_query: Option<&PathAndQuery>) -> String {
+fn create_request_line(method: &Method, orig_uri: &OriginalUri) -> String {
+    // Example: GET /example/hello?nonce=1023 HTTP/1.1
     let mut res = String::new();
     res.push_str(method.as_str());
     res.push(' ');
-    match path_and_query {
-        Some(paq) => res.push_str(paq.as_str()),
-        _ => {}
+    if let Some(paq) = orig_uri.path_and_query() {
+        res.push_str(paq.as_str());
     }
+    res.push_str(" HTTP/1.1");
     res
 }
 
@@ -973,11 +1261,11 @@ pub async fn take_wss_and_create_router_socket(
             addr,
             wss_tx,
             wss_rx,
-            state.proxy_listeners.clone(),
+            state.config.proxy_listeners.clone(),
 
             // state config
-            state.idle_read_timeout_ms,
-            state.ping_sent_after_no_write_for_ms,
+            state.config.idle_read_timeout_ms,
+            state.config.ping_sent_after_no_write_for_ms,
         );
         info!("Connector registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
         state

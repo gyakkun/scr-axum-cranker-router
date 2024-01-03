@@ -8,10 +8,12 @@ use log::LevelFilter::{Debug, Info};
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
 
-use scr_axum_cranker_router::CrankerRouter;
+use scr_axum_cranker_router::{CrankerRouter, CrankerRouterBuilder, CrankerRouterConfig};
 use scr_axum_cranker_router::exceptions::CrankerRouterException;
+use scr_axum_cranker_router::ip_validator::{AllowAll, IPValidator};
 use scr_axum_cranker_router::proxy_info::ProxyInfo;
 use scr_axum_cranker_router::proxy_listener::ProxyListener;
+use scr_axum_cranker_router::route_resolver::{DefaultRouteResolver, RouteResolver};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
@@ -21,14 +23,10 @@ async fn main() {
         .init()
         .unwrap();
 
-    let listeners:Vec<Arc<dyn ProxyListener>> = vec![Arc::new(DemoProxyListener::new())];
-    let cranker_router = CrankerRouter::new(
-        listeners,
-        5_000,
-        5_000,
-        10_000, // 10s
-        5 * 60_000, // 5min
-    );
+    let listeners: Vec<Arc<dyn ProxyListener>> = vec![Arc::new(DemoProxyListener::new())];
+    let cranker_router = CrankerRouterBuilder::new()
+        .with_proxy_listeners(listeners)
+        .build();
 
     let reg_listener = TcpListener::bind("127.0.0.1:3000")
         .await

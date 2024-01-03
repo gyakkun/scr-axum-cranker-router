@@ -53,9 +53,7 @@ impl CrankerProtocolResponse {
         Ok(Self { headers, status })
     }
 
-    pub fn headers_map(&self){
-
-    }
+    pub fn headers_map(&self) {}
 
     pub fn default_failed() -> Self {
         Self {
@@ -90,14 +88,12 @@ impl CrankerProtocolResponse {
 
         // Case sensitive or insensitive?
         if let Some(headers_ref) = res.headers_mut() {
-            headers_ref.get(http::header::CONNECTION)
-                .and_then(|conn_hdr| conn_hdr.to_str().ok())
-                .filter(|&conn_hdr_str| !conn_hdr_str.is_empty())
-                .map(|conn_hdr_str| get_custom_hop_by_hop_headers(conn_hdr_str.to_string()))
-                .map(|custom_hop_by_hop_headers| {
-                    for i in custom_hop_by_hop_headers {
-                        headers_ref.remove(i);
-                    }
+            get_custom_hop_by_hop_headers(
+                headers_ref.get(http::header::CONNECTION)
+            )
+                .iter()
+                .for_each(|custom_hop_by_hop_header| {
+                    headers_ref.remove(custom_hop_by_hop_header);
                 });
         }
 

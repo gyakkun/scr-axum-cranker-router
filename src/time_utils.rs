@@ -16,6 +16,6 @@ mod tests {
 
     #[test]
     fn test_current_time_millis() {
-        assert!(current_time_millis() < u64::MAX)
+        assert!(current_time_millis() < i64::MAX)
     }
 }
