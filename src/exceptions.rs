@@ -97,7 +97,6 @@ impl Display for CrankerProtocolVersionNotSupportedException {
 
 impl Error for CrankerProtocolVersionNotSupportedException {}
 
-#[inline]
 pub fn compose_ex<ANY>(
     opt_total_err: Option<CrankerRouterException>,
     this_may_err: Result<ANY, CrankerRouterException>,

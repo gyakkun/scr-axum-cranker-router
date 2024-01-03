@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_channel::{Receiver, Sender, unbounded};
 use axum::async_trait;
 use dashmap::{DashMap, DashSet};
-use log::{debug, error, trace, warn};
+use log::{error, trace, warn};
 
 use crate::{LOCAL_IP, time_utils};
 use crate::exceptions::CrankerRouterException;
@@ -173,20 +173,21 @@ impl WebSocketFarmInterface for WebSocketFarm {
         router_socket_id: String,
         is_removed: Arc<AtomicBool>,
     ) {
-        debug!("90 remove_websocket_in_background");
+        trace!("90 remove_websocket_in_background");
         tokio::spawn(async move {
             let route_clone = route.clone();
+            let mut success = true;
             self.route_last_removal_times.insert(route_clone, time_utils::current_time_millis());
-            debug!("91");
-            let success = self.route_to_router_socket_id_to_arc_router_socket_map.get(&route)
+            trace!("91");
+            success = self.route_to_router_socket_id_to_arc_router_socket_map.get(&route)
                 .map(|some| some.remove(&router_socket_id))
-                .is_some();
-            debug!("92 success {}", success);
+                .is_some() && success;
+            trace!("92 success {}", success);
             if success {
-                debug!("93");
+                trace!("93");
                 is_removed.store(true, SeqCst);
             }
-            debug!("94");
+            trace!("94");
         });
     }
 
@@ -212,7 +213,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
 
     fn de_register_socket_in_background(self: Arc<Self>, route: String, remote_addr: SocketAddr, connector_instance_id: String) {
         warn!(
-            "Going to deregister route={} and the target addr={} and the Connector Id={}",
+            "Going to deregister targetName={} and the targetAddr={} and the connectorInstanceID={}",
             route, remote_addr, connector_instance_id
         );
         tokio::spawn(async move {

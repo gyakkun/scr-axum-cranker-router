@@ -12,15 +12,14 @@ use axum::body::{Body, HttpBody};
 use axum::extract::{ConnectInfo, OriginalUri, Query, State, WebSocketUpgrade};
 use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use axum::http::{Error, HeaderMap, HeaderValue, Method, Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use axum_core::body::BodyDataStream;
 use bytes::Bytes;
-use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
-use futures::stream::{BoxStream, MapErr};
+use futures::{SinkExt, StreamExt, TryStreamExt};
+use futures::stream::BoxStream;
 use lazy_static::lazy_static;
 use log::{debug, error, warn};
 use tower_http::limit;
@@ -204,7 +203,12 @@ impl CrankerRouter {
             _ => !body.is_end_stream()
         };
 
-
+        let body_data_stream = body.into_data_stream()
+            .map_err(|e| CrankerRouterException::new(format!(
+                "axum ex when piping cli req body: {:?}", e
+            )));
+        // The full qualified name is  Pin<Box<MapErr<BodyDataStream, fn(Error) -> CrankerRouterException>>> which is too long
+        let boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, CrankerRouterException>>;
 
         let path = original_uri.path().to_string();
         let socket_fut = app_state.websocket_farm.clone().get_router_socket_by_target_path(path.clone()).await;
@@ -213,13 +217,11 @@ impl CrankerRouter {
                 debug!("Get a socket router_socket_id={}, cranker_ver={}", rs.router_socket_id(), rs.cranker_version());
                 let mut opt_body = None;
                 if has_body {
-                    let boxed_body_byte_stream
-                        = body.into_data_stream();
-                    // let mut boxed_body_byte_stream = Box::pin(boxed_body_byte_stream) as BoxedBodyByteStream;
-                    // let i = boxed_body_byte_stream.next().await;
-                    opt_body = Some(boxed_body_byte_stream);
+                    let (pipe_tx, pipe_rx) = async_channel::unbounded::<Result<Bytes, CrankerRouterException>>();
+                    opt_body = Some(pipe_rx);
+                    tokio::spawn(pipe_body_data_stream_to_channel_sender(boxed_stream, pipe_tx));
                 }
-                debug!("Has body ? {:?}", opt_body.is_some());
+                debug!("Has body ? {:?}", opt_body);
                 let rs_clone = rs.clone();
                 match rs.on_client_req(
                     app_state.clone(),
@@ -265,7 +267,7 @@ impl CrankerRouter {
         let route = headers.get("Route")
             .and_then(|r| r.to_str().ok())
             .and_then(|s| Some(s.to_string()))
-            .unwrap_or_else(||{
+            .unwrap_or({
                 warn!("[DeReg] No route specified. Fallback to \"*\"");
                 "*".to_string()
             });
@@ -366,7 +368,7 @@ impl CrankerRouter {
         // Extract component name and connector id
         let connector_id = params.get("connectorInstanceID")
             .map(|s| s.to_string())
-            .unwrap_or_else(||{
+            .unwrap_or({
                 // Trust the Random Number Generator!
                 // loop {
                 let uuid = Uuid::new_v4().to_string();
@@ -382,7 +384,7 @@ impl CrankerRouter {
         let route = headers.get("Route")
             .and_then(|r| r.to_str().ok())
             .and_then(|s| Some(s.to_string()))
-            .unwrap_or_else(||{
+            .unwrap_or({
                 warn!("No route specified for connector_id={}. Fallback to \"*\"", connector_id);
                 "*".to_string()
             });
@@ -398,7 +400,7 @@ impl CrankerRouter {
 
         let component_name = params.get("componentName")
             .map(|s| s.to_string())
-            .unwrap_or_else(||{
+            .unwrap_or({
                 let sub_uuid = connector_id.chars().take(5).collect::<String>();
                 warn!(
                     "Component name is not set. Name it as unknown-{}. Route={}. Connector Id={}",
@@ -413,7 +415,7 @@ impl CrankerRouter {
             .and_then(|d| d.to_str().ok())
             .and_then(|s| Some(s.to_string()))
             .or({
-                // warn!("No domain specified. Fallback to \"*\"");
+                warn!("No domain specified. Fallback to \"*\"");
                 Some("*".to_string())
             })
             .unwrap();
@@ -515,28 +517,25 @@ fn judge_has_body_from_header_http_1(headers: &HeaderMap) -> bool {
     headers.contains_key(http::header::TRANSFER_ENCODING)
 }
 
-// pub type BoxedBodyByteStream<'async_trait> = BoxStream<'async_trait, Result<Bytes, CrankerRouterException>>;
-pub type BoxedBodyByteStream =  MapErr<BodyDataStream, fn(Error) -> CrankerRouterException>;
-
 // FIXME: Necessary? We judge if the req has body or not by
 // the HTTP header (at least in HTTP/1.1): content-length
 // and transfer-encoding (chunked)
 // I think we really can just move this stream to the on_cli_req method
-// async fn pipe_body_data_stream_to_channel_sender(
-//     mut stream: BoxedBodyByteStream<'_>,
-//     sender: Sender<Result<Bytes, CrankerRouterException>>,
-// ) -> Result<(), CrankerRouterException>
-// {
-//     while let Some(frag) = stream.next().await {
-//         if let Err(e) = sender.send(frag).await {
-//             let failed_reason = format!("error when piping body data stream to mpsc sender, pipe will break: {:?}", e);
-//             error!("{failed_reason}");
-//             return Err(CrankerRouterException::new(failed_reason));
-//         }
-//     }
-//     drop(sender);
-//     Ok(())
-// }
+async fn pipe_body_data_stream_to_channel_sender(
+    mut stream: BoxStream<'_, Result<Bytes, CrankerRouterException>>,
+    sender: Sender<Result<Bytes, CrankerRouterException>>,
+) -> Result<(), CrankerRouterException>
+{
+    while let Some(frag) = stream.next().await {
+        if let Err(e) = sender.send(frag).await {
+            let failed_reason = format!("error when piping body data stream to mpsc sender, pipe will break: {:?}", e);
+            error!("{failed_reason}");
+            return Err(CrankerRouterException::new(failed_reason));
+        }
+    }
+    drop(sender);
+    Ok(())
+}
 
 
 fn failed_at_ip_validation(addr: SocketAddr, route: &str, connector_id: &str) -> (StatusCode, String) {
