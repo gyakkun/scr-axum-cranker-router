@@ -3,8 +3,9 @@ use std::str::FromStr;
 use axum::http;
 use axum::response::Response;
 
-use crate::{get_custom_hop_by_hop_headers, HOP_BY_HOP_HEADERS, RESPONSE_HEADERS_TO_NOT_SEND_BACK};
+use crate::{HOP_BY_HOP_HEADERS, RESPONSE_HEADERS_TO_NOT_SEND_BACK};
 use crate::exceptions::CrankerRouterException;
+use crate::http_utils::get_custom_hop_by_hop_headers;
 
 pub struct CrankerProtocolResponse {
     pub headers: Vec<String>,
@@ -85,8 +86,7 @@ impl CrankerProtocolResponse {
             }
         }
 
-
-        // Case sensitive or insensitive?
+        // case insensitive
         if let Some(headers_ref) = res.headers_mut() {
             get_custom_hop_by_hop_headers(
                 headers_ref.get(http::header::CONNECTION)

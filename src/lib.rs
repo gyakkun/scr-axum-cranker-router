@@ -44,6 +44,7 @@ pub mod websocket_listener;
 pub mod proxy_listener;
 pub mod websocket_farm;
 pub mod ip_validator;
+mod http_utils;
 
 pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &'static str = "CrankerProtocol";
 // should be CrankerProtocol, but axum convert all header key to lowercase when reading req from client and sending res
@@ -194,11 +195,17 @@ impl CrankerRouter {
         let http_version = req.version();
         debug!("Http version {:?}", http_version);
         let body = req.into_body();
-        let has_body = judge_has_body_from_header_http_1(&headers) || !body.is_end_stream();
+        let has_body = match http_version {
+            http::version::Version::HTTP_09 |
+            http::version::Version::HTTP_10 |
+            http::version::Version::HTTP_11 =>
+                judge_has_body_from_header_http_1(&headers),
+            _ => !body.is_end_stream()
+        };
 
         let body_data_stream = body.into_data_stream()
             .map_err(|e| CrankerRouterException::new(format!(
-                "axum ex when piping cli res body: {:?}", e
+                "axum ex when piping cli req body: {:?}", e
             )));
         // The full qualified name is  Pin<Box<MapErr<BodyDataStream, fn(Error) -> CrankerRouterException>>> which is too long
         let boxed_stream = Box::pin(body_data_stream) as BoxStream<Result<Bytes, CrankerRouterException>>;
@@ -316,7 +323,6 @@ impl CrankerRouter {
         wsu: WebSocketUpgrade,
         Extension(ext_map): Extension<HashMap<String, String>>,
         Extension(ver_neg): Extension<VersionNegotiate>,
-        headers: HeaderMap,
         ConnectInfo(addr): ConnectInfo<SocketAddr>,
     ) -> impl IntoResponse
     {
@@ -328,7 +334,7 @@ impl CrankerRouter {
 
         wsu
             .protocols([ver_neg.dealt])
-            .on_upgrade(move |socket| router_socket::take_wss_and_create_router_socket(
+            .on_upgrade(move |socket| router_socket::harvest_router_socket(
                 socket,
                 app_state.clone(),
                 connector_id,
@@ -511,6 +517,10 @@ fn judge_has_body_from_header_http_1(headers: &HeaderMap) -> bool {
     headers.contains_key(http::header::TRANSFER_ENCODING)
 }
 
+// FIXME: Necessary? We judge if the req has body or not by
+// the HTTP header (at least in HTTP/1.1): content-length
+// and transfer-encoding (chunked)
+// I think we really can just move this stream to the on_cli_req method
 async fn pipe_body_data_stream_to_channel_sender(
     mut stream: BoxStream<'_, Result<Bytes, CrankerRouterException>>,
     sender: Sender<Result<Bytes, CrankerRouterException>>,
@@ -584,21 +594,6 @@ fn extract_cranker_version(
     return Err(CrankerProtocolVersionNotSupportedException::new(
         format!("(sub protocols: {:?}, legacy protocols: {:?}", sub_protocols, legacy_protocol_header)
     ).into());
-}
-
-fn get_custom_hop_by_hop_headers(opt_conn_hdr: Option<&HeaderValue>) -> HashSet<String> {
-    let mut res = HashSet::new();
-    if let Some(conn_hdr) = opt_conn_hdr {
-        if let Ok(conn_hdr_str) = conn_hdr.to_str() {
-            if !conn_hdr_str.is_empty() {
-                let split = conn_hdr_str.split(",");
-                for s in split.into_iter() {
-                    res.insert(s.trim().to_string());
-                }
-            }
-        }
-    }
-    return res;
 }
 
 pub type CrankerRouterBuilder = CrankerRouterConfig;

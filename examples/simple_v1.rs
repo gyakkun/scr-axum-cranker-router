@@ -55,7 +55,7 @@ impl DemoProxyListener {
 }
 
 impl ProxyListener for DemoProxyListener {
-    fn on_before_proxy_to_target(&self, _info: &dyn ProxyInfo, request_headers_to_target: &HeaderMap) -> Result<(), CrankerRouterException> {
+    fn on_before_proxy_to_target(&self, _info: &dyn ProxyInfo, request_headers_to_target: &mut HeaderMap) -> Result<(), CrankerRouterException> {
         let id = 1 + self.counter.fetch_add(1, SeqCst);
         info!("[{}] on_before_proxy_to_target: header={:?}", id, request_headers_to_target);
         Ok(())
