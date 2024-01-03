@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
@@ -10,6 +11,7 @@ use axum::{BoxError, Extension, http, Router, ServiceExt};
 use axum::body::{Body, HttpBody};
 use axum::extract::{ConnectInfo, OriginalUri, Query, State, WebSocketUpgrade};
 use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
+use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
 use axum::middleware::{from_fn_with_state, Next};
@@ -22,6 +24,7 @@ use lazy_static::lazy_static;
 use log::{debug, error, warn};
 use tower_http::limit;
 use uuid::Uuid;
+use crate::cranker_protocol_request_builder::EndMarker::RequestBodyEnded;
 
 use crate::exceptions::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException, CrankerRouterException};
 use crate::ip_validator::{AllowAll, IPValidator};
@@ -203,10 +206,16 @@ impl CrankerRouter {
     pub fn registration_axum_router(&self) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
         let res = Router::new()
             .route("/register", any(CrankerRouter::register_handler)
-                .layer(from_fn_with_state(self.state(), validate_route_domain_and_cranker_version)),
+                .layer(from_fn_with_state(self.state(), CrankerRouter::validate_route_domain_and_cranker_version)),
             )
             .route("/register/", any(CrankerRouter::register_handler)
-                .layer(from_fn_with_state(self.state(), validate_route_domain_and_cranker_version)),
+                .layer(from_fn_with_state(self.state(), CrankerRouter::validate_route_domain_and_cranker_version)),
+            )
+            .route("/deregister", any(CrankerRouter::de_register_handler)
+                .layer(from_fn_with_state(self.state(), CrankerRouter::de_reg_check))
+            )
+            .route("/deregister/", any(CrankerRouter::de_register_handler)
+                .layer(from_fn_with_state(self.state(), CrankerRouter::de_reg_check))
             )
             .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
             .with_state(self.state())
@@ -294,13 +303,73 @@ impl CrankerRouter {
         };
     }
 
+    pub async fn de_reg_check(
+        State(app_state): State<TSCRState>,
+        // wsu: WebSocketUpgrade,
+        Query(params): Query<HashMap<String, String>>, // Not expecting multiple val for a key so hashmap is fine
+        ConnectInfo(addr): ConnectInfo<SocketAddr>,
+        headers: HeaderMap,
+        mut request: Request<Body>,
+        next: Next,
+    ) -> Response {
+        debug!("We got someone DE registering. Let's examine its info: headers={:?}", &headers);
+        let route = match headers.get("Route")
+            .map(|r| r.to_str())
+            .unwrap_or_else(|| {
+                warn!("No route specified. Fallback to \"*\"");
+                Ok("*")
+            }) {
+            Ok(v) => v.to_string(),
+            Err(to_str_err) => {
+                error!("Failed to convert Route header to str: {:?}",to_str_err);
+                return (StatusCode::BAD_REQUEST, format!("Failed to convert Route header to str: {:?}", to_str_err)).into_response();
+            }
+        };
+        if !app_state.config.registration_ip_validator.allow(addr.ip()) {
+            return failed_at_ip_validation(addr, route.as_str()).into_response();
+        }
+
+        // let mut ext_map = HashMap::new();
+        // ext_map.insert("route", Some(route.clone()));
+        let connector_instance_id = params.get("connectorInstanceID")
+            .map(|s| s.to_string());
+        if connector_instance_id.is_none() {
+            warn!("the service route={} using unsupported zero down time connector, will not deregister socket", route);
+            // ext_map.insert("connectorInstanceId", None);
+        } else {
+            let connector_instance_id = connector_instance_id.unwrap();
+            // ext_map.insert("connectorInstanceId", Some(connector_instance_id.clone()));
+            app_state.websocket_farm.clone().de_register_socket_in_background(route, addr, connector_instance_id);
+        }
+        // request.extensions_mut().insert(ext_map);
+        let res = next.run(request).await;
+        res
+    }
+    pub async fn de_register_handler(
+        // State(app_state): State<TSCRState>,
+        wsu: WebSocketUpgrade,
+        // Query(params): Query<HashMap<String, String>>, // Not expecting multiple val for a key so hashmap is fine
+        // ConnectInfo(addr): ConnectInfo<SocketAddr>,
+        // headers: HeaderMap,
+    ) -> impl IntoResponse {
+        wsu.on_upgrade(move |ws| Self::send_goodbye(ws))
+    }
+
+    async fn send_goodbye(mut ws: WebSocket) {
+        let _ = ws.send(Message::Close(Some(CloseFrame {
+            code: 1000,
+            reason: Cow::from("Deregister complete"),
+        }))).await;
+        let _ = ws.close().await;
+    }
+
     // #[debug_handler]
     pub async fn register_handler(
         State(app_state): State<TSCRState>,
-        ws: WebSocketUpgrade,
+        wsu: WebSocketUpgrade,
         Extension(ext_map): Extension<HashMap<String, String>>,
         Extension(ver_neg): Extension<VersionNegotiate>,
-        Query(params): Query<HashMap<String, String>>,
+        Query(params): Query<HashMap<String, String>>, // Not expecting multiple val for a key so hashmap is fine
         headers: HeaderMap,
         ConnectInfo(addr): ConnectInfo<SocketAddr>,
     ) -> impl IntoResponse
@@ -330,12 +399,92 @@ impl CrankerRouter {
         let domain = ext_map.get("domain").unwrap().to_string();
         let route = ext_map.get("route").unwrap().to_owned();
 
-        ws
+        wsu
             .protocols([ver_neg.dealt])
             .on_upgrade(move |socket| router_socket::take_wss_and_create_router_socket(
                 socket, app_state.clone(), connector_id, component_name, ver_neg.dealt.to_string(), domain, route,
                 addr,
             ))
+    }
+
+    /// Domain and route is mandatory so add a middleware to check.
+    /// Return BAD_REQUEST if illegal
+    // #[debug_handler]
+    async fn validate_route_domain_and_cranker_version(
+        State(app_state): State<TSCRState>,
+        headers: HeaderMap,
+        ConnectInfo(addr): ConnectInfo<SocketAddr>,
+        mut request: Request<Body>,
+        next: Next,
+    ) -> Response
+    {
+        // if method == Method::TRACE {
+        //     return (StatusCode::METHOD_NOT_ALLOWED, "Method not allowed.").into_response();
+        // }
+        debug!("We got someone registering. Let's examine its info: headers={:?}", &headers);
+
+        let route = match headers.get("Route")
+            .map(|r| r.to_str())
+            .unwrap_or_else(|| {
+                warn!("No route specified. Fallback to \"*\"");
+                Ok("*")
+            }) {
+            Ok(v) => v,
+            Err(to_str_err) => {
+                error!("Failed to convert Route header to str: {:?}",to_str_err);
+                return (StatusCode::BAD_REQUEST, format!("Failed to convert Route header to str: {:?}", to_str_err)).into_response();
+            }
+        };
+
+        if !app_state.config.registration_ip_validator.allow(addr.ip()) {
+            return failed_at_ip_validation(addr, route).into_response();
+        }
+
+        let domain = match headers.get("Domain")
+            .map(|r| r.to_str())
+            .unwrap_or_else(|| {
+                warn!("No domain specified. Fallback to \"*\"");
+                Ok("*")
+            }) {
+            Ok(v) => v,
+            Err(to_str_err) => {
+                error!("Failed to convert Domain header to str: {:?}",to_str_err);
+                return (StatusCode::BAD_REQUEST, format!("Failed to convert Domain header to str: {:?}", to_str_err)).into_response();
+            }
+        };
+
+        let dealt_version: &'static str;
+        match extract_cranker_version(&SUPPORTED_CRANKER_VERSION, &headers) {
+            Ok(v) => {
+                dealt_version = v;
+            }
+            Err(err) => {
+                error!("Not able to negotiate cranker version during handshake: {}", err);
+                return (StatusCode::BAD_REQUEST,
+                        format!("Failed to negotiate cranker version: {}", err)
+                ).into_response();
+            }
+        }
+
+        // Extract to
+        let mut ext_hashmap = HashMap::<String, String>::new();
+        ext_hashmap.insert("route".to_string(), route.to_string());
+        ext_hashmap.insert("domain".to_string(), domain.to_string());
+        let ext_ver_neg = VersionNegotiate { dealt: dealt_version };
+        request.extensions_mut().insert(ext_ver_neg);
+
+        request.extensions_mut().insert(ext_hashmap);
+
+        // Chain the layer
+        let mut response = next.run(request).await;
+        // mu cranker router will set this, cranker connector doesn't seem to read this header
+        // add here for compatibility. Not sure axum will actually add this or not since the
+        // ws.on_upgrade will be executed next and take the stream and set the negotiated protocol
+        // as sub protocol header
+        if let Ok(cph) = HeaderValue::from_str(dealt_version) {
+            response.headers_mut().insert(CRANKER_PROTOCOL_HEADER_KEY, cph);
+        }
+        response
     }
 }
 
@@ -423,89 +572,15 @@ async fn pipe_body_data_stream_to_channel_sender(
 }
 
 
-/// Domain and route is mandatory so add a middleware to check.
-/// Return BAD_REQUEST if illegal
-// #[debug_handler]
-async fn validate_route_domain_and_cranker_version(
-    State(app_state): State<TSCRState>,
-    headers: HeaderMap,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    mut request: Request<Body>,
-    next: Next,
-) -> Response
-{
-    // if method == Method::TRACE {
-    //     return (StatusCode::METHOD_NOT_ALLOWED, "Method not allowed.").into_response();
-    // }
-    debug!("We got someone registering. Let's examine its info: headers={:?}", &headers);
 
-    let route = match headers.get("Route")
-        .map(|r| r.to_str())
-        .unwrap_or_else(|| {
-            warn!("No route specified. Fallback to \"*\"");
-            Ok("*")
-        }) {
-        Ok(v) => v,
-        Err(to_str_err) => {
-            error!("Failed to convert Route header to str: {:?}",to_str_err);
-            return (StatusCode::BAD_REQUEST, format!("Failed to convert Route header to str: {:?}", to_str_err)).into_response();
-        }
-    };
 
-    if !app_state.config.registration_ip_validator.allow(addr.ip()) {
-        let failed_reason = format!(
-            "Fail to establish websocket connection to cranker connector because of not supported ip address={}. Route={}",
-            addr.ip(), route
-        );
-        warn!("{}", failed_reason);
-        return (StatusCode::FORBIDDEN, failed_reason).into_response();
-    }
-
-    let domain = match headers.get("Domain")
-        .map(|r| r.to_str())
-        .unwrap_or_else(|| {
-            warn!("No domain specified. Fallback to \"*\"");
-            Ok("*")
-        }) {
-        Ok(v) => v,
-        Err(to_str_err) => {
-            error!("Failed to convert Domain header to str: {:?}",to_str_err);
-            return (StatusCode::BAD_REQUEST, format!("Failed to convert Domain header to str: {:?}", to_str_err)).into_response();
-        }
-    };
-
-    let dealt_version: &'static str;
-    match extract_cranker_version(&SUPPORTED_CRANKER_VERSION, &headers) {
-        Ok(v) => {
-            dealt_version = v;
-        }
-        Err(err) => {
-            error!("Not able to negotiate cranker version during handshake: {}", err);
-            return (StatusCode::BAD_REQUEST,
-                    format!("Failed to negotiate cranker version: {}", err)
-            ).into_response();
-        }
-    }
-
-    // Extract to
-    let mut ext_hashmap = HashMap::<String, String>::new();
-    ext_hashmap.insert("route".to_string(), route.to_string());
-    ext_hashmap.insert("domain".to_string(), domain.to_string());
-    let ext_ver_neg = VersionNegotiate { dealt: dealt_version };
-    request.extensions_mut().insert(ext_ver_neg);
-
-    request.extensions_mut().insert(ext_hashmap);
-
-    // Chain the layer
-    let mut response = next.run(request).await;
-    // mu cranker router will set this, cranker connector doesn't seem to read this header
-    // add here for compatibility. Not sure axum will actually add this or not since the
-    // ws.on_upgrade will be executed next and take the stream and set the negotiated protocol
-    // as sub protocol header
-    if let Ok(cph) = HeaderValue::from_str(dealt_version) {
-        response.headers_mut().insert(CRANKER_PROTOCOL_HEADER_KEY, cph);
-    }
-    response
+fn failed_at_ip_validation(addr: SocketAddr, route: &str) -> (StatusCode, String) {
+    let failed_reason = format!(
+        "Fail to establish websocket connection to cranker connector because of not supported ip address={}. Route={}",
+        addr.ip(), route
+    );
+    warn!("{}", failed_reason);
+    (StatusCode::FORBIDDEN, failed_reason)
 }
 
 

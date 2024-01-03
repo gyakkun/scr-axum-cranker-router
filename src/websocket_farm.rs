@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_channel::{Receiver, Sender, unbounded};
 use axum::async_trait;
 use dashmap::{DashMap, DashSet};
-use log::{debug, error, warn};
+use log::{debug, error, trace, warn};
 
 use crate::exceptions::CrankerRouterException;
 use crate::route_resolver::RouteResolver;
@@ -88,7 +88,7 @@ impl WebSocketFarm {
 impl WebSocketFarmInterface for WebSocketFarm {
     async fn get_router_socket_by_target_path(self: Arc<Self>, target_path: String) -> Result<Arc<dyn RouterSocket>, CrankerRouterException> {
         // we have both maps storing <routes, xxx >, here we use route_to_chan map since it removes route earlier
-        // a little bit ( check the debug!("82") in retain )
+        // a little bit ( check the trace!("82") in retain )
         let current_routes = self.route_to_socket_chan.iter().map(|e| e.key().clone()).collect::<DashSet<String>>();
         let resolved_route = self.route_resolver.resolve(&current_routes, &target_path);
         let opt_chan = self.route_to_socket_chan.get(&resolved_route);
@@ -127,19 +127,19 @@ impl WebSocketFarmInterface for WebSocketFarm {
     }
 
     fn clean_routes_in_background(self: Arc<Self>, routes_keep_time_millis: i64) {
-        debug!("80: clean_routes_in_background ticked");
+        trace!("80: clean_routes_in_background ticked");
         let cut_off_time = time_utils::current_time_millis() - routes_keep_time_millis;
         // Remove may deadlock so put it in thread
         tokio::spawn(async move {
-            // debug!("80.5 before clean routes: {:?}", self.router_socket_id_to_arc_router_socket_map);
+            // trace!("80.5 before clean routes: {:?}", self.router_socket_id_to_arc_router_socket_map);
             let _ = self.route_to_router_socket_id_to_arc_router_socket_map
                 .retain(|k, v| {
-                    debug!("81");
+                    trace!("81");
                     let should_remove = v.is_empty()
                         && self.route_last_removal_times.contains_key(k)
                         && *self.route_last_removal_times.get(k).unwrap().value() < cut_off_time;
                     if should_remove {
-                        debug!("82");
+                        trace!("82");
                         warn!(
                             "removing registration info for {}, consequence requests to {} will be responded with 404.",
                             k,k
@@ -148,8 +148,8 @@ impl WebSocketFarmInterface for WebSocketFarm {
                     }
                     !should_remove
                 });
-            // debug!("82.5 after clean routes: {:?}", self.router_socket_id_to_arc_router_socket_map);
-            debug!("83");
+            // trace!("82.5 after clean routes: {:?}", self.router_socket_id_to_arc_router_socket_map);
+            trace!("83");
         });
     }
 
@@ -162,21 +162,21 @@ impl WebSocketFarmInterface for WebSocketFarm {
         router_socket_id: String,
         is_removed: Arc<AtomicBool>
     ) {
-        debug!("90 remove_websocket_in_background");
+        trace!("90 remove_websocket_in_background");
         tokio::spawn(async move {
             let route_clone = route.clone();
             let mut success = true;
             self.route_last_removal_times.insert(route_clone, time_utils::current_time_millis());
-            debug!("91");
+            trace!("91");
             success = self.route_to_router_socket_id_to_arc_router_socket_map.get(&route)
                 .map(|some| some.remove(&router_socket_id))
                 .is_some() && success;
-            debug!("92 success {}", success);
+            trace!("92 success {}", success);
             if success {
-                debug!("93");
+                trace!("93");
                 is_removed.store(true, SeqCst);
             }
-            debug!("94");
+            trace!("94");
         });
     }
 

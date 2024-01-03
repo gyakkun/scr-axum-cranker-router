@@ -468,7 +468,7 @@ fn get_new_via_value(this_server_via: String, prev_via_list: Vec<String>) -> Str
 async fn listen_tgt_res_async(another_self: Arc<RouterSocketV1>) -> Result<(), CrankerRouterException> {
     let msg_counter = AtomicUsize::new(0);
     // 11. handling what we received from wss_recv_pipe
-    debug!("11");
+    trace!("11");
     while let Ok(msg) = another_self.wss_recv_pipe_rx.recv().await {
         msg_counter.fetch_add(1, SeqCst);
         match msg {
@@ -480,7 +480,7 @@ async fn listen_tgt_res_async(another_self: Arc<RouterSocketV1>) -> Result<(), C
         }
     }
     // 12. End of receiving messages from wss_recv_pipe
-    debug!("12");
+    trace!("12");
     debug!("Totally received {} messages after starting listen to response in router_socket_id={}", msg_counter.load(SeqCst), another_self.router_socket_id);
     Ok(())
 }
@@ -488,12 +488,12 @@ async fn listen_tgt_res_async(another_self: Arc<RouterSocketV1>) -> Result<(), C
 // FIXME: Necessary close all these chan explicitly?
 impl Drop for RouterSocketV1 {
     fn drop(&mut self) {
-        debug!("70: dropping :{}", self.router_socket_id);
+        trace!("70: dropping :{}", self.router_socket_id);
         self.tgt_res_hdr_tx.close();
         self.tgt_res_hdr_rx.close();
         self.tgt_res_bdy_tx.close();
         self.tgt_res_bdy_rx.close();
-        debug!("71");
+        trace!("71");
         self.wss_recv_pipe_rx.close();
         self.wss_send_task_tx.close();
         let wrpjh = self.wss_recv_pipe_join_handle.clone();
@@ -504,7 +504,7 @@ impl Drop for RouterSocketV1 {
             wstjh.lock().await.as_ref()
                 .map(|o| o.abort());
         });
-        debug!("72");
+        trace!("72");
     }
 }
 
@@ -544,7 +544,7 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
     loop {
         tokio::select! {
             _ = rs.has_response_notify.notified() => {
-                debug!("30");
+                trace!("30");
                 local_has_response = true;
             }
             opt_res_msg = underlying_wss_rx.next() => {
@@ -569,9 +569,9 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
                                             may_ex = Some(CrankerRouterException::new(failed_reason));
                                             break; // @outer
                                         }
-                                        debug!("31");
+                                        trace!("31");
                                         may_ex = rs.on_text(txt).await.err();
-                                        debug!("32")
+                                        trace!("32")
                                     }
                                     Message::Binary(bin) => {
                                         if !local_has_response {
@@ -879,11 +879,11 @@ impl WebSocketListener for RouterSocketV1 {
     // when receiving close frame (equals client close ?)
     // Theoretically, tungstenite should already reply a close frame to connector, but in practice chances are it wouldn't
     async fn on_close(&self, opt_close_frame: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException> {
-        debug!("40");
+        trace!("40");
         for i in self.proxy_listeners.iter() {
             let _ = i.on_response_body_chunk_received(self);
         }
-        debug!("41");
+        trace!("41");
         let mut code = 4000; // 4000-4999 is reserved
         let mut reason = String::new();
         let mut total_err: Option<CrankerRouterException> = None;
@@ -892,12 +892,12 @@ impl WebSocketListener for RouterSocketV1 {
             code = clo_msg.code;
             reason = clo_msg.reason.to_string();
         }
-        debug!("42");
+        trace!("42");
         // TODO: Handle the reason carefully like mu cranker router
         if self.has_response.load(SeqCst) {
-            debug!("43");
+            trace!("43");
             if code == 1011 {
-                debug!("44");
+                trace!("44");
                 // 1011 indicates that a server is terminating the connection because
                 // it encountered an unexpected condition that prevented it from
                 // fulfilling the request.
@@ -906,7 +906,7 @@ impl WebSocketListener for RouterSocketV1 {
                 let may_ex = self.on_error(ex);
                 total_err = exceptions::compose_ex(total_err, may_ex);
             } else if code == 1008 {
-                debug!("45");
+                trace!("45");
                 // 1008 indicates that an endpoint is terminating the connection
                 // because it has received a message that violates its policy.  This
                 // is a generic status code that can be returned when there is no
@@ -919,10 +919,10 @@ impl WebSocketListener for RouterSocketV1 {
         }
 
         if !self.tgt_res_hdr_rx.is_closed() || !self.tgt_res_bdy_rx.is_closed() {
-            debug!("46");
+            trace!("46");
             // let mut is_tgt_chan_close_as_expected = true;
             if code == 1000 {
-                debug!("47");
+                trace!("47");
                 // 1000 indicates a normal closure, meaning that the purpose for
                 // which the connection was established has been fulfilled.
 
@@ -933,7 +933,7 @@ impl WebSocketListener for RouterSocketV1 {
                 // is_tgt_chan_close_as_expected = self.tgt_res_hdr_rx.close() && is_tgt_chan_close_as_expected;
                 // is_tgt_chan_close_as_expected = self.tgt_res_bdy_rx.close() && is_tgt_chan_close_as_expected;
             } else {
-                debug!("48");
+                trace!("48");
                 error!("closing client request early due to cranker wss connection close with status code={}, reason={}", code, reason);
                 let ex = CrankerRouterException::new(format!(
                     "upstream server error: ws code={}, reason={}", code, reason
@@ -951,14 +951,14 @@ impl WebSocketListener for RouterSocketV1 {
             //     self.on_error()
             // }
         }
-        debug!("49");
+        trace!("49");
 
         let may_ex = self.raise_completion_event();
         total_err = exceptions::compose_ex(total_err, may_ex);
         if total_err.is_some() {
             return Err(total_err.unwrap());
         }
-        debug!("49.5");
+        trace!("49.5");
         Ok(())
     }
 
@@ -1087,11 +1087,11 @@ impl RouterSocket for RouterSocketV1 {
         self.client_req_start_ts.store(current_time_millis, SeqCst);
         self.duration_millis.store(-current_time_millis, SeqCst);
         // 1. Cli header processing
-        debug!("1");
+        trace!("1");
         let mut hdr_to_tgt = HeaderMap::new();
         set_target_request_headers(cli_headers, &mut hdr_to_tgt, &app_state, http_version, addr, orig_uri);
         // 2. Build protocol request line / protocol header frame without endmarker
-        debug!("2");
+        trace!("2");
         let request_line = create_request_line(method, &orig_uri);
         let cranker_req_bdr = CrankerProtocolRequestBuilder::new()
             .with_request_line(request_line)
@@ -1109,7 +1109,7 @@ impl RouterSocket for RouterSocketV1 {
         }
 
         // 3. Choose endmarker based on has body or not
-        debug!("3");
+        trace!("3");
         let cranker_req = match opt_body.is_some() {
             false => {
                 cranker_req_bdr
@@ -1123,21 +1123,21 @@ impl RouterSocket for RouterSocketV1 {
             }
         };
         // 4. Send protocol header frame
-        debug!("4");
+        trace!("4");
         self.wss_send_task_tx.send(Message::Text(cranker_req)).await
             .map_err(|e| CrankerRouterException::new(format!(
                 "failed to send cli req hdr to tgt: {:?}", e
             )))?;
 
         // 5. Pipe cli req body to underlying wss
-        debug!("5");
+        trace!("5");
         if let Some(mut body) = opt_body {
-            debug!("5.5");
+            trace!("5.5");
             while let Ok(res_bdy_chunk) = body.recv().await {
-                debug!("6");
+                trace!("6");
                 match res_bdy_chunk {
                     Ok(bytes) => {
-                        debug!("8");
+                        trace!("8");
 
                         for i in self.proxy_listeners.iter() {
                             let _ = i.on_request_body_chunk_sent_to_target(self.as_ref(), &bytes);
@@ -1153,24 +1153,24 @@ impl RouterSocket for RouterSocketV1 {
                             })?;
                     }
                     Err(e) => {
-                        debug!("9");
+                        trace!("9");
                         error!("error when receiving req body from cli: {:?}", &e.reason);
                         return Err(e);
                     }
                 }
             }
             // 10. Send body end marker
-            debug!("10");
+            trace!("10");
             let end_of_body = CrankerProtocolRequestBuilder::new().with_request_body_ended().build()?;
             self.wss_send_task_tx.send(Message::Text(end_of_body)).await.map_err(|e| CrankerRouterException::new(format!(
                 "failed to send end of body end marker to tgt: {:?}", e
             )))?;
         }
-        debug!("20");
+        trace!("20");
         for i in self.proxy_listeners.iter() {
             i.on_request_body_sent_to_target(self.as_ref())?;
         }
-        debug!("21");
+        trace!("21");
 
         let mut cranker_res: Option<CrankerProtocolResponse> = None;
 
@@ -1179,7 +1179,7 @@ impl RouterSocket for RouterSocketV1 {
         self.has_response_notify.notify_waiters();
         let another_self = self.clone();
         // tokio::spawn(listen_tgt_res_async(another_self));
-        debug!("22");
+        trace!("22");
 
         if let hdr_res = self.tgt_res_hdr_rx.recv().await
             .map_err(|recv_err|

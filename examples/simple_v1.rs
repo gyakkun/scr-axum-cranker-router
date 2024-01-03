@@ -19,7 +19,7 @@ use scr_axum_cranker_router::route_resolver::{DefaultRouteResolver, RouteResolve
 async fn main() {
     SimpleLogger::new()
         .with_local_timestamps()
-        .with_level(Info)
+        .with_level(Debug)
         .init()
         .unwrap();
 
