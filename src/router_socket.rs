@@ -225,7 +225,7 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
     let read_notifier = Arc::new(Notify::new());
     let read_notifier_clone = read_notifier.clone();
     let rs_weak = Arc::downgrade(&rs);
-    tokio::spawn(async move {
+    let read_timeout_handle = tokio::spawn(async move {
         loop { // @outer
             match tokio::time::timeout(
                 Duration::from_millis(idle_read_timeout_ms as u64),
@@ -267,6 +267,7 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
                                 break; // @outer
                             }
                             Ok(msg) => {
+                                read_notifier.notify_waiters();
                                 match msg {
                                     Message::Text(txt) => {
                                         if !local_has_response {
@@ -309,6 +310,8 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
         }
     }
 
+    read_timeout_handle.abort_handle().abort();
+
     if let Some(ex) = may_ex {
         may_ex = None;
         let _ = rs.on_error(ex);
@@ -316,9 +319,6 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
 
     // recv nothing from underlying wss, implicating it already closed
     debug!("seems router socket normally closed. router_socket_id={}", rs.router_socket_id);
-    // Here the is_removed is not set to true yet, and compare-and-set tends to infinite
-    // loop. So choose the dumb way to wait some milliseconds. // FIXME
-    tokio::time::sleep(Duration::from_millis(50)).await;
     if !rs.is_removed() {
         // means the is_removed is still false, which is not expected
         let _ = rs.on_error(CrankerRouterException::new(
@@ -364,7 +364,9 @@ async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
     loop {
         tokio::select! {
             Ok(crex) = err_chan_rx.recv() => {
-                error!("err_chan_rx received err: {:?}. router_socket_id={}", crex.reason.as_str(), rs.router_socket_id);
+                if !rs.is_removed() {
+                    error!("err_chan_rx received err: {:?}. router_socket_id={}", crex.reason.as_str(), rs.router_socket_id);
+                }
                 // 0. Stop receiving message, flush underlying wss tx
                 let _ = wss_send_task_rx.close();
                 let _ = underlying_wss_tx.flush().await;
@@ -415,8 +417,7 @@ async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
                             if let Err(e) = underlying_wss_tx.send(Message::Close(opt_clo_fra)).await {
                                 trace!("86");
                                 // here failing is expected when is_removed
-                                // TODO: Add remove success notifier
-                                // let _ = rs.on_error(CrankerRouterException::new(format!("{may_err_msg} : {:?}", e)));
+                                let _ = rs.on_error(CrankerRouterException::new(format!("{may_err_msg} : {:?}", e)));
                             }
                             trace!("87");
                         } else if let Err(e) = underlying_wss_tx.send(msg).await {
@@ -767,7 +768,7 @@ impl ProxyInfo for RouterSocketV1 {
 impl RouterSocket for RouterSocketV1 {
     #[inline]
     fn is_removed(&self) -> bool {
-        return self.is_removed.load(SeqCst);
+        return self.is_removed.load(Acquire);
     }
 
     fn cranker_version(&self) -> &'static str {
