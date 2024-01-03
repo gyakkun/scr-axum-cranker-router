@@ -58,11 +58,6 @@ pub const _VER_3_0: &'static str = "3.0";
 pub const CRANKER_V_1_0: &'static str = "cranker_1.0";
 pub const CRANKER_V_3_0: &'static str = "cranker_3.0";
 
-#[derive(Clone, Debug)]
-struct VersionNegotiate {
-    dealt: &'static str,
-}
-
 lazy_static! {
     // Runtime evaluated, so it should be the actual serving server local ip
     // rather than compile machine ip
@@ -137,7 +132,8 @@ impl CrankerRouter {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(
-                    config.routes_keep_time_millis as u64)
+                        config.routes_keep_time_millis as u64
+                    )
                 ).await;
                 websocket_farm_clone.clone()
                     .clean_routes_in_background(config.routes_keep_time_millis);
@@ -317,27 +313,22 @@ impl CrankerRouter {
     pub async fn register_handler(
         State(app_state): State<ACRState>,
         wsu: WebSocketUpgrade,
-        Extension(ext_map): Extension<HashMap<String, String>>,
-        Extension(ver_neg): Extension<VersionNegotiate>,
+        Extension(cif): Extension<CrankerConnectorInfo>,
         ConnectInfo(addr): ConnectInfo<SocketAddr>,
     ) -> impl IntoResponse
     {
-        // TODO: Wrap them in a struct
-        let route = ext_map.get("route").unwrap().to_owned();
-        let domain = ext_map.get("domain").unwrap().to_owned();
-        let connector_id = ext_map.get("connector_id").unwrap().to_owned();
-        let component_name = ext_map.get("component_name").unwrap().to_owned();
+
 
         wsu
-            .protocols([ver_neg.dealt])
+            .protocols([cif.negotiated_cranker_version])
             .on_upgrade(move |socket| router_socket::harvest_router_socket(
                 socket,
                 app_state.clone(),
-                connector_id,
-                component_name,
-                ver_neg.dealt,
-                domain,
-                route,
+                cif.connector_id,
+                cif.component_name,
+                cif.negotiated_cranker_version,
+                cif.domain,
+                cif.route,
                 addr,
             ))
     }
@@ -359,7 +350,6 @@ impl CrankerRouter {
             return (StatusCode::METHOD_NOT_ALLOWED, "Method not allowed.").into_response();
         }
         debug!("We got someone registering. Let's examine its info: headers={:?}", &headers);
-        let mut ext_map = HashMap::<String, String>::new();
 
         // Extract component name and connector id
         let connector_id = params.get("connectorInstanceID")
@@ -369,7 +359,6 @@ impl CrankerRouter {
                 warn!("Connector id is not specified. Generating a random uuid for it: {}", uuid);
                 uuid
             });
-        ext_map.insert("connector_id".to_string(), connector_id.clone());
 
         let route = headers.get("Route")
             .and_then(|r| r.to_str().ok())
@@ -378,7 +367,6 @@ impl CrankerRouter {
                 warn!("No route specified for connector_id={}. Fallback to \"*\"", connector_id);
                 "*".to_string()
             });
-        ext_map.insert("route".to_string(), route.clone());
 
         if !app_state.config.registration_ip_validator.allow(addr.ip()) {
             return failed_at_ip_validation(
@@ -398,7 +386,6 @@ impl CrankerRouter {
                 );
                 "unknown-".to_string() + sub_uuid.as_str()
             });
-        ext_map.insert("component_name".to_string(), component_name);
 
         // v3 only parameter
         let domain = headers.get("Domain")
@@ -409,9 +396,8 @@ impl CrankerRouter {
                 Some("*".to_string())
             })
             .unwrap();
-        ext_map.insert("domain".to_string(), domain);
 
-        let dealt_version = match extract_cranker_version(&app_state.config.supported_cranker_protocols, &headers) {
+        let negotiated_cranker_version = match extract_cranker_version(&app_state.config.supported_cranker_protocols, &headers) {
             Ok(v) => {
                 v
             }
@@ -422,10 +408,15 @@ impl CrankerRouter {
                 ).into_response();
             }
         };
-        let ver_neg = VersionNegotiate { dealt: dealt_version };
+        let connector_info = CrankerConnectorInfo {
+            connector_id,
+            route,
+            component_name,
+            domain,
+            negotiated_cranker_version
+        };
 
-        request.extensions_mut().insert(ver_neg);
-        request.extensions_mut().insert(ext_map);
+        request.extensions_mut().insert(connector_info);
 
         // Chain the layer
         let mut response = next.run(request).await;
@@ -433,11 +424,20 @@ impl CrankerRouter {
         // add here for compatibility. Not sure axum will actually add this or not since the
         // ws.on_upgrade will be executed next and take the stream and set the negotiated protocol
         // as sub protocol header
-        if let Ok(cph) = HeaderValue::from_str(dealt_version) {
+        if let Ok(cph) = HeaderValue::from_str(negotiated_cranker_version) {
             response.headers_mut().insert(CRANKER_PROTOCOL_HEADER_KEY, cph);
         }
         response
     }
+}
+
+#[derive(Clone)]
+struct CrankerConnectorInfo {
+    connector_id: String,
+    route: String,
+    component_name: String,
+    domain: String,
+    negotiated_cranker_version: &'static str
 }
 
 fn check_supported_cranker_version(versions: HashSet<String>) -> HashMap<&'static str, &'static str> {
