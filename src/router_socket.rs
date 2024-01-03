@@ -25,7 +25,7 @@ use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::{CRANKER_V_1_0, exceptions, get_custom_hop_by_hop_headers, LOCAL_IP, time_utils, TSCRState};
+use crate::{CRANKER_V_1_0, exceptions, get_custom_hop_by_hop_headers, LOCAL_IP, time_utils, ACRState};
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::cranker_protocol_response::CrankerProtocolResponse;
 use crate::exceptions::CrankerRouterException;
@@ -46,9 +46,8 @@ pub(crate) trait RouterSocket: Send + Sync + ProxyInfo {
         Ok(())
     }
 
-    // accept a client req
     async fn on_client_req(self: Arc<Self>,
-                           app_state: TSCRState,
+                           app_state: ACRState,
                            http_version: &Version,
                            method: &Method,
                            original_uri: &OriginalUri,
@@ -67,23 +66,20 @@ pub struct RouterSocketV1 {
     pub proxy_listeners: Vec<Arc<dyn ProxyListener>>,
     pub remote_address: SocketAddr,
     pub is_removed: Arc<AtomicBool>,
-    // previously `is_removed`, but actually we can't remove ourself from the mpmc channel so this is just a marker
     pub has_response: Arc<AtomicBool>,
-    // this should be shared because before wss acquired to handle, ping/pong/close should be handling somewhere
     pub bytes_received: Arc<AtomicI64>,
     pub bytes_sent: Arc<AtomicI64>,
-    pub binary_frame_received: AtomicI64,
     // but axum receive websocket in Message level. Let's treat it as frame now
+    pub binary_frame_received: AtomicI64,
     pub socket_wait_in_millis: AtomicI64,
     pub error: RwLock<Option<CrankerRouterException>>,
     pub client_req_start_ts: Arc<AtomicI64>,
     pub duration_millis: Arc<AtomicI64>,
     pub idle_read_timeout_ms: i64,
     pub ping_sent_after_no_write_for_ms: i64,
-
-    // below should be private for inner routine
-    err_chan_tx: Sender<CrankerRouterException>, // Once error
-
+    /**** below should be private for inner routine ****/
+    // Once error, call on_error and will send here (blocked)
+    err_chan_tx: Sender<CrankerRouterException>,
     cli_side_res_sender: RSv1ClientSideResponseSender,
     // Send any exception immediately to this chan in on_error so that when
     // the body not sent to client yet, we can response error to client early
@@ -104,7 +100,6 @@ pub struct RouterSocketV1 {
 }
 
 impl RouterSocketV1 {
-    // err should use a separated channel to communicate between wss side and router socket side
     pub fn new(route: String,
                component_name: String,
                router_socket_id: String,
@@ -135,7 +130,7 @@ impl RouterSocketV1 {
         let router_socket_id_clone = router_socket_id.clone();
         let has_response_notify = Arc::new(Notify::new());
 
-        let arc_wrapped = Arc::new(Self {
+        let arc_rs = Arc::new(Self {
             route,
             component_name,
             router_socket_id,
@@ -177,17 +172,20 @@ impl RouterSocketV1 {
 
             has_response_notify,
         });
+        // Abort these two handles in Drop
         let wss_recv_pipe_join_handle = tokio::spawn(
             pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
-                arc_wrapped.clone(),
+                arc_rs.clone(),
                 underlying_wss_rx, wss_recv_pipe_tx,
             ));
         let wss_send_task_join_handle = tokio::spawn(
             pipe_and_queue_the_wss_send_task_and_handle_err_chan(
-                arc_wrapped.clone(),
+                arc_rs.clone(),
                 underlying_wss_tx, wss_send_task_rx, err_chan_rx,
             ));
-        let arc_wrapped_clone = arc_wrapped.clone();
+
+        // Don't want to let registration handler wait so spawn these val assign somewhere
+        let arc_wrapped_clone = arc_rs.clone();
         tokio::spawn(async move {
             let mut g = arc_wrapped_clone.wss_recv_pipe_join_handle.lock().await;
             *g = Some(wss_recv_pipe_join_handle);
@@ -195,14 +193,14 @@ impl RouterSocketV1 {
             *g = Some(wss_send_task_join_handle);
         });
 
-        arc_wrapped
+        arc_rs
     }
 }
 
 fn set_target_request_headers(
     cli_hdr: &HeaderMap,
     mut hdr_to_tgt: &mut HeaderMap,
-    app_state: &TSCRState,
+    app_state: &ACRState,
     http_version: &Version,
     cli_remote_addr: &SocketAddr,
     orig_uri: &OriginalUri,
@@ -1067,7 +1065,7 @@ impl RouterSocket for RouterSocketV1 {
     }
 
     async fn on_client_req(self: Arc<Self>,
-                           app_state: TSCRState,
+                           app_state: ACRState,
                            http_version: &Version,
                            method: &Method,
                            orig_uri: &OriginalUri,
@@ -1239,19 +1237,19 @@ fn create_request_line(method: &Method, orig_uri: &OriginalUri) -> String {
 // receiving / sending chat messages).
 pub async fn take_wss_and_create_router_socket(
     wss: WebSocket,
-    state: TSCRState,
+    app_state: ACRState,
     connector_id: String,
     component_name: String,
-    cranker_version: String,
+    cranker_version: &'static str,
     domain: String,
     route: String,
     addr: SocketAddr,
 )
 {
-    if cranker_version.as_str().eq(CRANKER_V_1_0) {
+    if cranker_version == CRANKER_V_1_0 {
         let (wss_tx, wss_rx) = wss.split();
         let router_socket_id = Uuid::new_v4().to_string();
-        let weak_wsf = Arc::downgrade(&state.websocket_farm);
+        let weak_wsf = Arc::downgrade(&app_state.websocket_farm);
         let rs = RouterSocketV1::new(
             route.clone(),
             component_name.clone(),
@@ -1261,14 +1259,12 @@ pub async fn take_wss_and_create_router_socket(
             addr,
             wss_tx,
             wss_rx,
-            state.config.proxy_listeners.clone(),
-
-            // state config
-            state.config.idle_read_timeout_ms,
-            state.config.ping_sent_after_no_write_for_ms,
+            app_state.config.proxy_listeners.clone(),
+            app_state.config.idle_read_timeout_ms,
+            app_state.config.ping_sent_after_no_write_for_ms,
         );
         info!("Connector registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
-        state
+        app_state
             .websocket_farm
             .clone()
             .add_socket_in_background(rs);
@@ -1278,8 +1274,8 @@ pub async fn take_wss_and_create_router_socket(
     }
     {
         // Prepare for some counter
-        let write_guard = state.clone();
-        let _ = write_guard.counter.fetch_add(1, SeqCst);
+        // let write_guard = state.clone();
+        // let _ = write_guard.counter.fetch_add(1, SeqCst);
     }
 }
 
