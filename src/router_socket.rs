@@ -95,6 +95,7 @@ pub struct RouterSocketV1 {
     wss_send_task_join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 
     has_response_notify: Arc<Notify>,
+    really_need_on_response_body_chunk_received_from_target: bool
 }
 
 impl RouterSocketV1 {
@@ -126,6 +127,8 @@ impl RouterSocketV1 {
 
         let router_socket_id_clone = router_socket_id.clone();
         let has_response_notify = Arc::new(Notify::new());
+        let really_need_on_response_body_chunk_received_from_target
+            = proxy_listeners.iter().any(|i|i.really_need_on_response_body_chunk_received_from_target());
 
         let arc_rs = Arc::new(Self {
             route,
@@ -167,6 +170,8 @@ impl RouterSocketV1 {
             wss_send_task_join_handle: Arc::new(Mutex::new(None)),
 
             has_response_notify,
+
+            really_need_on_response_body_chunk_received_from_target
         });
         // Abort these two handles in Drop
         let wss_recv_pipe_join_handle = tokio::spawn(
@@ -572,10 +577,7 @@ impl WebSocketListener for RouterSocketV1 {
         self.binary_frame_received.fetch_add(1, SeqCst);
         let mut opt_bin_clone_for_listeners = None;
 
-        if !self.proxy_listeners.is_empty()
-            && self.proxy_listeners.iter().any(|i| i.really_need_on_response_body_chunk_received_from_target()) {
-            // TODO: Add a param when router socket is built to indicate this rather than
-            // iter.any each time (dont trust the rustc)
+        if self.really_need_on_response_body_chunk_received_from_target {
             // FIXME: Copy vec<u8> is expensive!
             // it's inevitable to make a clone since the
             // terminate method of wss_tx.send moves the whole Vec<u8>
@@ -584,7 +586,7 @@ impl WebSocketListener for RouterSocketV1 {
 
         self.cli_side_res_sender.send_target_response_body_binary_fragment_to_client(bin).await?;
 
-        if opt_bin_clone_for_listeners.is_some() {
+        if self.really_need_on_response_body_chunk_received_from_target {
             let bin_clone = Bytes::from(opt_bin_clone_for_listeners.unwrap());
             for i in
             self.proxy_listeners
