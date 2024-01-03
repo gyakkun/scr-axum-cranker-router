@@ -322,7 +322,7 @@ impl CrankerRouter {
         ConnectInfo(addr): ConnectInfo<SocketAddr>,
     ) -> impl IntoResponse
     {
-        // TODO: Error handling - what if all these fields not exists?
+        // TODO: Wrap them in a struct
         let route = ext_map.get("route").unwrap().to_owned();
         let domain = ext_map.get("domain").unwrap().to_owned();
         let connector_id = ext_map.get("connector_id").unwrap().to_owned();

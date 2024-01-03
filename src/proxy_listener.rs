@@ -9,7 +9,6 @@ use crate::proxy_info::ProxyInfo;
 pub trait ProxyListener: Sync + Send {
     fn on_before_proxy_to_target(&self, info: &dyn ProxyInfo, request_headers_to_target: &mut HeaderMap) -> Result<(), CrankerRouterException> { Ok(()) }
     fn on_before_responding_to_client(&self, info: &dyn ProxyInfo) -> Result<(), CrankerRouterException> { Ok(()) }
-    // TODO: Invoke this and create teh ErrorProxyInfo trait / struct
     fn on_failure_to_acquire_proxy_socket(&self, info: &dyn ProxyInfo) -> Result<(), CrankerRouterException> { Ok(()) }
     fn on_complete(&self, proxy_info: &dyn ProxyInfo) -> Result<(), CrankerRouterException> { Ok(()) }
     fn on_after_proxy_to_target_headers_sent(&self, proxy_info: &dyn ProxyInfo, headers: Option<&HeaderMap>) -> Result<(), CrankerRouterException> { Ok(()) }
