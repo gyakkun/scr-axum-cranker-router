@@ -50,8 +50,8 @@ pub trait WebSocketFarmInterface: Sync + Send {
 pub struct WebSocketFarm {
     pub route_resolver: Arc<dyn RouteResolver>,
     pub route_to_socket_chan: DashMap<String, (
-        Sender<Weak<dyn RouterSocket>>,
-        Receiver<Weak<dyn RouterSocket>>
+        async_channel::Sender<Weak<dyn RouterSocket>>,
+        async_channel::Receiver<Weak<dyn RouterSocket>>
     )>,
     pub route_to_router_socket_id_to_arc_router_socket_map: DashMap<String, DashMap<String, Arc<dyn RouterSocket>>>,
     pub route_last_removal_times: DashMap<String, i64>,
