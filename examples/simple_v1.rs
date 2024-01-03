@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use axum::http::HeaderMap;
 use log::info;
-use log::LevelFilter::{Debug, Info};
+use log::LevelFilter::{Debug, Info, Trace};
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
 
@@ -26,6 +26,7 @@ async fn main() {
     let listeners: Vec<Arc<dyn ProxyListener>> = vec![Arc::new(DemoProxyListener::new())];
     let cranker_router = CrankerRouterBuilder::new()
         .with_proxy_listeners(listeners)
+        .with_routes_keep_time_millis(5000)
         .build();
 
     let reg_listener = TcpListener::bind("127.0.0.1:3000")
