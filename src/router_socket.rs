@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::fmt::{Debug, Display};
 use std::future::Future;
 use std::net::SocketAddr;
@@ -92,10 +91,10 @@ pub struct RouterSocketV1 {
     tgt_res_bdy_tx: Sender<Result<Vec<u8>, CrankerRouterException>>,
     tgt_res_bdy_rx: Receiver<Result<Vec<u8>, CrankerRouterException>>,
 
-    wss_recv_pipe_join_handle: Arc<RefCell<Option<JoinHandle<SplitStream<WebSocket>>>>>,
+    wss_recv_pipe_join_handle: Arc<Mutex<Option<JoinHandle<SplitStream<WebSocket>>>>>,
 
     wss_send_task_tx: Sender<Message>,
-    wss_send_task_join_handle: Arc<RefCell<Option<JoinHandle<SplitSink<WebSocket, Message>>>>>,
+    wss_send_task_join_handle: Arc<Mutex<Option<JoinHandle<SplitSink<WebSocket, Message>>>>>,
 
     has_response_notify: Arc<Notify>,
     really_need_on_response_body_chunk_received_from_target: bool,
@@ -167,10 +166,10 @@ impl RouterSocketV1 {
             tgt_res_bdy_tx,
             tgt_res_bdy_rx,
 
-            wss_recv_pipe_join_handle: Arc::new(RefCell::new(None)),
+            wss_recv_pipe_join_handle: Arc::new(Mutex::new(None)),
 
             wss_send_task_tx,
-            wss_send_task_join_handle: Arc::new(RefCell::new(None)),
+            wss_send_task_join_handle: Arc::new(Mutex::new(None)),
 
             has_response_notify,
 
@@ -189,16 +188,16 @@ impl RouterSocketV1 {
             ));
 
         // Don't want to let registration handler wait so spawn these val assign somewhere
-        // let arc_wrapped_clone = arc_rs.clone();
-        // tokio::spawn(async move {
-        //     let mut g = arc_wrapped_clone.wss_recv_pipe_join_handle.lock().await;
-        //     *g = Some(wss_recv_pipe_join_handle);
-        //     let mut g = arc_wrapped_clone.wss_send_task_join_handle.lock().await;
-        //     *g = Some(wss_send_task_join_handle);
-        // });
+        let arc_wrapped_clone = arc_rs.clone();
+        tokio::spawn(async move {
+            //     let mut g = arc_wrapped_clone.wss_recv_pipe_join_handle.lock().await;
+            //     *g = Some(wss_recv_pipe_join_handle);
+            //     let mut g = arc_wrapped_clone.wss_send_task_join_handle.lock().await;
+            //     *g = Some(wss_send_task_join_handle);
+            arc_wrapped_clone.wss_send_task_join_handle.lock().await.replace(wss_send_task_join_handle);
+            arc_wrapped_clone.wss_recv_pipe_join_handle.lock().await.replace(wss_recv_pipe_join_handle);
+        });
 
-        arc_rs.wss_send_task_join_handle.replace_with(Some(wss_send_task_join_handle));
-        arc_rs.wss_recv_pipe_join_handle.replace_with(Some(wss_recv_pipe_join_handle));
 
         arc_rs
     }
@@ -217,21 +216,21 @@ impl Drop for RouterSocketV1 {
         let wrpjh = self.wss_recv_pipe_join_handle.clone();
         let wstjh = self.wss_send_task_join_handle.clone();
         tokio::spawn(async move {
-            // let mut g1 = wrpjh.lock().await;
-            // let st = g1.take().unwrap().await.unwrap();
-            // *g1 = None;
-            // drop(g1);
-            // let mut g2 = wstjh.lock().await;
-            // let si = g2.take().unwrap().await.unwrap();
-            // *g2 = None;
-            // drop(g2);
-            // let i = st.reunite(si).unwrap();
-            // let clo_res = i.close().await;
+            let mut g1 = wrpjh.lock().await;
+            let st = g1.take().unwrap().await.unwrap();
+            *g1 = None;
+            drop(g1);
+            let mut g2 = wstjh.lock().await;
+            let si = g2.take().unwrap().await.unwrap();
+            *g2 = None;
+            drop(g2);
+            let i = st.reunite(si).unwrap();
+            let clo_res = i.close().await;
 
-            let mut j = wrpjh.take().unwrap().await.unwrap();
-            let mut k = wstjh.take().unwrap().await.unwrap();
-            let re = k.reunite(j).unwrap();
-            let clo_res = re.close().await;
+            // let mut j = wrpjh.take().unwrap().await.unwrap();
+            // let mut k = wstjh.take().unwrap().await.unwrap();
+            // let re = k.reunite(j).unwrap();
+            // let clo_res = re.close().await;
 
             // wrpjh.lock().await.as_ref()
             //     .map(|o| o.abort());
