@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_channel::{Receiver, Sender, unbounded};
 use axum::async_trait;
 use dashmap::{DashMap, DashSet};
-use log::{error, trace, warn};
+use log::{debug, error, trace, warn};
 
 use crate::{LOCAL_IP, time_utils};
 use crate::exceptions::CrankerRouterException;
@@ -178,20 +178,15 @@ impl WebSocketFarmInterface for WebSocketFarm {
             let route_clone = route.clone();
             self.route_last_removal_times.insert(route_clone, time_utils::current_time_millis());
             trace!("91");
-            match self.route_to_router_socket_id_to_arc_router_socket_map.get(&route)
-                .map(|some| some.remove(&router_socket_id)) {
-                Some(Some((k,arcrs))) => {
-                    // trace!("92 success {}", success);
-                    // if success {
-                    trace!("93");
-                    is_removed.store(true, SeqCst);
-                    let _ = arcrs.stop();
-                    // }
-                    trace!("94");
-                }
-                _ => {}
+            let success = self.route_to_router_socket_id_to_arc_router_socket_map.get(&route)
+                .map(|some| some.remove(&router_socket_id))
+                .is_some();
+            trace!("92 success {}", success);
+            if success {
+                trace!("93");
+                is_removed.store(true, SeqCst);
             }
-            // .is_some();
+            trace!("94");
         });
     }
 
