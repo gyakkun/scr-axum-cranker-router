@@ -225,7 +225,7 @@ fn append_string_for_forwarded_header(sb: &mut String, k: &str, v: Option<&Strin
 }
 
 fn quote_if_needed(s: &String) -> String {
-    return if s.chars().any(is_t_char) {
+    return if !s.chars().all(is_t_char) {
         let mut res = String::new();
         let replaced = s.replace('"', "\\\"");
         res.push('"');
