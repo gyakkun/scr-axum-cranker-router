@@ -312,7 +312,6 @@ impl CrankerRouter {
     ) -> impl IntoResponse
     {
         wsu
-            // .write_buffer_size(0)
             .protocols([cif.negotiated_cranker_version])
             .on_upgrade(move |socket| router_socket::harvest_router_socket(
                 socket,

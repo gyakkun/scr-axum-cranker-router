@@ -316,7 +316,7 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
             }
         }
     }
-    drop(underlying_wss_rx);
+
     read_timeout_handle.abort_handle().abort();
 
     if let Some(ex) = may_ex {
@@ -332,7 +332,6 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
             "underlying wss already closed but is_removed=false after 50ms.".to_string()
         ));
     }
-    // underlying_wss_rx.next().await;
 }
 
 async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
@@ -403,7 +402,6 @@ async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
                 let _ = rs.tgt_res_bdy_tx.send(Err(crex.clone())).await;
                 rs.tgt_res_hdr_tx.close();
                 rs.tgt_res_bdy_tx.close();
-                drop(underlying_wss_tx);
                 break;
             }
             recv_res = wss_send_task_rx.recv() => {
@@ -443,18 +441,14 @@ async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
                     }
                     Err(recv_err) => { // Indicates the wss_send_task_rx is EMPTY AND CLOSED
                         debug!("the wss_send_task_rx is EMPTY AND CLOSED. router_socket_id={}", rs.router_socket_id);
-                        drop(underlying_wss_tx);
                         break;
                     }
                 }
             }
         }
     }
-    // drop(underlying_wss_tx);
     trace!("89.3");
     ping_handle.abort();
-    // let _ = underlying_wss_tx.close().await;
-    // let _ = underlying_wss_tx.send(Message::Close(None)).await;
     trace!("89.6");
 }
 
