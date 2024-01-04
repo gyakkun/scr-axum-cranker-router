@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use axum::http::HeaderMap;
 use log::info;
-use log::LevelFilter::{Debug, Info};
+use log::LevelFilter::Info;
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
 
@@ -17,7 +17,7 @@ use scr_axum_cranker_router::proxy_listener::ProxyListener;
 async fn main() {
     // SimpleLogger::new()
     //     .with_local_timestamps()
-    //     .with_level(Debug)
+    //     .with_level(Info)
     //     .init()
     //     .unwrap();
 
