@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::fmt::{Debug, Display};
 use std::future::Future;
 use std::net::SocketAddr;
@@ -92,10 +91,10 @@ pub struct RouterSocketV1 {
     tgt_res_bdy_tx: Sender<Result<Vec<u8>, CrankerRouterException>>,
     tgt_res_bdy_rx: Receiver<Result<Vec<u8>, CrankerRouterException>>,
 
-    wss_recv_pipe_join_handle: Arc<RefCell<Option<JoinHandle<SplitStream<WebSocket>>>>>,
+    wss_recv_pipe_join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 
     wss_send_task_tx: Sender<Message>,
-    wss_send_task_join_handle: Arc<RefCell<Option<JoinHandle<SplitSink<WebSocket, Message>>>>>,
+    wss_send_task_join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 
     has_response_notify: Arc<Notify>,
     really_need_on_response_body_chunk_received_from_target: bool,
@@ -167,10 +166,10 @@ impl RouterSocketV1 {
             tgt_res_bdy_tx,
             tgt_res_bdy_rx,
 
-            wss_recv_pipe_join_handle: Arc::new(RefCell::new(None)),
+            wss_recv_pipe_join_handle: Arc::new(Mutex::new(None)),
 
             wss_send_task_tx,
-            wss_send_task_join_handle: Arc::new(RefCell::new(None)),
+            wss_send_task_join_handle: Arc::new(Mutex::new(None)),
 
             has_response_notify,
 
@@ -189,16 +188,13 @@ impl RouterSocketV1 {
             ));
 
         // Don't want to let registration handler wait so spawn these val assign somewhere
-        // let arc_wrapped_clone = arc_rs.clone();
-        // tokio::spawn(async move {
-        //     let mut g = arc_wrapped_clone.wss_recv_pipe_join_handle.lock().await;
-        //     *g = Some(wss_recv_pipe_join_handle);
-        //     let mut g = arc_wrapped_clone.wss_send_task_join_handle.lock().await;
-        //     *g = Some(wss_send_task_join_handle);
-        // });
-
-        arc_rs.wss_send_task_join_handle.replace_with(Some(wss_send_task_join_handle));
-        arc_rs.wss_recv_pipe_join_handle.replace_with(Some(wss_recv_pipe_join_handle));
+        let arc_wrapped_clone = arc_rs.clone();
+        tokio::spawn(async move {
+            let mut g = arc_wrapped_clone.wss_recv_pipe_join_handle.lock().await;
+            *g = Some(wss_recv_pipe_join_handle);
+            let mut g = arc_wrapped_clone.wss_send_task_join_handle.lock().await;
+            *g = Some(wss_send_task_join_handle);
+        });
 
         arc_rs
     }
@@ -217,28 +213,11 @@ impl Drop for RouterSocketV1 {
         let wrpjh = self.wss_recv_pipe_join_handle.clone();
         let wstjh = self.wss_send_task_join_handle.clone();
         tokio::spawn(async move {
-            // let mut g1 = wrpjh.lock().await;
-            // let st = g1.take().unwrap().await.unwrap();
-            // *g1 = None;
-            // drop(g1);
-            // let mut g2 = wstjh.lock().await;
-            // let si = g2.take().unwrap().await.unwrap();
-            // *g2 = None;
-            // drop(g2);
-            // let i = st.reunite(si).unwrap();
-            // let clo_res = i.close().await;
-
-            let mut j = wrpjh.take().unwrap().await.unwrap();
-            let mut k = wstjh.take().unwrap().await.unwrap();
-            let re = k.reunite(j).unwrap();
-            let clo_res = re.close().await;
-
-            // wrpjh.lock().await.as_ref()
-            //     .map(|o| o.abort());
-            // wstjh.lock().await.as_ref()
-            //     .map(|o| o.abort());
+            wrpjh.lock().await.as_ref()
+                .map(|o| o.abort());
+            wstjh.lock().await.as_ref()
+                .map(|o| o.abort());
         });
-        // let i = self.wss_recv_pipe_join_handle.take().unwrap().await.unwrap();
         trace!("72");
     }
 }
@@ -246,7 +225,7 @@ impl Drop for RouterSocketV1 {
 async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
     rs: Arc<RouterSocketV1>,
     mut underlying_wss_rx: SplitStream<WebSocket>,
-) -> SplitStream<WebSocket> {
+) {
     let mut local_has_response = rs.has_response.load(SeqCst);
     let mut may_ex: Option<CrankerRouterException> = None;
     let idle_read_timeout_ms = rs.idle_read_timeout_ms;
@@ -347,14 +326,12 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
 
     // recv nothing from underlying wss, implicating it already closed
     debug!("seems router socket normally closed. router_socket_id={}", rs.router_socket_id);
-    tokio::time::sleep(Duration::from_millis(50)).await;
     if !rs.is_removed() {
         // means the is_removed is still false, which is not expected
         let _ = rs.on_error(CrankerRouterException::new(
             "underlying wss already closed but is_removed=false after 50ms.".to_string()
         ));
     }
-    underlying_wss_rx
 }
 
 async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
@@ -362,7 +339,7 @@ async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
     mut underlying_wss_tx: SplitSink<WebSocket, Message>,
     wss_send_task_rx: Receiver<Message>,
     err_chan_rx: Receiver<CrankerRouterException>,
-) -> SplitSink<WebSocket, Message> {
+) {
     let ping_sent_after_no_write_for_ms = rs.ping_sent_after_no_write_for_ms;
     let write_notifier = Arc::new(Notify::new());
     let write_notifier_clone = write_notifier.clone();
@@ -473,8 +450,6 @@ async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
     trace!("89.3");
     ping_handle.abort();
     trace!("89.6");
-
-    underlying_wss_tx
 }
 
 #[derive(Debug)]
