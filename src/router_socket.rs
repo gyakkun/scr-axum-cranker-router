@@ -45,6 +45,8 @@ pub(crate) trait RouterSocket: Send + Sync + ProxyInfo {
         Ok(())
     }
 
+    async fn stop(self: Arc<Self>) -> Result<(), CrankerRouterException>;
+
     async fn on_client_req(self: Arc<Self>,
                            app_state: ACRState,
                            http_version: &Version,
@@ -210,14 +212,7 @@ impl Drop for RouterSocketV1 {
         self.tgt_res_bdy_rx.close();
         trace!("71");
         self.wss_send_task_tx.close();
-        let wrpjh = self.wss_recv_pipe_join_handle.clone();
-        let wstjh = self.wss_send_task_join_handle.clone();
-        tokio::spawn(async move {
-            wrpjh.lock().await.as_ref()
-                .map(|o| o.abort());
-            wstjh.lock().await.as_ref()
-                .map(|o| o.abort());
-        });
+
         trace!("72");
     }
 }
@@ -777,6 +772,20 @@ impl RouterSocket for RouterSocketV1 {
 
     fn cranker_version(&self) -> &'static str {
         return CRANKER_V_1_0;
+    }
+
+    async fn stop(self: Arc<Self>) -> Result<(), CrankerRouterException> {
+        let another_self = self.clone();
+        // tokio::spawn(async move {
+        let mut res = another_self.wss_recv_pipe_join_handle.lock().await.as_ref()
+            .map(|o| o.abort()).is_some();
+        res = another_self.wss_send_task_join_handle.lock().await.as_ref()
+            .map(|o| o.abort()).is_some() && res;
+        // });
+        if res {
+            return Ok(())
+        }
+        self.on_error(CrankerRouterException::new("failed to abort pipes".to_string()))
     }
 
     fn raise_completion_event(&self) -> Result<(), CrankerRouterException> {
