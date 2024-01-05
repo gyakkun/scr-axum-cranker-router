@@ -1,10 +1,12 @@
+use std::net::IpAddr;
+
 use crate::connector_connection::ConnectorConnection;
 
-#[derive(Clone,Debug, Hash, Eq, PartialEq)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct ConnectorInstance {
-    ip: String,
-    connector_instance_id: String,
+    pub ip: IpAddr,
+    pub connector_id: String,
     /// Return the current idle connections
-    connections: Vec<ConnectorConnection>, // TOD,
-    dark_mode: bool,
+    pub connections: Vec<ConnectorConnection>, // TODO
+    pub dark_mode: bool,
 }

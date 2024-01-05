@@ -6,7 +6,7 @@ use crate::exceptions::CrankerRouterException;
 pub trait ProxyInfo {
     fn is_catch_all(&self) -> bool;
     fn connector_instance_id(&self) -> String;
-    fn server_address(&self) -> SocketAddr;
+    fn service_address(&self) -> SocketAddr;
     fn route(&self) -> String;
     fn router_socket_id(&self) -> String;
     fn duration_millis(&self) -> i64;

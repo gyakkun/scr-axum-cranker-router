@@ -26,6 +26,7 @@ use crate::exceptions::{CrankerProtocolVersionNotFoundException, CrankerProtocol
 use crate::ip_validator::{AllowAll, IPValidator};
 use crate::proxy_listener::ProxyListener;
 use crate::route_resolver::{DefaultRouteResolver, RouteResolver};
+use crate::router_info::RouterInfo;
 use crate::router_socket::RouterSocket;
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 
@@ -47,6 +48,7 @@ mod connector_instance;
 mod connector_service;
 mod dark_mode_manager;
 mod dark_host;
+mod router_info;
 
 pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &'static str = "CrankerProtocol";
 // should be CrankerProtocol, but axum convert all header key to lowercase when reading req from client and sending res
@@ -149,6 +151,8 @@ impl CrankerRouter {
         }
     }
 
+    pub fn state(&self) -> ACRState { self.state.clone() }
+
     pub fn registration_axum_router(&self) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
         let res = Router::new()
             .route("/register", any(CrankerRouter::register_handler)
@@ -177,7 +181,6 @@ impl CrankerRouter {
             .into_make_service_with_connect_info::<SocketAddr>();
         return res;
     }
-    pub fn state(&self) -> ACRState { self.state.clone() }
 
     // #[debug_handler]
     pub async fn visit_portal(
@@ -425,6 +428,20 @@ impl CrankerRouter {
             response.headers_mut().insert(CRANKER_PROTOCOL_HEADER_KEY, cph);
         }
         response
+    }
+
+    pub fn collect_info(&self) -> RouterInfo {
+        let websocket_farm = self.state.websocket_farm.clone();
+        let services = router_info::get_connector_service_list(
+            websocket_farm.clone().get_sockets(),
+            websocket_farm.clone().get_dark_hosts(),
+        );
+        RouterInfo {
+            services,
+            dark_hosts: websocket_farm.clone().get_dark_hosts(),
+            waiting_tasks: websocket_farm.clone().get_waiting_tasks(),
+            // TODO: Make all methods consumes Arc<Self> to be &Arc<Self>
+        }
     }
 }
 

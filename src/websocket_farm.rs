@@ -318,7 +318,7 @@ impl ProxyInfo for ErrorProxyInfo {
         "N/A".to_string()
     }
 
-    fn server_address(&self) -> SocketAddr {
+    fn service_address(&self) -> SocketAddr {
         SocketAddr::new(LOCAL_IP.clone(), 0)
     }
 

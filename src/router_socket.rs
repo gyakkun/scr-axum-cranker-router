@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fmt::{Debug, Display};
 use std::future::Future;
 use std::net::SocketAddr;
@@ -26,6 +27,7 @@ use uuid::Uuid;
 use crate::{ACRState, CRANKER_V_1_0, exceptions, time_utils};
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::cranker_protocol_response::CrankerProtocolResponse;
+use crate::dark_host::DarkHost;
 use crate::exceptions::CrankerRouterException;
 use crate::http_utils::set_target_request_headers;
 use crate::proxy_info::ProxyInfo;
@@ -37,12 +39,19 @@ pub const HEADER_MAX_SIZE: usize = 64 * 1024; // 64KBytes
 
 #[async_trait]
 pub(crate) trait RouterSocket: Send + Sync + ProxyInfo {
+    fn component_name(&self) -> String; // TODO: Should make this opt to keep in line with mu
+    fn connector_id(&self) -> String;
+
     fn is_removed(&self) -> bool;
 
     fn cranker_version(&self) -> &'static str;
 
     fn raise_completion_event(&self) -> Result<(), CrankerRouterException> {
         Ok(())
+    }
+
+    fn is_dark_mode_on(&self, dark_hosts: &HashSet<DarkHost>) -> bool {
+        false
     }
 
     async fn on_client_req(self: Arc<Self>,
@@ -61,7 +70,7 @@ pub struct RouterSocketV1 {
     pub component_name: String,
     pub router_socket_id: String,
     pub websocket_farm: Weak<WebSocketFarm>,
-    pub connector_instance_id: String,
+    pub connector_id: String,
     pub proxy_listeners: Vec<Arc<dyn ProxyListener>>,
     pub remote_address: SocketAddr,
     pub is_removed: Arc<AtomicBool>,
@@ -137,7 +146,7 @@ impl RouterSocketV1 {
             component_name,
             router_socket_id,
             websocket_farm,
-            connector_instance_id,
+            connector_id: connector_instance_id,
             proxy_listeners,
             remote_address,
 
@@ -724,10 +733,10 @@ impl ProxyInfo for RouterSocketV1 {
     }
 
     fn connector_instance_id(&self) -> String {
-        self.connector_instance_id.clone()
+        self.connector_id.clone()
     }
 
-    fn server_address(&self) -> SocketAddr {
+    fn service_address(&self) -> SocketAddr {
         self.remote_address.clone()
     }
 
@@ -770,6 +779,14 @@ impl ProxyInfo for RouterSocketV1 {
 
 #[async_trait]
 impl RouterSocket for RouterSocketV1 {
+    fn component_name(&self) -> String {
+        self.component_name.clone()
+    }
+
+    fn connector_id(&self) -> String {
+        self.connector_id.clone()
+    }
+
     #[inline]
     fn is_removed(&self) -> bool {
         return self.is_removed.load(Acquire);
@@ -796,6 +813,12 @@ impl RouterSocket for RouterSocketV1 {
         }
         Ok(())
     }
+
+    fn is_dark_mode_on(&self, dark_hosts: &HashSet<DarkHost>) -> bool {
+        let remote_ip_addr = self.remote_address.ip();
+        dark_hosts.iter().any(|i| i.same_host(remote_ip_addr))
+    }
+
 
     async fn on_client_req(self: Arc<Self>,
                            app_state: ACRState,
