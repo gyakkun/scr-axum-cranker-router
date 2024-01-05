@@ -22,7 +22,6 @@ async fn main() {
     let test_env = get_test_env();
     if !test_env.is_nop_logger {
         SimpleLogger::new()
-            .with_local_timestamps()
             .with_level(test_env.log_level)
             .init()
             .unwrap();
