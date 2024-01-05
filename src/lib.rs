@@ -190,8 +190,13 @@ impl CrankerRouter {
     pub async fn connector_info_handler(
         State(app_state): State<ACRState>
     ) -> Response {
+        let mut res_map_inner = HashMap::new();
+        let col = CrankerRouter::collect_info(&app_state);
+        col.services.iter().for_each(|cs| {
+            res_map_inner.insert(cs.route.clone(), cs.clone());
+        });
         let mut res_map = HashMap::new();
-        res_map.insert("services".to_string(), CrankerRouter::collect_info(&app_state));
+        res_map.insert("services", res_map_inner);
         (StatusCode::OK, Json(res_map)).into_response()
     }
 

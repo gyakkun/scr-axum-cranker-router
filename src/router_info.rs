@@ -27,39 +27,41 @@ pub fn get_connector_service_list(
     uniq_routes.iter()
         .for_each(|route| {
             let mut instance_map: HashMap<String, ConnectorInstance> = HashMap::new();
-            let mut instances = Vec::new();
             let mut component_name = None;
 
-            if let Some(socket_list_weak) = sockets.get(route) {
-                for ws in socket_list_weak {
+            if let Some(weak_router_socket_list) = sockets.get(route) {
+                for ws in weak_router_socket_list {
                     if let Some(router_socket) = ws.upgrade() {
                         component_name = Some(router_socket.component_name());
                         let connector_id = router_socket.connector_id();
-                        let mut instance =
-                            match instance_map.get(&connector_id) {
+                        let mut connector_instance =
+                            match instance_map.get_mut(&connector_id) {
                                 None => {
-                                    ConnectorInstance {
+                                    let _res = ConnectorInstance {
                                         ip: router_socket.service_address().ip(),
                                         connector_id: connector_id.clone(),
+                                        connection_count: 0, // update it once connection pushed
                                         connections: Vec::new(),
                                         dark_mode: router_socket.is_dark_mode_on(&dark_hosts),
-                                    }
+                                    };
+                                    instance_map.insert(connector_id.clone(), _res);
+                                    instance_map.get_mut(&connector_id).unwrap()
                                 }
                                 Some(instance) => {
-                                    instance.clone()
+                                    instance
                                 }
                             };
 
-                        instance.connections.push(ConnectorConnection {
+                        connector_instance.connections.push(ConnectorConnection {
                             domain: "*".to_string(),
                             port: router_socket.service_address().port() as i32,
                             router_socket_id: router_socket.router_socket_id(),
                             protocol: router_socket.cranker_version().to_string(),
-                            inflight: 0,
+                            // to skip serialize , need to make this field negative
+                            // this field is useful in v3
+                            inflight: -1,
                         });
-
-                        instance_map.insert(connector_id, instance.clone());
-                        instances.push(instance.clone());
+                        connector_instance.connection_count += 1;
                     }
                 }
             }
@@ -73,7 +75,7 @@ pub fn get_connector_service_list(
             connector_services.push(ConnectorService {
                 route: route.clone(),
                 component_name: component_name.unwrap_or("[UNKNOWN]".to_string()),
-                connectors: instances,
+                connectors: instance_map.iter().map(|(k, v)| v.clone()).collect(),
                 is_catch_all: route == "*",
             })
         });
