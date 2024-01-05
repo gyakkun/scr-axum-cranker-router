@@ -15,7 +15,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::any;
+use axum::routing::{any, get};
 use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
 use lazy_static::lazy_static;
 use log::{debug, error, warn};
@@ -155,22 +155,36 @@ impl CrankerRouter {
 
     pub fn registration_axum_router(&self) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
         let res = Router::new()
-            .route("/register", any(CrankerRouter::register_handler)
-                .layer(from_fn_with_state(self.state(), CrankerRouter::reg_check_and_extract)),
+            .route("/register", any(Self::register_handler)
+                .layer(from_fn_with_state(self.state(), Self::reg_check_and_extract)),
             )
-            .route("/register/", any(CrankerRouter::register_handler)
-                .layer(from_fn_with_state(self.state(), CrankerRouter::reg_check_and_extract)),
+            .route("/register/", any(Self::register_handler)
+                .layer(from_fn_with_state(self.state(), Self::reg_check_and_extract)),
             )
-            .route("/deregister", any(CrankerRouter::de_register_handler)
-                .layer(from_fn_with_state(self.state(), CrankerRouter::de_reg_check)),
+            .route("/deregister", any(Self::de_register_handler)
+                .layer(from_fn_with_state(self.state(), Self::de_reg_check)),
             )
-            .route("/deregister/", any(CrankerRouter::de_register_handler)
-                .layer(from_fn_with_state(self.state(), CrankerRouter::de_reg_check)),
+            .route("/deregister/", any(Self::de_register_handler)
+                .layer(from_fn_with_state(self.state(), Self::de_reg_check)),
             )
+            .route("/health/connectors", get(Self::connector_info_handler))
+            // .route("/health/connections", get(???)) // how to get all conn of the server
+            .route("/health", get(Self::health_root))
             .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
             .with_state(self.state())
             .into_make_service_with_connect_info::<SocketAddr>();
         return res;
+    }
+
+    // TODO: Add all info
+    async fn health_root() -> &'static str {
+        "{\"isAvailable\":true}"
+    }
+
+    async fn connector_info_handler(
+        State(app_state) : State<ACRState>
+    ) -> impl IntoResponse {
+        (StatusCode::OK, "TODO: connector_info_handler")
     }
 
     pub fn visit_portal_axum_router(&self) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
