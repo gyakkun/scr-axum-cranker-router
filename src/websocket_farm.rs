@@ -54,7 +54,7 @@ pub trait WebSocketFarmInterface: Sync + Send {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone,Debug, Hash, Eq, PartialEq)]
 pub struct WaitingSocketTask {
     target: String,
 }
@@ -275,16 +275,17 @@ impl WebSocketFarmInterface for WebSocketFarm {
 
     // TODO: DarkHost feature
     fn enable_dark_mode(self: Arc<Self>, dark_host: DarkHost) {
+        let dark_host_dbg = format!("{:?}", dark_host);
         let added = self.dark_hosts.insert(dark_host);
         if added {
-            info!("Enabled dark mode for {:?}", dark_host);
+            info!("Enabled dark mode for {:?}", dark_host_dbg);
         } else {
-            info!("Requested dark mode for {:?} but it was already in dark mode, so doing nothing.", dark_host);
+            info!("Requested dark mode for {:?} but it was already in dark mode, so doing nothing.", dark_host_dbg);
         }
     }
 
     fn disable_dark_mode(self: Arc<Self>, dark_host: DarkHost) {
-        let removed = self.dark_hosts.remove(&dark_host);
+        let removed = self.dark_hosts.remove(&dark_host).is_some();
         if removed {
             info!("Disabled dark mode for {:?}", dark_host);
         } else {
@@ -293,7 +294,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
     }
 
     fn get_dark_hosts(self: Arc<Self>) -> HashSet<DarkHost> {
-        return self.dark_hosts.iter().map(DarkHost::clone).collect();
+        return self.dark_hosts.iter().map(|i|i.clone()).collect();
     }
 }
 

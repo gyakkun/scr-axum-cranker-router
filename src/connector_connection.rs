@@ -1,7 +1,8 @@
-use serde_json::Value;
-
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct ConnectorConnection {
-    socket_id: String,
+    domain: String,
     port: i32,
-    to_map: Value,
+    router_socket_id: String,
+    protocol: String,
+    inflight: i32,
 }
