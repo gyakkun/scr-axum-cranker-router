@@ -4,9 +4,10 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::SeqCst;
 use std::time::Duration;
 
-use axum::{BoxError, Extension, http, Router, ServiceExt};
+use axum::{BoxError, Extension, http, Json, Router, ServiceExt};
 use axum::body::{Body, HttpBody};
 use axum::extract::{ConnectInfo, OriginalUri, Query, State, WebSocketUpgrade};
 use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
@@ -167,24 +168,31 @@ impl CrankerRouter {
             .route("/deregister/", any(Self::de_register_handler)
                 .layer(from_fn_with_state(self.state(), Self::de_reg_check)),
             )
+            // .with_state(self.state())
             .route("/health/connectors", get(Self::connector_info_handler))
+            // .with_state(self.state())
             // .route("/health/connections", get(???)) // how to get all conn of the server
             .route("/health", get(Self::health_root))
-            .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
             .with_state(self.state())
+            .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
             .into_make_service_with_connect_info::<SocketAddr>();
         return res;
     }
 
     // TODO: Add all info
-    async fn health_root() -> &'static str {
-        "{\"isAvailable\":true}"
+    pub async fn health_root(
+        State(app_state): State<ACRState>
+    ) -> Response {
+        let i = app_state.clone()._counter.load(SeqCst);
+        (StatusCode::OK, "{\"isAvailable\":true}").into_response()
     }
 
-    async fn connector_info_handler(
-        State(app_state) : State<ACRState>
-    ) -> impl IntoResponse {
-        (StatusCode::OK, "TODO: connector_info_handler")
+    pub async fn connector_info_handler(
+        State(app_state): State<ACRState>
+    ) -> Response {
+        let mut res_map = HashMap::new();
+        res_map.insert("services".to_string(), CrankerRouter::collect_info(&app_state));
+        (StatusCode::OK, Json(res_map)).into_response()
     }
 
     pub fn visit_portal_axum_router(&self) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
@@ -444,8 +452,8 @@ impl CrankerRouter {
         response
     }
 
-    pub fn collect_info(&self) -> RouterInfo {
-        let websocket_farm = self.state.websocket_farm.clone();
+    pub fn collect_info(arc_state: &ACRState) -> RouterInfo {
+        let websocket_farm = arc_state.websocket_farm.clone();
         let services = router_info::get_connector_service_list(
             websocket_farm.clone().get_sockets(),
             websocket_farm.clone().get_dark_hosts(),

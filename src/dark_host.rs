@@ -1,6 +1,8 @@
 use std::net::IpAddr;
+use serde::Serialize;
 
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+#[derive(Serialize, Clone, Debug, Hash, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct DarkHost {
     address: IpAddr,
     date_enabled: i64,

@@ -9,6 +9,7 @@ use async_channel::{Receiver, Sender, unbounded};
 use axum::async_trait;
 use dashmap::{DashMap, DashSet};
 use log::{error, info, trace, warn};
+use serde::Serialize;
 
 use crate::{LOCAL_IP, time_utils};
 use crate::dark_host::DarkHost;
@@ -54,7 +55,8 @@ pub trait WebSocketFarmInterface: Sync + Send {
     }
 }
 
-#[derive(Clone,Debug, Hash, Eq, PartialEq)]
+#[derive(Serialize, Clone, Debug, Hash, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct WaitingSocketTask {
     target: String,
 }

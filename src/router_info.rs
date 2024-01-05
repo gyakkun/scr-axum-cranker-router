@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Weak;
 
+use serde::Serialize;
+
 use crate::connector_connection::ConnectorConnection;
 use crate::connector_instance::ConnectorInstance;
 use crate::connector_service::ConnectorService;
@@ -8,6 +10,8 @@ use crate::dark_host::DarkHost;
 use crate::router_socket::RouterSocket;
 use crate::websocket_farm::WaitingSocketTask;
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RouterInfo {
     pub services: Vec<ConnectorService>,
     pub dark_hosts: HashSet<DarkHost>,
@@ -34,15 +38,12 @@ pub fn get_connector_service_list(
                         let mut instance =
                             match instance_map.get(&connector_id) {
                                 None => {
-                                    let instance = ConnectorInstance {
+                                    ConnectorInstance {
                                         ip: router_socket.service_address().ip(),
                                         connector_id: connector_id.clone(),
                                         connections: Vec::new(),
                                         dark_mode: router_socket.is_dark_mode_on(&dark_hosts),
-                                    };
-                                    instance_map.insert(connector_id, instance.clone());
-                                    instances.push(instance.clone());
-                                    instance
+                                    }
                                 }
                                 Some(instance) => {
                                     instance.clone()
@@ -55,7 +56,10 @@ pub fn get_connector_service_list(
                             router_socket_id: router_socket.router_socket_id(),
                             protocol: router_socket.cranker_version().to_string(),
                             inflight: 0,
-                        })
+                        });
+
+                        instance_map.insert(connector_id, instance.clone());
+                        instances.push(instance.clone());
                     }
                 }
             }

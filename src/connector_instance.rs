@@ -1,8 +1,10 @@
 use std::net::IpAddr;
+use serde::Serialize;
 
 use crate::connector_connection::ConnectorConnection;
 
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+#[derive(Serialize, Clone, Debug, Hash, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectorInstance {
     pub ip: IpAddr,
     pub connector_id: String,

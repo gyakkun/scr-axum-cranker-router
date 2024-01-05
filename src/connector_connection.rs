@@ -1,4 +1,7 @@
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+use serde::Serialize;
+
+#[derive(Serialize, Clone, Debug, Hash, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectorConnection {
     pub domain: String,
     pub port: i32,
