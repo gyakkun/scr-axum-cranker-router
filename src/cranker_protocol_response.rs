@@ -82,7 +82,7 @@ impl CrankerProtocolResponse {
             // }
 
             if !HOP_BY_HOP_HEADERS.contains(lowercase_key.as_str())
-                && RESPONSE_HEADERS_TO_NOT_SEND_BACK.contains(lowercase_key.as_str()) {
+                && !RESPONSE_HEADERS_TO_NOT_SEND_BACK.contains(lowercase_key.as_str()) {
                 let value = *&header_line[(colon_idx + 1)..].trim();
                 res = res.header(key, value);
             }
@@ -118,5 +118,19 @@ mod tests {
         let res = res.unwrap();
         assert_eq!(res.status, 200);
         assert_eq!(res.headers.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_long() {
+        let msg = "HTTP/1.1 302 TODO \n
+content-length:10 \n
+content-type:text/plain \n
+date:Fri, 05 Jan 2024 16:29:44 GMT \n
+location:/history".to_string();
+        let res = CrankerProtocolResponse::new(msg.clone());
+        assert!(res.is_ok());
+        let res = res.unwrap();
+        assert_eq!(res.status, 302);
+        assert_eq!(res.headers.len(), 4);
     }
 }
