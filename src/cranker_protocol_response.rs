@@ -2,7 +2,6 @@ use std::str::FromStr;
 
 use axum::http;
 use axum::response::Response;
-use log::debug;
 
 use crate::{HOP_BY_HOP_HEADERS, RESPONSE_HEADERS_TO_NOT_SEND_BACK};
 use crate::exceptions::CrankerRouterException;
@@ -27,7 +26,6 @@ impl CrankerProtocolResponse {
      * **Binary Content
      */
     pub fn new(message_to_apply: String) -> Result<Self, CrankerRouterException> {
-        debug!("message_to_apply: {}",message_to_apply);
         let lines: Vec<&str> = message_to_apply.split('\n').collect();
         let lines_len = lines.len();
         if lines_len <= 0 {
