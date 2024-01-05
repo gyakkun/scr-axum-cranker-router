@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicI32};
@@ -7,9 +8,10 @@ use std::time::Duration;
 use async_channel::{Receiver, Sender, unbounded};
 use axum::async_trait;
 use dashmap::{DashMap, DashSet};
-use log::{debug, error, trace, warn};
+use log::{error, info, trace, warn};
 
 use crate::{LOCAL_IP, time_utils};
+use crate::dark_host::DarkHost;
 use crate::exceptions::CrankerRouterException;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
@@ -37,15 +39,25 @@ pub trait WebSocketFarmInterface: Sync + Send {
     fn de_register_socket_in_background(self: Arc<Self>, route: String, remote_addr: SocketAddr, connector_instance_id: String);
 
     // TODO: For health info map
-    fn get_sockets(self: Arc<Self>) {}
-    fn get_waiting_tasks(self: Arc<Self>) {}
+    fn get_sockets(self: Arc<Self>) -> HashMap<String, Vec<Weak<dyn RouterSocket>>> {
+        HashMap::new()
+    }
+    fn get_waiting_tasks(self: Arc<Self>) -> HashMap<String, Vec<WaitingSocketTask>> {
+        HashMap::new()
+    }
 
     // TODO: DarkHost feature
-    fn enable_dark_mode(self: Arc<Self>) {}
-    fn disable_dark_mode(self: Arc<Self>) {}
-    fn get_dark_hosts(self: Arc<Self>) {}
+    fn enable_dark_mode(self: Arc<Self>, dark_host: DarkHost) {}
+    fn disable_dark_mode(self: Arc<Self>, dark_host: DarkHost) {}
+    fn get_dark_hosts(self: Arc<Self>) -> HashSet<DarkHost> {
+        HashSet::new()
+    }
 }
 
+#[derive(Clone)]
+pub struct WaitingSocketTask {
+    target: String,
+}
 
 pub struct WebSocketFarm {
     pub route_resolver: Arc<dyn RouteResolver>,
@@ -56,8 +68,9 @@ pub struct WebSocketFarm {
     pub route_to_router_socket_id_to_arc_router_socket_map: DashMap<String, DashMap<String, Arc<dyn RouterSocket>>>,
     pub route_last_removal_times: DashMap<String, i64>,
     pub idle_count: AtomicI32,
+    pub waiting_tasks: DashMap<String, DashSet<WaitingSocketTask>>,
     pub waiting_task_count: AtomicI32,
-    pub dark_hosts: DashSet<String>,
+    pub dark_hosts: DashSet<DarkHost>,
     pub has_catch_all: AtomicBool,
     pub max_wait_in_millis: i64,
     pub proxy_listeners: Vec<Arc<dyn ProxyListener>>,
@@ -80,6 +93,7 @@ impl WebSocketFarm {
             route_to_router_socket_id_to_arc_router_socket_map: DashMap::new(),
             route_last_removal_times: DashMap::new(),
             idle_count: AtomicI32::new(0),
+            waiting_tasks: DashMap::new(),
             waiting_task_count: AtomicI32::new(0),
             dark_hosts: DashSet::new(),
             has_catch_all: AtomicBool::new(false),
@@ -230,6 +244,56 @@ impl WebSocketFarmInterface for WebSocketFarm {
                         });
                 })
         });
+    }
+
+    fn get_sockets(self: Arc<Self>) -> HashMap<String, Vec<Weak<dyn RouterSocket>>> {
+        let mut res = HashMap::new();
+        self.route_to_router_socket_id_to_arc_router_socket_map.iter()
+            .for_each(|i| {
+                res.insert(i.key().clone(), Vec::new());
+                i.value().iter().for_each(|j| { // ( router_socket_id, arc rs )
+                    if let Some(k) = res.get_mut(i.key()) {
+                        k.push(Arc::downgrade(j.value()));
+                    }
+                })
+            });
+        res
+    }
+    fn get_waiting_tasks(self: Arc<Self>) -> HashMap<String, Vec<WaitingSocketTask>> {
+        let mut res = HashMap::new();
+        self.waiting_tasks.iter()
+            .for_each(|i| {
+                res.insert(i.key().clone(), Vec::new());
+                i.value().iter().for_each(|j| {
+                    if let Some(k) = res.get_mut(i.key()) {
+                        k.push(j.clone());
+                    }
+                });
+            });
+        res
+    }
+
+    // TODO: DarkHost feature
+    fn enable_dark_mode(self: Arc<Self>, dark_host: DarkHost) {
+        let added = self.dark_hosts.insert(dark_host);
+        if added {
+            info!("Enabled dark mode for {:?}", dark_host);
+        } else {
+            info!("Requested dark mode for {:?} but it was already in dark mode, so doing nothing.", dark_host);
+        }
+    }
+
+    fn disable_dark_mode(self: Arc<Self>, dark_host: DarkHost) {
+        let removed = self.dark_hosts.remove(&dark_host);
+        if removed {
+            info!("Disabled dark mode for {:?}", dark_host);
+        } else {
+            info!("Requested to disable dark mode for {:?} but it was not in dark mode, so doing nothing.", dark_host);
+        }
+    }
+
+    fn get_dark_hosts(self: Arc<Self>) -> HashSet<DarkHost> {
+        return self.dark_hosts.iter().map(DarkHost::clone).collect();
     }
 }
 

@@ -45,6 +45,8 @@ mod http_utils;
 mod connector_connection;
 mod connector_instance;
 mod connector_service;
+mod dark_mode_manager;
+mod dark_host;
 
 pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &'static str = "CrankerProtocol";
 // should be CrankerProtocol, but axum convert all header key to lowercase when reading req from client and sending res
