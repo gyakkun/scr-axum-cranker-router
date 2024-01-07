@@ -90,7 +90,7 @@ pub struct RouterSocketV1 {
     /**** below should be private for inner routine ****/
     // Once error, call on_error and will send here (blocked)
     err_chan_tx: Sender<CrankerRouterException>,
-    wss_exchange: WssExchangeV1,
+    cli_side_res_sender: RSv1ClientSideResponseSender,
     // Send any exception immediately to this chan in on_error so that when
     // the body not sent to client yet, we can response error to client early
     tgt_res_hdr_tx: Sender<Result<String, CrankerRouterException>>,
@@ -129,9 +129,6 @@ impl RouterSocketV1 {
 
         let bytes_received = Arc::new(AtomicI64::new(0));
         let bytes_sent = Arc::new(AtomicI64::new(0));
-        let binary_frame_received = Arc::new(AtomicI64::new(0));
-
-
         let client_req_start_ts = Arc::new(AtomicI64::new(0));
         let duration_millis = Arc::new(AtomicI64::new(-time_utils::current_time_millis()));
 
@@ -144,33 +141,11 @@ impl RouterSocketV1 {
         let really_need_on_response_body_chunk_received_from_target
             = proxy_listeners.iter().any(|i| i.really_need_on_response_body_chunk_received_from_target());
 
-        let wss_exchange = WssExchangeV1::new(
-            router_socket_id_clone, bytes_sent,
-            is_removed, has_response,
-            tgt_res_hdr_tx.clone(), tgt_res_bdy_tx.clone(),
-
-            bytes_received.clone(),
-            binary_frame_received.clone(),
-            proxy_listeners.clone(),
-            really_need_on_response_body_chunk_received_from_target.clone(),
-            wss_send_task_tx.clone(),
-            err_chan_tx.clone(),
-            tgt_res_hdr_rx.clone(),
-            tgt_res_bdy_rx.clone(),
-
-            has_response_notify.clone(),
-
-            websocket_farm,
-            route
-        );
-
-
-
         let arc_rs = Arc::new(Self {
-            route:route.clone(),
+            route,
             component_name,
             router_socket_id,
-            websocket_farm: websocket_farm.clone(),
+            websocket_farm,
             connector_id: connector_instance_id,
             proxy_listeners,
             remote_address,
@@ -189,24 +164,10 @@ impl RouterSocketV1 {
 
             err_chan_tx,
 
-            wss_exchange: WssExchangeV1::new(
+            cli_side_res_sender: RSv1ClientSideResponseSender::new(
                 router_socket_id_clone, bytes_sent,
                 is_removed, has_response,
                 tgt_res_hdr_tx.clone(), tgt_res_bdy_tx.clone(),
-
-                bytes_received.clone(),
-                binary_frame_received.clone(),
-                proxy_listeners.clone(),
-                really_need_on_response_body_chunk_received_from_target.clone(),
-                wss_send_task_tx.clone(),
-                err_chan_tx.clone(),
-                tgt_res_hdr_rx.clone(),
-                tgt_res_bdy_rx.clone(),
-
-                has_response_notify.clone(),
-
-                websocket_farm,
-                route
             ),
 
             tgt_res_hdr_tx,
@@ -214,16 +175,26 @@ impl RouterSocketV1 {
             tgt_res_bdy_tx,
             tgt_res_bdy_rx,
 
-            // wss_recv_pipe_join_handle: Arc::new(Mutex::new(None)),
+            wss_recv_pipe_join_handle: Arc::new(Mutex::new(None)),
 
             wss_send_task_tx,
-            // wss_send_task_join_handle: Arc::new(Mutex::new(None)),
+            wss_send_task_join_handle: Arc::new(Mutex::new(None)),
 
             has_response_notify,
 
             really_need_on_response_body_chunk_received_from_target,
         });
-
+        // Abort these two handles in Drop
+        let wss_recv_pipe_join_handle = tokio::spawn(
+            pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
+                arc_rs.clone(),
+                underlying_wss_rx,
+            ));
+        let wss_send_task_join_handle = tokio::spawn(
+            pipe_and_queue_the_wss_send_task_and_handle_err_chan(
+                arc_rs.clone(),
+                underlying_wss_tx, wss_send_task_rx, err_chan_rx,
+            ));
 
         // Don't want to let registration handler wait so spawn these val assign somewhere
         let arc_wrapped_clone = arc_rs.clone();
@@ -261,10 +232,9 @@ impl Drop for RouterSocketV1 {
 }
 
 async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
-    rs: Arc<WssExchangeV1>,
+    rs: Arc<RouterSocketV1>,
     mut underlying_wss_rx: SplitStream<WebSocket>,
-)
-{
+) {
     let mut local_has_response = rs.has_response.load(SeqCst);
     let mut may_ex: Option<CrankerRouterException> = None;
     let idle_read_timeout_ms = rs.idle_read_timeout_ms;
@@ -374,12 +344,11 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
 }
 
 async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
-    rs: Arc<WssExchangeV1>,
+    rs: Arc<RouterSocketV1>,
     mut underlying_wss_tx: SplitSink<WebSocket, Message>,
     wss_send_task_rx: Receiver<Message>,
     err_chan_rx: Receiver<CrankerRouterException>,
-)
-{
+) {
     let ping_sent_after_no_write_for_ms = rs.ping_sent_after_no_write_for_ms;
     let write_notifier = Arc::new(Notify::new());
     let write_notifier_clone = write_notifier.clone();
@@ -492,10 +461,24 @@ async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
     trace!("89.6");
 }
 
+#[derive(Debug)]
+pub struct RSv1ClientSideResponseSender {
+    pub router_socket_id: String,
+    pub bytes_sent: Arc<AtomicI64>,
+    pub is_removed: Arc<AtomicBool>,
+    pub has_response: Arc<AtomicBool>,
+
+    pub tgt_res_hdr_tx: Sender<Result<String, CrankerRouterException>>,
+    pub tgt_res_bdy_tx: Sender<Result<Vec<u8>, CrankerRouterException>>,
+
+    pub is_tgt_res_hdr_received: AtomicBool,
+    pub is_tgt_res_hdr_sent: AtomicBool,
+    pub is_tgt_res_bdy_received: AtomicBool,
+    pub is_wss_closed: AtomicBool,
+}
 
 
-
-impl WssExchangeV1 {
+impl RSv1ClientSideResponseSender {
     fn new(
         router_socket_id: String,
         bytes_sent: Arc<AtomicI64>,
@@ -503,39 +486,7 @@ impl WssExchangeV1 {
         has_response: Arc<AtomicBool>,
         tgt_res_hdr_tx: Sender<Result<String, CrankerRouterException>>,
         tgt_res_bdy_tx: Sender<Result<Vec<u8>, CrankerRouterException>>,
-
-        bytes_received: Arc<AtomicI64>,
-        binary_frame_received: Arc<AtomicI64>,
-        proxy_listeners: Vec<Arc<dyn ProxyListener>>,
-        really_need_on_response_body_chunk_received_from_target: bool,
-
-        wss_send_task_tx: Sender<Message>,
-        err_chan_tx: Sender<CrankerRouterException>,
-
-        // only for checking if closed
-        tgt_res_hdr_rx:  Receiver<Result<String, CrankerRouterException>>,
-        tgt_res_bdy_rx:  Receiver<Result<Vec<u8>, CrankerRouterException>>,
-
-        has_response_notify: Arc<Notify>,
-
-        web_socket_farm: Weak<WebSocketFarm>,
-        route: String,
     ) -> Self {
-
-        // Abort these two handles in Drop
-        let wss_recv_pipe_join_handle = tokio::spawn(
-            pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
-                arc_rs.clone(),
-                underlying_wss_rx,
-            ));
-        let wss_send_task_join_handle = tokio::spawn(
-            pipe_and_queue_the_wss_send_task_and_handle_err_chan(
-                arc_rs.clone(),
-                underlying_wss_tx, wss_send_task_rx, err_chan_rx,
-            ));
-
-
-
         Self {
             router_socket_id,
             bytes_sent,
@@ -549,21 +500,6 @@ impl WssExchangeV1 {
             is_tgt_res_hdr_sent: AtomicBool::new(false),     // 2
             is_tgt_res_bdy_received: AtomicBool::new(false), // 3
             is_wss_closed: AtomicBool::new(false),           // 4
-
-            bytes_received,
-            binary_frame_received,
-            proxy_listeners,
-            really_need_on_response_body_chunk_received_from_target,
-            wss_send_task_tx,
-            err_chan_tx,
-
-            tgt_res_hdr_rx,
-            tgt_res_bdy_rx,
-
-            has_response_notify,
-
-            websocket_farm,
-            route
         }
     }
 
@@ -641,45 +577,10 @@ impl WssExchangeV1 {
     }
 }
 
-
-#[derive(Debug)]
-pub struct WssExchangeV1 {
-    pub router_socket_id: String,
-    pub bytes_sent: Arc<AtomicI64>,
-    pub is_removed: Arc<AtomicBool>,
-    pub has_response: Arc<AtomicBool>,
-
-    pub tgt_res_hdr_tx: Sender<Result<String, CrankerRouterException>>,
-    pub tgt_res_bdy_tx: Sender<Result<Vec<u8>, CrankerRouterException>>,
-
-    pub is_tgt_res_hdr_received: AtomicBool,
-    pub is_tgt_res_hdr_sent: AtomicBool,
-    pub is_tgt_res_bdy_received: AtomicBool,
-    pub is_wss_closed: AtomicBool,
-
-    // Refs From RouterSocketV1
-    bytes_received: Arc<AtomicI64>,
-    binary_frame_received: Arc<AtomicI64>,
-    proxy_listeners: Vec<Arc<dyn ProxyListener>>,
-    really_need_on_response_body_chunk_received_from_target: bool,
-
-    wss_send_task_tx: Sender<Message>,
-    err_chan_tx: Sender<CrankerRouterException>,
-
-    // only for checking if closed
-    tgt_res_hdr_rx:  Receiver<Result<String, CrankerRouterException>>,
-    tgt_res_bdy_rx:  Receiver<Result<Vec<u8>, CrankerRouterException>>
-
-    has_response_notify: Arc<Notify>,
-
-    websocket_farm: Weak<WebSocketFarm>,
-    route: String
-}
-
 #[async_trait]
-impl WebSocketListener for WssExchangeV1 {
+impl WebSocketListener for RouterSocketV1 {
     async fn on_text(&self, txt: String) -> Result<(), CrankerRouterException> {
-        self.send_target_response_header_text_to_client(txt).await
+        self.cli_side_res_sender.send_target_response_header_text_to_client(txt).await
     }
 
     async fn on_binary(&self, bin: Vec<u8>) -> Result<(), CrankerRouterException> {
@@ -694,7 +595,7 @@ impl WebSocketListener for WssExchangeV1 {
             opt_bin_clone_for_listeners = Some(bin.clone());
         }
 
-        self.send_target_response_body_binary_fragment_to_client(bin).await?;
+        self.cli_side_res_sender.send_target_response_body_binary_fragment_to_client(bin).await?;
 
         if self.really_need_on_response_body_chunk_received_from_target {
             let bin_clone = Bytes::from(opt_bin_clone_for_listeners.unwrap());
