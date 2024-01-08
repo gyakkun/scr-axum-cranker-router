@@ -2,12 +2,15 @@ use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
+
 use axum::extract::OriginalUri;
 use axum::http;
 use axum::http::{HeaderMap, HeaderValue, Version};
 use axum::http::header::AsHeaderName;
-use crate::{ACRState, LOCAL_IP};
+use log::error;
 
+use crate::{ACRState, LOCAL_IP};
+use crate::exceptions::CrankerRouterException;
 
 // Mostly port from ParseUtils, Headtils from mu-server
 pub(super) fn set_target_request_headers(
@@ -43,14 +46,16 @@ pub(super) fn set_target_request_headers(
         hdr_to_tgt.append(http::header::VIA, p);
     }
 
-    set_forwarded_headers(
+    if let Err(e) = set_forwarded_headers(
         cli_hdr,
         hdr_to_tgt,
         app_state.config.discard_client_forwarded_headers,
         app_state.config.send_legacy_forwarded_headers,
         cli_remote_addr,
         orig_uri,
-    );
+    ) {
+        error!("Failed to set forwarded headers: {}", e);
+    }
 
     return has_content_length_or_transfer_encoding;
 }
@@ -77,10 +82,10 @@ pub(super) fn set_forwarded_headers(
     send_legacy_forwarded_headers: bool,
     cli_remote_addr: &SocketAddr,
     cli_req_uri: &OriginalUri,
-) {
+) -> Result<(), CrankerRouterException> {
     let mut forwarded_headers = Vec::new();
     if !discard_client_forwarded_headers {
-        forwarded_headers = get_existing_forwarded_headers(cli_hdr);
+        forwarded_headers = get_existing_forwarded_headers(cli_hdr)?;
         for j in forwarded_headers.iter() {
             if let Ok(parsed) = j.to_string().parse() {
                 hdr_to_tgt.append(http::header::FORWARDED, parsed);
@@ -97,6 +102,7 @@ pub(super) fn set_forwarded_headers(
         let first = if forwarded_headers.is_empty() { &new_forwarded_hdr } else { forwarded_headers.get(0).unwrap() };
         set_x_forwarded_headers(hdr_to_tgt, first);
     }
+    Ok(())
 }
 
 pub(super) fn set_x_forwarded_headers(hdr_to_hdr: &mut HeaderMap, fh: &ForwardedHeader) {
@@ -125,7 +131,7 @@ pub(super) fn create_forwarded_header_to_tgt(
     }
 }
 
-pub(super) fn get_existing_forwarded_headers(hdr: &HeaderMap) -> Vec<ForwardedHeader> {
+pub(super) fn get_existing_forwarded_headers(hdr: &HeaderMap) -> Result<Vec<ForwardedHeader>, CrankerRouterException> {
     let all: Vec<String> = header_map_get_all_ok_to_string(hdr, http::header::FORWARDED);
     let mut res = Vec::new();
     if all.is_empty() {
@@ -135,7 +141,7 @@ pub(super) fn get_existing_forwarded_headers(hdr: &HeaderMap) -> Vec<ForwardedHe
         let fors = get_x_forwarded_value(hdr, "x-forwarded-for");
         let max = max(max(max(hosts.len(), protos.len()), fors.len()), ports.len());
         if max == 0 {
-            return res;
+            return Ok(res);
         }
         let include_host = hosts.len() == max;
         let include_port = ports.len() == max;
@@ -156,15 +162,35 @@ pub(super) fn get_existing_forwarded_headers(hdr: &HeaderMap) -> Vec<ForwardedHe
             let proto = if include_proto { protos.get(i).and_then(|i| Some(i.clone())) } else { None };
             let for_value = if include_for { fors.get(i).and_then(|i| Some(i.clone())) } else { None };
             let use_default_port = port.is_none() ||
-                if port.is_some() { // and port.is_some()
+                if proto.is_some() { // and port.is_some()
                     let po = port.clone().unwrap();
-                    let pr = port.clone().unwrap();
+                    let pr = proto.clone().unwrap();
                     (pr.eq_ignore_ascii_case("http") && po.eq("80"))
                         || (pr.eq_ignore_ascii_case("https") && po.eq("443"))
                 } else {
                     false
                 };
-            let host_to_use = if include_host { host } else if include_port { cur_host.clone() } else { None };
+            let mut host_to_use = if include_host { host } else if include_port { cur_host.clone() } else { None };
+            if host_to_use.is_some() && !use_default_port {
+                // replace the ":12345" to default port
+                // without regex!
+                let host_clone = host_to_use.clone().unwrap().chars().collect::<Vec<char>>();
+                let mut idx = host_clone.len() - 1;
+                while idx >= 0 {
+                    let c = host_clone.get(idx).unwrap();
+                    if !c.is_ascii_digit() {
+                        if *c != ':' {
+                            return Err(CrankerRouterException::new("Failed to parse port".to_string()));
+                        } else {
+                            break;
+                        }
+                    } else {
+                        // NOP
+                    }
+                    idx -= 1;
+                }
+                host_to_use = Some(String::from_iter(host_clone.as_slice()[0..idx].iter()));
+            }
             res.push(ForwardedHeader {
                 by: None,
                 for_value,
@@ -175,14 +201,11 @@ pub(super) fn get_existing_forwarded_headers(hdr: &HeaderMap) -> Vec<ForwardedHe
         }
     } else {
         for s in all {
-            for t in rfc7239::parse(s.as_str()) {
-                if let Ok(u) = t {
-                    res.push(u.into());
-                }
-            }
+            let mut parsed_from_string = ForwardedHeader::from_string(s.as_str())?;
+            res.append(&mut parsed_from_string);
         }
     }
-    res
+    Ok(res)
 }
 
 #[derive(Default)]
@@ -192,6 +215,168 @@ struct ForwardedHeader {
     host: Option<String>,
     proto: Option<String>,
     extensions: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, PartialOrd, PartialEq, Copy, Clone)]
+enum FHParseState {
+    ParamName,
+    ParamValue,
+}
+
+impl ForwardedHeader {
+    // port from mu-server ForwardedHeader.java : public static List<ForwardedHeader> fromString(String)
+    pub fn from_string(input: &str) -> Result<Vec<ForwardedHeader>, CrankerRouterException> {
+        let mut results = Vec::new();
+        if input.trim().is_empty() {
+            return Ok(results);
+        }
+        let input_chars = input.chars().collect::<Vec<char>>();
+
+        let mut buffer: Vec<char> = Vec::new();
+        let mut i = 0;
+        'outer: while i < input_chars.len() {
+            let mut opt_extensions: Option<HashMap<String, String>> = None;
+            let mut extensions = HashMap::new(); // FIXME: Should use LinkedHashMap to keep order
+            let mut state = FHParseState::ParamName;
+            let mut param_name: Option<String> = None;
+            let mut by: Option<String> = None;
+            let mut for_value: Option<String> = None;
+            let mut host: Option<String> = None;
+            let mut proto: Option<String> = None;
+            let mut is_quoted_string = false;
+
+            'header_value_loop: while i < input_chars.len() {
+                let c = input_chars[i];
+
+                if state == FHParseState::ParamName {
+                    if c == ',' && buffer.len() == 0 {
+                        i += 1;
+                        break 'header_value_loop;
+                    } else if c == '=' {
+                        param_name = Some(String::from_iter(buffer.iter()));
+                        buffer = Vec::new();
+                        state = FHParseState::ParamValue;
+                    } else if is_t_char(c) {
+                        buffer.push(c);
+                    } else if is_ows(c) {
+                        if buffer.len() > 0 {
+                            return Err(CrankerRouterException::new(format!(
+                                "Got whitespace in parameter name while in {:?} - header was {}",
+                                state, String::from_iter(buffer.iter())
+                            )));
+                        }
+                    } else {
+                        return Err(CrankerRouterException::new(format!(
+                            "Got ascii {} while in {:?}", (c as i32), state
+                        )));
+                    }
+                } else { // state == FHParseState::ParamValue
+                    let mut is_first = !is_quoted_string && buffer.len() == 0;
+                    if is_first && is_ows(c) {
+                        // ignore it
+                    } else if is_first && c == '"' {
+                        is_quoted_string = true
+                    } else {
+                        if is_quoted_string {
+                            let last_char = input_chars[i - 1];
+                            if c == '\\' {
+                                // don't append
+                            } else if last_char == '\\' {
+                                buffer.push(c)
+                            } else if c == '"' {
+                                // this is the end, but we'll update on the next go
+                                is_quoted_string = false;
+                            } else {
+                                buffer.push(c);
+                            }
+                        } else {
+                            if c == ';' {
+                                let val = String::from_iter(buffer.iter());
+                                let opt_param_name = param_name.clone();
+                                match opt_param_name {
+                                    None => return Err(CrankerRouterException::new("Illegal state: should already parsing forwarded header value but param name still None".to_string())),
+                                    Some(pn) => {
+                                        let pn = pn.to_lowercase();
+                                        if pn == "by" {
+                                            by = Some(val);
+                                        } else if pn == "for" {
+                                            for_value = Some(val);
+                                        } else if pn == "host" {
+                                            host = Some(val);
+                                        } else if pn == "proto" {
+                                            proto = Some(val);
+                                        } else {
+                                            extensions.insert(pn, val);
+                                        }
+                                    }
+                                }
+                                buffer = Vec::new();
+                                param_name = None;
+                                state = FHParseState::ParamName;
+                            } else if c == ',' {
+                                i += 1;
+                                break 'header_value_loop;
+                            } else if is_v_char(c) {
+                                buffer.push(c);
+                            } else if is_ows(c) {
+                                // ignore it
+                            } else {
+                                return Err(CrankerRouterException::new(format!(
+                                    "Got character code {} ({}) while parsing param value", (c as i32), c
+                                )));
+                            }
+                        }
+                    }
+                }
+                i += 1;
+            }
+
+            match state {
+                FHParseState::ParamValue => {
+                    let val = String::from_iter(buffer.iter());
+                    let opt_param_name = param_name.clone();
+                    match opt_param_name {
+                        None => return Err(CrankerRouterException::new("Illegal state: should already parsing forwarded header value but param name still None".to_string())),
+                        Some(pn) => {
+                            let pn = pn.to_lowercase();
+                            if pn == "by" {
+                                by = Some(val);
+                            } else if pn == "for" {
+                                for_value = Some(val);
+                            } else if pn == "host" {
+                                host = Some(val);
+                            } else if pn == "proto" {
+                                proto = Some(val);
+                            } else {
+                                extensions.insert(pn, val);
+                            }
+                        }
+                    }
+
+                    buffer = Vec::new();
+                    break 'outer;
+                }
+                _ => {
+                    if buffer.len() > 0 {
+                        return Err(CrankerRouterException::new(format!(
+                            "Unexpected ending point at state {:?} for {}", state, input
+                        )));
+                    }
+                }
+            }
+            if !extensions.is_empty() {
+                opt_extensions = Some(extensions);
+            }
+            results.push(ForwardedHeader {
+                by,
+                for_value,
+                host,
+                proto,
+                extensions: opt_extensions,
+            });
+        }
+        return Ok(results);
+    }
 }
 
 impl Display for ForwardedHeader {
@@ -242,6 +427,16 @@ fn is_t_char(c: char) -> bool {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9' || c == '!' ||
         c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*' || c == '+' ||
         c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~');
+}
+
+#[inline]
+fn is_ows(c: char) -> bool {
+    return c == ' ' || c == '\t';
+}
+
+#[inline]
+fn is_v_char(c: char) -> bool {
+    return (c as i32) >= 0x21 && (c as i32) <= 0x7E;
 }
 
 impl From<rfc7239::Forwarded<'_>> for ForwardedHeader {
