@@ -20,3 +20,4 @@ but it's not so painful now, that's why this one is written from scratch again.
 * [ ] Dark mode manager
 * [ ] Tidy up access modifiers, expose as little implementation details as possible.
 * [ ] Consider `tracing` crate for logging
+* [ ] Get rid of the `rfc7239` crate which has bug in parsing host with port
