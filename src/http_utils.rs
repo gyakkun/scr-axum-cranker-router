@@ -438,18 +438,6 @@ fn is_v_char(c: char) -> bool {
     return (c as i32) >= 0x21 && (c as i32) <= 0x7E;
 }
 
-impl From<rfc7239::Forwarded<'_>> for ForwardedHeader {
-    fn from(rf: rfc7239::Forwarded) -> Self {
-        ForwardedHeader {
-            by: rf.forwarded_by.map(|i| i.to_string()),
-            for_value: rf.forwarded_for.map(|i| i.to_string()),
-            host: rf.host.map(|i| i.to_string()),
-            proto: rf.protocol.map(|i| i.to_string()),
-            extensions: None,
-        }
-    }
-}
-
 fn header_map_get_all_ok_to_string<K>(hdr: &HeaderMap, hdr_key: K)
                                       -> Vec<String>
     where K: AsHeaderName
