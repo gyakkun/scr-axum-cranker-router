@@ -326,7 +326,7 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
         }
     }
 
-    read_timeout_handle.abort_handle().abort();
+    read_timeout_handle.abort();
 
     if let Some(ex) = may_ex {
         may_ex = None;
