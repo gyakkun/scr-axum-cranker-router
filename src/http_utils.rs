@@ -354,7 +354,6 @@ impl ForwardedHeader {
                     }
 
                     buffer = Vec::new();
-                    break 'outer;
                 }
                 _ => {
                     if buffer.len() > 0 {
