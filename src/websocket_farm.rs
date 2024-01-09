@@ -229,11 +229,11 @@ impl WebSocketFarmInterface for WebSocketFarm {
         });
     }
 
-    fn de_register_router_socket_in_background(self: &Arc<Self>, route: String, remote_addr: SocketAddr, connector_instance_id: String) {
+    fn de_register_router_socket_in_background(self: &Arc<Self>, route: String, remote_addr: SocketAddr, connector_id: String) {
         let another_self = self.clone();
         warn!(
             "Going to deregister route={} and the target addr={} and the Connector Id={}",
-            route, remote_addr, connector_instance_id
+            route, remote_addr, connector_id
         );
         tokio::spawn(async move {
             another_self.route_to_router_socket_id_to_arc_router_socket_map
@@ -242,7 +242,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
                     // ( router socket id , router socket )
                     some.value()
                         .retain(|k, v| {
-                            let should_remove = v.connector_instance_id().eq(&connector_instance_id);
+                            let should_remove = v.connector_id().eq(&connector_id);
                             if should_remove {
                                 warn!("De-registering router_socket_id={}", v.router_socket_id());
                             }
@@ -319,7 +319,7 @@ impl ProxyInfo for ErrorProxyInfo {
         self.route == "*"
     }
 
-    fn connector_instance_id(&self) -> String {
+    fn connector_id(&self) -> String {
         "N/A".to_string()
     }
 
