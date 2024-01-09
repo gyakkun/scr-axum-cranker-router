@@ -23,34 +23,34 @@ const MU_ID: &str = "muid";
 
 #[async_trait]
 pub trait WebSocketFarmInterface: Sync + Send {
-    async fn get_router_socket_by_target_path(self: Arc<Self>, target_path: String) -> Result<Arc<dyn RouterSocket>, CrankerRouterException>;
+    async fn get_router_socket_by_target_path(&self, target_path: String) -> Result<Arc<dyn RouterSocket>, CrankerRouterException>;
 
-    fn clean_routes_in_background(self: Arc<Self>, routes_keep_time_millis: i64);
+    fn clean_routes_in_background(self: &Arc<Self>, routes_keep_time_millis: i64);
 
     fn idle_count(&self) -> i32 { -1 }
 
     fn remove_websocket_in_background(
-        self: Arc<Self>, route: String,
+        self: &Arc<Self>, route: String,
         router_socket_id: String,
         is_removed: Arc<AtomicBool>,
     );
 
-    fn add_socket_in_background(self: Arc<Self>, router_socket: Arc<dyn RouterSocket>);
+    fn add_socket_in_background(self: &Arc<Self>, router_socket: Arc<dyn RouterSocket>);
 
-    fn de_register_socket_in_background(self: Arc<Self>, route: String, remote_addr: SocketAddr, connector_instance_id: String);
+    fn de_register_socket_in_background(self: &Arc<Self>, route: String, remote_addr: SocketAddr, connector_instance_id: String);
 
     // TODO: For health info map
-    fn get_sockets(self: Arc<Self>) -> HashMap<String, Vec<Weak<dyn RouterSocket>>> {
+    fn get_sockets(&self) -> HashMap<String, Vec<Weak<dyn RouterSocket>>> {
         HashMap::new()
     }
-    fn get_waiting_tasks(self: Arc<Self>) -> HashMap<String, Vec<WaitingSocketTask>> {
+    fn get_waiting_tasks(&self) -> HashMap<String, Vec<WaitingSocketTask>> {
         HashMap::new()
     }
 
     // TODO: DarkHost feature
-    fn enable_dark_mode(self: Arc<Self>, dark_host: DarkHost) {}
-    fn disable_dark_mode(self: Arc<Self>, dark_host: DarkHost) {}
-    fn get_dark_hosts(self: Arc<Self>) -> HashSet<DarkHost> {
+    fn enable_dark_mode(&self, dark_host: DarkHost) {}
+    fn disable_dark_mode(&self, dark_host: DarkHost) {}
+    fn get_dark_hosts(&self) -> HashSet<DarkHost> {
         HashSet::new()
     }
 }
@@ -107,7 +107,7 @@ impl WebSocketFarm {
 
 #[async_trait]
 impl WebSocketFarmInterface for WebSocketFarm {
-    async fn get_router_socket_by_target_path(self: Arc<Self>, target_path: String) -> Result<Arc<dyn RouterSocket>, CrankerRouterException> {
+    async fn get_router_socket_by_target_path(&self, target_path: String) -> Result<Arc<dyn RouterSocket>, CrankerRouterException> {
         // we have both maps storing <routes, xxx >, here we use route_to_chan map since it removes route earlier
         // a little bit ( check the trace!("82") in retain )
         let current_routes = self.route_to_socket_chan.iter().map(|e| e.key().clone()).collect::<DashSet<String>>();
@@ -153,29 +153,30 @@ impl WebSocketFarmInterface for WebSocketFarm {
         }
     }
 
-    fn clean_routes_in_background(self: Arc<Self>, routes_keep_time_millis: i64) {
+    fn clean_routes_in_background(self: &Arc<Self>, routes_keep_time_millis: i64) {
         trace!("80: clean_routes_in_background ticked");
+        let another_self = self.clone();
         let cut_off_time = time_utils::current_time_millis() - routes_keep_time_millis;
         // Remove may deadlock so put it in thread
         tokio::spawn(async move {
             // trace!("80.5 before clean routes: {:?}", self.router_socket_id_to_arc_router_socket_map);
-            let _ = self.route_to_router_socket_id_to_arc_router_socket_map
+            let _ = another_self.route_to_router_socket_id_to_arc_router_socket_map
                 .retain(|k, v| {
                     trace!("81");
                     let should_remove = v.is_empty()
-                        && self.route_last_removal_times.contains_key(k)
-                        && *self.route_last_removal_times.get(k).unwrap().value() < cut_off_time;
+                        && another_self.route_last_removal_times.contains_key(k)
+                        && *another_self.route_last_removal_times.get(k).unwrap().value() < cut_off_time;
                     if should_remove {
                         trace!("82");
                         warn!(
                             "removing registration info for {}, consequence requests to {} will be responded with 404.",
                             k,k
                         );
-                        self.route_to_socket_chan.remove(k);
+                        another_self.route_to_socket_chan.remove(k);
                     }
                     !should_remove
                 });
-            // trace!("82.5 after clean routes: {:?}", self.router_socket_id_to_arc_router_socket_map);
+            // trace!("82.5 after clean routes: {:?}", another_self.router_socket_id_to_arc_router_socket_map);
             trace!("83");
         });
     }
@@ -185,16 +186,17 @@ impl WebSocketFarmInterface for WebSocketFarm {
     }
 
     fn remove_websocket_in_background(
-        self: Arc<Self>, route: String,
+        self: &Arc<Self>, route: String,
         router_socket_id: String,
         is_removed: Arc<AtomicBool>,
     ) {
         trace!("90 remove_websocket_in_background");
+        let another_self = self.clone();
         tokio::spawn(async move {
             let route_clone = route.clone();
-            self.route_last_removal_times.insert(route_clone, time_utils::current_time_millis());
+            another_self.route_last_removal_times.insert(route_clone, time_utils::current_time_millis());
             trace!("91");
-            let success = self.route_to_router_socket_id_to_arc_router_socket_map.get(&route)
+            let success = another_self.route_to_router_socket_id_to_arc_router_socket_map.get(&route)
                 .map(|some| some.remove(&router_socket_id))
                 .is_some();
             trace!("92 success {}", success);
@@ -206,18 +208,19 @@ impl WebSocketFarmInterface for WebSocketFarm {
         });
     }
 
-    fn add_socket_in_background(self: Arc<Self>, router_socket: Arc<dyn RouterSocket>) {
+    fn add_socket_in_background(self: &Arc<Self>, router_socket: Arc<dyn RouterSocket>) {
+        let another_self = self.clone();
         tokio::spawn(async move {
             let route = router_socket.route();
             let router_socket_id = router_socket.router_socket_id();
             let weak = Arc::downgrade(&router_socket);
             let route_clone = route.clone();
-            self.route_to_router_socket_id_to_arc_router_socket_map
+            another_self.route_to_router_socket_id_to_arc_router_socket_map
                 .entry(route_clone)
                 .or_insert_with(DashMap::new)
                 .value()
                 .insert(router_socket_id, router_socket);
-            let _ = self.route_to_socket_chan
+            let _ = another_self.route_to_socket_chan
                 .entry(route)
                 .or_insert_with(unbounded)
                 .value()
@@ -226,13 +229,14 @@ impl WebSocketFarmInterface for WebSocketFarm {
         });
     }
 
-    fn de_register_socket_in_background(self: Arc<Self>, route: String, remote_addr: SocketAddr, connector_instance_id: String) {
+    fn de_register_socket_in_background(self: &Arc<Self>, route: String, remote_addr: SocketAddr, connector_instance_id: String) {
+        let another_self = self.clone();
         warn!(
             "Going to deregister route={} and the target addr={} and the Connector Id={}",
             route, remote_addr, connector_instance_id
         );
         tokio::spawn(async move {
-            self.route_to_router_socket_id_to_arc_router_socket_map
+            another_self.route_to_router_socket_id_to_arc_router_socket_map
                 .get(&route)
                 .map(|some| {
                     // ( router socket id , router socket )
@@ -248,7 +252,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
         });
     }
 
-    fn get_sockets(self: Arc<Self>) -> HashMap<String, Vec<Weak<dyn RouterSocket>>> {
+    fn get_sockets(&self) -> HashMap<String, Vec<Weak<dyn RouterSocket>>> {
         let mut res = HashMap::new();
         self.route_to_router_socket_id_to_arc_router_socket_map.iter()
             .for_each(|i| {
@@ -261,7 +265,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
             });
         res
     }
-    fn get_waiting_tasks(self: Arc<Self>) -> HashMap<String, Vec<WaitingSocketTask>> {
+    fn get_waiting_tasks(&self) -> HashMap<String, Vec<WaitingSocketTask>> {
         let mut res = HashMap::new();
         self.waiting_tasks.iter()
             .for_each(|i| {
@@ -276,7 +280,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
     }
 
     // TODO: DarkHost feature
-    fn enable_dark_mode(self: Arc<Self>, dark_host: DarkHost) {
+    fn enable_dark_mode(&self, dark_host: DarkHost) {
         let dark_host_dbg = format!("{:?}", dark_host);
         let added = self.dark_hosts.insert(dark_host);
         if added {
@@ -286,7 +290,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
         }
     }
 
-    fn disable_dark_mode(self: Arc<Self>, dark_host: DarkHost) {
+    fn disable_dark_mode(&self, dark_host: DarkHost) {
         let removed = self.dark_hosts.remove(&dark_host).is_some();
         if removed {
             info!("Disabled dark mode for {:?}", dark_host);
@@ -295,7 +299,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
         }
     }
 
-    fn get_dark_hosts(self: Arc<Self>) -> HashSet<DarkHost> {
+    fn get_dark_hosts(&self) -> HashSet<DarkHost> {
         return self.dark_hosts.iter().map(|i|i.clone()).collect();
     }
 }

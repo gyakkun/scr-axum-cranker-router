@@ -1,6 +1,6 @@
-use std::sync::Weak;
+use std::sync::{Arc, Weak};
 use crate::websocket_farm::WebSocketFarm;
 
-struct DarkModeManager {
-    websocket_farm: Weak<WebSocketFarm>
+pub struct DarkModeManager {
+    pub websocket_farm: Arc<WebSocketFarm>
 }

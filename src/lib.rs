@@ -23,6 +23,7 @@ use log::{debug, error, warn};
 use tower_http::limit;
 use uuid::Uuid;
 
+use crate::dark_mode_manager::DarkModeManager;
 use crate::exceptions::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException};
 use crate::ip_validator::{AllowAll, IPValidator};
 use crate::proxy_listener::ProxyListener;
@@ -31,7 +32,6 @@ use crate::router_info::RouterInfo;
 use crate::router_socket::RouterSocket;
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 
-pub mod cranker_protocol;
 pub mod router_socket;
 pub mod time_utils;
 pub mod exceptions;
@@ -114,6 +114,7 @@ lazy_static! {
 pub struct CrankerRouterState {
     _counter: AtomicU64,
     websocket_farm: Arc<WebSocketFarm>,
+    dark_mode_manager: DarkModeManager,
     config: CrankerRouterConfig,
 }
 
@@ -133,20 +134,21 @@ impl CrankerRouter {
             config.proxy_listeners.clone(),
         );
         let websocket_farm_clone = websocket_farm.clone();
+        let dark_mode_manager = DarkModeManager { websocket_farm: websocket_farm.clone() };
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(
                     config.routes_keep_time_millis as u64
                 )
                 ).await;
-                websocket_farm_clone.clone()
-                    .clean_routes_in_background(config.routes_keep_time_millis);
+                websocket_farm_clone.clean_routes_in_background(config.routes_keep_time_millis);
             }
         });
         Self {
             state: Arc::new(CrankerRouterState {
                 _counter: AtomicU64::new(0),
                 websocket_farm,
+                dark_mode_manager,
                 config,
             }),
         }
@@ -315,7 +317,6 @@ impl CrankerRouter {
             request.extensions_mut().insert(connector_id.clone());
             app_state
                 .websocket_farm
-                .clone()
                 .de_register_socket_in_background(route, addr, connector_id);
         }
         next.run(request).await

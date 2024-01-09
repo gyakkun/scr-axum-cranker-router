@@ -1002,7 +1002,6 @@ pub async fn harvest_router_socket(
         info!("Connector registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
         app_state
             .websocket_farm
-            .clone()
             .add_socket_in_background(rs);
     } else {
         error!("not supported cranker version: {}", cranker_version);
