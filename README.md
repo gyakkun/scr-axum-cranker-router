@@ -17,7 +17,8 @@ but it's not so painful now, that's why this one is written from scratch again.
   in mu cranker router.~~ WebSocketFarm done. The /health/connectors is available by default.
 * [x] Deregister handler
 * ~~[ ] Replace all unnecessary async mpmc unbounded channel with tokio's mpsc unbounded channel.~~ Abandoned.
-* [ ] Dark mode manager
+* [x] Dark mode manager
 * [ ] Tidy up access modifiers, expose as little implementation details as possible.
 * [ ] Consider `tracing` crate for logging
 * [x] Get rid of the `rfc7239` crate which has bug in parsing host with port
+* [ ] Documentation
