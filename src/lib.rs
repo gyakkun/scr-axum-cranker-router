@@ -318,7 +318,7 @@ impl CrankerRouter {
             request.extensions_mut().insert(connector_id.clone());
             app_state
                 .websocket_farm
-                .de_register_socket_in_background(route, addr, connector_id);
+                .de_register_router_socket_in_background(route, addr, connector_id);
         }
         next.run(request).await
     }

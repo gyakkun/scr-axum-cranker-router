@@ -24,7 +24,7 @@ use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::{ACRState, CRANKER_V_1_0, exceptions, time_utils};
+use crate::{ACRState, CRANKER_V_1_0, CRANKER_V_3_0, exceptions, time_utils};
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::cranker_protocol_response::CrankerProtocolResponse;
 use crate::dark_host::DarkHost;
@@ -32,14 +32,16 @@ use crate::exceptions::CrankerRouterException;
 use crate::http_utils::set_target_request_headers;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
+use crate::router_socket_v3::RouterSocketV3;
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
 
 pub const HEADER_MAX_SIZE: usize = 64 * 1024; // 64KBytes
 
 #[async_trait]
-pub(crate) trait RouterSocket: Send + Sync + ProxyInfo {
-    fn component_name(&self) -> String; // TODO: Should make this opt to keep in line with mu
+pub(crate) trait RouterSocket: Send + Sync {
+    fn component_name(&self) -> String;
+    // TODO: Should make this opt to keep in line with mu
     fn connector_id(&self) -> String;
 
     fn is_removed(&self) -> bool;
@@ -406,7 +408,7 @@ async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
                 // 2. Remove bad router_socket
                 if !rs.is_removed() {
                     if let Some(wsf) = rs.websocket_farm.upgrade() {
-                        wsf.remove_websocket_in_background(rs.route.clone(), rs.router_socket_id.clone(), rs.is_removed.clone());
+                        wsf.remove_router_socket_in_background(rs.route.clone(), rs.router_socket_id.clone(), rs.is_removed.clone());
                     }
                 }
                 // 3. Close the res to cli
@@ -805,7 +807,7 @@ impl RouterSocket for RouterSocketV1 {
 
     fn raise_completion_event(&self) -> Result<(), CrankerRouterException> {
         if let Some(wsf) = self.websocket_farm.upgrade() {
-            wsf.remove_websocket_in_background(
+            wsf.remove_router_socket_in_background(
                 self.route.clone(), self.router_socket_id.clone(), self.is_removed.clone(),
             )
         }
@@ -989,10 +991,10 @@ pub async fn harvest_router_socket(
     addr: SocketAddr,
 )
 {
+    let (wss_tx, wss_rx) = wss.split();
+    let router_socket_id = Uuid::new_v4().to_string();
+    let weak_wsf = Arc::downgrade(&app_state.websocket_farm);
     if cranker_version == CRANKER_V_1_0 {
-        let (wss_tx, wss_rx) = wss.split();
-        let router_socket_id = Uuid::new_v4().to_string();
-        let weak_wsf = Arc::downgrade(&app_state.websocket_farm);
         let rs = RouterSocketV1::new(
             route.clone(),
             component_name.clone(),
@@ -1006,10 +1008,29 @@ pub async fn harvest_router_socket(
             app_state.config.idle_read_timeout_ms,
             app_state.config.ping_sent_after_no_write_for_ms,
         );
-        info!("Connector registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
+        info!("Connector (v1) registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
         app_state
             .websocket_farm
-            .add_socket_in_background(rs);
+            .add_router_socket_in_background(rs);
+    } else if cranker_version == CRANKER_V_3_0 {
+        let rs = RouterSocketV3::new(
+            route.clone(),
+            domain.clone(),
+            component_name.clone(),
+            router_socket_id.clone(),
+            weak_wsf,
+            connector_id.clone(),
+            addr,
+            wss_tx,
+            wss_rx,
+            app_state.config.proxy_listeners.clone(),
+            app_state.config.idle_read_timeout_ms,
+            app_state.config.ping_sent_after_no_write_for_ms,
+        );
+        info!("Connector (v3) registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
+        app_state
+            .websocket_farm
+            .add_router_socket_in_background(rs);
     } else {
         error!("not supported cranker version: {}", cranker_version);
         let _ = wss.close();

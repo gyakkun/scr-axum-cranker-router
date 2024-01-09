@@ -29,15 +29,15 @@ pub trait WebSocketFarmInterface: Sync + Send {
 
     fn idle_count(&self) -> i32 { -1 }
 
-    fn remove_websocket_in_background(
+    fn remove_router_socket_in_background(
         self: &Arc<Self>, route: String,
         router_socket_id: String,
         is_removed: Arc<AtomicBool>,
     );
 
-    fn add_socket_in_background(self: &Arc<Self>, router_socket: Arc<dyn RouterSocket>);
+    fn add_router_socket_in_background(self: &Arc<Self>, router_socket: Arc<dyn RouterSocket>);
 
-    fn de_register_socket_in_background(self: &Arc<Self>, route: String, remote_addr: SocketAddr, connector_instance_id: String);
+    fn de_register_router_socket_in_background(self: &Arc<Self>, route: String, remote_addr: SocketAddr, connector_instance_id: String);
 
     fn get_sockets(&self) -> HashMap<String, Vec<Weak<dyn RouterSocket>>> {
         HashMap::new()
@@ -125,7 +125,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
                     if arc_rs.is_removed() {
                         // panic here?
                         error!("unexpected removed router socket received from receiver! router_socket_id={}", arc_rs.router_socket_id());
-                        self.remove_websocket_in_background(arc_rs.route(), arc_rs.router_socket_id(), arc_rs.get_is_removed_arc_atomic_bool());
+                        self.remove_router_socket_in_background(arc_rs.route(), arc_rs.router_socket_id(), arc_rs.get_is_removed_arc_atomic_bool());
                         continue;
                     }
                     return Ok(arc_rs); // @.await
@@ -184,11 +184,12 @@ impl WebSocketFarmInterface for WebSocketFarm {
         self.idle_count.load(Acquire)
     }
 
-    fn remove_websocket_in_background(
+    fn remove_router_socket_in_background(
         self: &Arc<Self>, route: String,
         router_socket_id: String,
         is_removed: Arc<AtomicBool>,
     ) {
+        warn!("Removing websocket in background. router_socket_id={}", router_socket_id);
         trace!("90 remove_websocket_in_background");
         let another_self = self.clone();
         tokio::spawn(async move {
@@ -207,7 +208,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
         });
     }
 
-    fn add_socket_in_background(self: &Arc<Self>, router_socket: Arc<dyn RouterSocket>) {
+    fn add_router_socket_in_background(self: &Arc<Self>, router_socket: Arc<dyn RouterSocket>) {
         let another_self = self.clone();
         tokio::spawn(async move {
             let route = router_socket.route();
@@ -228,7 +229,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
         });
     }
 
-    fn de_register_socket_in_background(self: &Arc<Self>, route: String, remote_addr: SocketAddr, connector_instance_id: String) {
+    fn de_register_router_socket_in_background(self: &Arc<Self>, route: String, remote_addr: SocketAddr, connector_instance_id: String) {
         let another_self = self.clone();
         warn!(
             "Going to deregister route={} and the target addr={} and the Connector Id={}",
