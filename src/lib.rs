@@ -112,16 +112,16 @@ lazy_static! {
 
 // Our shared state
 pub struct CrankerRouterState {
-    _counter: AtomicU64,
-    websocket_farm: Arc<WebSocketFarm>,
-    dark_mode_manager: DarkModeManager,
-    config: CrankerRouterConfig,
+    pub _counter: AtomicU64,
+    pub websocket_farm: Arc<WebSocketFarm>,
+    pub dark_mode_manager: DarkModeManager,
+    pub config: CrankerRouterConfig,
 }
 
 pub type ACRState = Arc<CrankerRouterState>;
 
 pub struct CrankerRouter {
-    state: ACRState,
+    pub state: ACRState,
 }
 
 impl CrankerRouter {
