@@ -4,10 +4,10 @@ use serde::Serialize;
 #[derive(Serialize, Clone, Debug, Hash, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DarkHost {
-    address: IpAddr,
-    date_enabled: i64,
+    pub address: IpAddr,
+    pub date_enabled: i64,
     // unix timestamp,
-    reason: String,
+    pub reason: String,
 }
 
 impl DarkHost {
