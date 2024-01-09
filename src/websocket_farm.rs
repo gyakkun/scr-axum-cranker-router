@@ -39,7 +39,6 @@ pub trait WebSocketFarmInterface: Sync + Send {
 
     fn de_register_socket_in_background(self: &Arc<Self>, route: String, remote_addr: SocketAddr, connector_instance_id: String);
 
-    // TODO: For health info map
     fn get_sockets(&self) -> HashMap<String, Vec<Weak<dyn RouterSocket>>> {
         HashMap::new()
     }
@@ -47,7 +46,6 @@ pub trait WebSocketFarmInterface: Sync + Send {
         HashMap::new()
     }
 
-    // TODO: DarkHost feature
     fn enable_dark_mode(&self, dark_host: DarkHost) {}
     fn disable_dark_mode(&self, dark_host: DarkHost) {}
     fn get_dark_hosts(&self) -> HashSet<DarkHost> {
@@ -279,7 +277,6 @@ impl WebSocketFarmInterface for WebSocketFarm {
         res
     }
 
-    // TODO: DarkHost feature
     fn enable_dark_mode(&self, dark_host: DarkHost) {
         let dark_host_dbg = format!("{:?}", dark_host);
         let added = self.dark_hosts.insert(dark_host);

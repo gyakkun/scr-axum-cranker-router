@@ -468,7 +468,6 @@ impl CrankerRouter {
             services,
             dark_hosts: websocket_farm.clone().get_dark_hosts(),
             waiting_tasks: websocket_farm.clone().get_waiting_tasks(),
-            // TODO: Make all methods consumes Arc<Self> to be &Arc<Self>
         }
     }
 }
