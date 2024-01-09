@@ -5,7 +5,6 @@ use std::sync::Arc;
 use crate::dark_host::DarkHost;
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 
-#[derive(Debug)]
 pub struct DarkModeManager {
     pub websocket_farm: Arc<WebSocketFarm>,
 }

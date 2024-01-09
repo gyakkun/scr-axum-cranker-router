@@ -23,7 +23,7 @@ const MU_ID: &str = "muid";
 
 #[async_trait]
 pub trait WebSocketFarmInterface: Sync + Send {
-    async fn get_router_socket_by_target_path(&self, target_path: String) -> Result<Arc<dyn RouterSocket>, CrankerRouterException>;
+    async fn get_router_socket_by_target_path(self: &Arc<Self>, target_path: String) -> Result<Arc<dyn RouterSocket>, CrankerRouterException>;
 
     fn clean_routes_in_background(self: &Arc<Self>, routes_keep_time_millis: i64);
 
@@ -105,7 +105,7 @@ impl WebSocketFarm {
 
 #[async_trait]
 impl WebSocketFarmInterface for WebSocketFarm {
-    async fn get_router_socket_by_target_path(&self, target_path: String) -> Result<Arc<dyn RouterSocket>, CrankerRouterException> {
+    async fn get_router_socket_by_target_path(self: &Arc<Self>, target_path: String) -> Result<Arc<dyn RouterSocket>, CrankerRouterException> {
         // we have both maps storing <routes, xxx >, here we use route_to_chan map since it removes route earlier
         // a little bit ( check the trace!("82") in retain )
         let current_routes = self.route_to_socket_chan.iter().map(|e| e.key().clone()).collect::<DashSet<String>>();
@@ -125,6 +125,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
                     if arc_rs.is_removed() {
                         // panic here?
                         error!("unexpected removed router socket received from receiver! router_socket_id={}", arc_rs.router_socket_id());
+                        self.remove_websocket_in_background(arc_rs.route(), arc_rs.router_socket_id(), arc_rs.get_is_removed_arc_atomic_bool());
                         continue;
                     }
                     return Ok(arc_rs); // @.await

@@ -43,6 +43,9 @@ pub(crate) trait RouterSocket: Send + Sync + ProxyInfo {
     fn connector_id(&self) -> String;
 
     fn is_removed(&self) -> bool;
+    fn get_is_removed_arc_atomic_bool(&self) -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
 
     fn cranker_version(&self) -> &'static str;
 
@@ -789,7 +792,11 @@ impl RouterSocket for RouterSocketV1 {
 
     #[inline]
     fn is_removed(&self) -> bool {
-        return self.is_removed.load(Acquire);
+        self.is_removed.load(Acquire)
+    }
+
+    fn get_is_removed_arc_atomic_bool(&self) -> Arc<AtomicBool> {
+        self.is_removed.clone()
     }
 
     fn cranker_version(&self) -> &'static str {
