@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt::{Debug, Display};
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, SeqCst};
@@ -38,12 +38,20 @@ use crate::websocket_listener::WebSocketListener;
 
 pub const HEADER_MAX_SIZE: usize = 64 * 1024; // 64KBytes
 
+
+// We define these common methods for selecting route in websocket farm
+pub(crate) trait RouteIdentify {
+    fn router_socket_id(&self) -> String;
+    fn route(&self) -> String;
+    fn service_address(&self) -> SocketAddr;
+}
+
+
 #[async_trait]
-pub(crate) trait RouterSocket: Send + Sync {
+pub(crate) trait RouterSocket: Send + Sync + RouteIdentify {
     fn component_name(&self) -> String;
     // TODO: Should make this opt to keep in line with mu
     fn connector_id(&self) -> String;
-
     fn is_removed(&self) -> bool;
     fn get_is_removed_arc_atomic_bool(&self) -> Arc<AtomicBool> {
         Arc::new(AtomicBool::new(false))
@@ -687,8 +695,9 @@ impl WebSocketListener for RouterSocketV1 {
                 ));
 
                 // I think here same as asyncHandle.complete(exception) in mu cranker router
-                let _ = self.tgt_res_hdr_tx.send(Err(ex.clone())).await;
-                let _ = self.tgt_res_bdy_tx.send(Err(ex.clone())).await;
+                // FIXME: It occurs that the client browser will hang if ex sent here
+                let _ = async { let _ = self.tgt_res_hdr_tx.send(Err(ex.clone())).await; };
+                let _ = async { let _ = self.tgt_res_bdy_tx.send(Err(ex.clone())).await; };
                 let may_ex = self.on_error(ex); // ?Necessary
                 total_err = exceptions::compose_ex(total_err, may_ex);
             }
@@ -716,7 +725,7 @@ impl WebSocketListener for RouterSocketV1 {
                 ok
             })
             .map_err(|se| CrankerRouterException::new(format!(
-                "rare error that failed to send error to err chan: {:?}", se
+                "rare ex that failed to send error to err chan: {:?}", se
             )))
 
         // the version below MAY causing recursive ex creation, test it later
@@ -732,43 +741,37 @@ impl WebSocketListener for RouterSocketV1 {
     }
 }
 
+impl RouteIdentify for RouterSocketV1 {
+    fn router_socket_id(&self) -> String {
+        self.router_socket_id.clone()
+    }
+    fn route(&self) -> String {
+        self.route.clone()
+    }
+    fn service_address(&self) -> SocketAddr {
+        self.remote_address.clone()
+    }
+}
+
 impl ProxyInfo for RouterSocketV1 {
     fn is_catch_all(&self) -> bool {
         self.route.eq("*")
     }
-
-    fn connector_instance_id(&self) -> String {
+    fn connector_id(&self) -> String {
         self.connector_id.clone()
     }
-
-    fn service_address(&self) -> SocketAddr {
-        self.remote_address.clone()
-    }
-
-    fn route(&self) -> String {
-        self.route.clone()
-    }
-
-    fn router_socket_id(&self) -> String {
-        self.router_socket_id.clone()
-    }
-
     fn duration_millis(&self) -> i64 {
         self.duration_millis.load(SeqCst)
     }
-
     fn bytes_received(&self) -> i64 {
         self.bytes_received.load(SeqCst)
     }
-
     fn bytes_sent(&self) -> i64 {
         self.bytes_sent.load(SeqCst)
     }
-
     fn response_body_frames(&self) -> i64 {
         self.binary_frame_received.load(SeqCst)
     }
-
     fn error_if_any(&self) -> Option<CrankerRouterException> {
         self.error.try_read()
             .ok()
@@ -790,6 +793,18 @@ impl RouterSocket for RouterSocketV1 {
 
     fn connector_id(&self) -> String {
         self.connector_id.clone()
+    }
+
+    fn router_socket_id(&self) -> String {
+        self.router_socket_id.clone()
+    }
+
+    fn route(&self) -> String {
+        self.route.clone()
+    }
+
+    fn service_address(&self) -> SocketAddr {
+        self.remote_address
     }
 
     #[inline]
@@ -925,6 +940,7 @@ impl RouterSocket for RouterSocketV1 {
         let mut cranker_res: Option<CrankerProtocolResponse> = None;
         // if the wss_recv_pipe chan is EMPTY AND CLOSED then err will come from this recv()
         trace!("22");
+        // FIXME: Seems if recv Err here, the client browser will hang?
         if let hdr_res = self.tgt_res_hdr_rx.recv().await
             .map_err(|recv_err|
                 CrankerRouterException::new(format!(
@@ -991,10 +1007,10 @@ pub async fn harvest_router_socket(
     addr: SocketAddr,
 )
 {
-    let (wss_tx, wss_rx) = wss.split();
     let router_socket_id = Uuid::new_v4().to_string();
     let weak_wsf = Arc::downgrade(&app_state.websocket_farm);
     if cranker_version == CRANKER_V_1_0 {
+        let (wss_tx, wss_rx) = wss.split();
         let rs = RouterSocketV1::new(
             route.clone(),
             component_name.clone(),
@@ -1013,6 +1029,7 @@ pub async fn harvest_router_socket(
             .websocket_farm
             .add_router_socket_in_background(rs);
     } else if cranker_version == CRANKER_V_3_0 {
+        let (wss_tx, wss_rx) = wss.split();
         let rs = RouterSocketV3::new(
             route.clone(),
             domain.clone(),

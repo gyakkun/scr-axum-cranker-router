@@ -236,7 +236,7 @@ impl ForwardedHeader {
         let mut i = 0;
         'outer: while i < input_chars.len() {
             let mut opt_extensions: Option<HashMap<String, String>> = None;
-            let mut extensions = HashMap::new(); // FIXME: Should use LinkedHashMap to keep order
+            let mut extensions = HashMap::new(); // FIXME: Should use LinkedHashMap(crate `hashlink`) to keep order
             let mut state = FHParseState::ParamName;
             let mut param_name: Option<String> = None;
             let mut by: Option<String> = None;

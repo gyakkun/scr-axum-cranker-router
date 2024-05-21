@@ -1,14 +1,11 @@
 use std::fmt::Debug;
-use std::net::SocketAddr;
 
 use crate::exceptions::CrankerRouterException;
+use crate::router_socket::RouteIdentify;
 
-pub trait ProxyInfo {
+pub trait ProxyInfo : RouteIdentify {
     fn is_catch_all(&self) -> bool;
-    fn connector_instance_id(&self) -> String;
-    fn service_address(&self) -> SocketAddr;
-    fn route(&self) -> String;
-    fn router_socket_id(&self) -> String;
+    fn connector_id(&self) -> String;
     fn duration_millis(&self) -> i64;
     fn bytes_received(&self) -> i64;
     fn bytes_sent(&self) -> i64;
