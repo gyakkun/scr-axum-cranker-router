@@ -8,16 +8,18 @@ use async_channel::{Receiver, Sender};
 use axum::async_trait;
 use axum::extract::OriginalUri;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use axum::http::{HeaderMap, Method, Response, Version};
+use axum::http::{HeaderMap, Method, Request, Response, Version};
 use axum_core::body::{Body, BodyDataStream};
-use bytes::{Buf, Bytes};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dashmap::DashMap;
+use futures::{SinkExt, TryFutureExt};
 use futures::stream::{SplitSink, SplitStream};
-use futures::TryFutureExt;
 use log::{debug, error, warn};
 use tokio::sync::{Mutex, Notify, RwLock};
 
 use crate::{ACRState, CRANKER_V_3_0};
+use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
+use crate::cranker_protocol_response::CrankerProtocolResponse;
 use crate::exceptions::CrankerRouterException;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
@@ -37,7 +39,7 @@ const MESSAGE_TYPE_RST_STREAM: u8 = 3;
 const MESSAGE_TYPE_WINDOW_UPDATE: u8 = 8;
 const ERROR_INTERNAL: u8 = 1;
 
-const RCTX_INVALID_UPPER_RS3_MSG: String = "(invalid router socket v3)".to_string();
+const RCTX_INVALID_OUTER_RS3_MSG: String = "(invalid router socket v3)".to_string();
 
 
 pub struct RouterSocketV3 {
@@ -57,7 +59,7 @@ pub struct RouterSocketV3 {
 
     // The only place to store strong Arc of RequestContext
     pub context_map: DashMap<i32, Arc<RequestContext>>,
-    pub id_maker: AtomicI32,
+    pub req_id_generator: AtomicI32,
 
     pub wss_exchange: Arc<WssExchangeV3>,
 }
@@ -97,6 +99,10 @@ impl RouterSocket for RouterSocketV3 {
 
     async fn on_client_req(self: Arc<Self>, app_state: ACRState, http_version: &Version, method: &Method, original_uri: &OriginalUri, headers: &HeaderMap, addr: &SocketAddr, opt_body: Option<BodyDataStream>) -> Result<Response<Body>, CrankerRouterException> {
         todo!()
+
+        // For the response part
+        // We need a latch / Notify here to let this function know if the corresponding request context
+        // has already received the response header from target
     }
 }
 
@@ -144,6 +150,9 @@ struct RequestContext {
     // use notify to flow control???
     pub can_write_notify: Notify,
     pub pause_write_notify: Notify,
+
+    // use to notify there's a target response available
+    pub should_have_response_notify: Notify,
 }
 
 impl RouteIdentify for RequestContext {
@@ -151,14 +160,14 @@ impl RouteIdentify for RequestContext {
         if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
             return rs3.router_socket_id();
         }
-        return RCTX_INVALID_UPPER_RS3_MSG;
+        return RCTX_INVALID_OUTER_RS3_MSG;
     }
 
     fn route(&self) -> String {
         if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
             return rs3.route();
         }
-        return RCTX_INVALID_UPPER_RS3_MSG;
+        return RCTX_INVALID_OUTER_RS3_MSG;
     }
 
     fn service_address(&self) -> SocketAddr {
@@ -181,7 +190,7 @@ impl ProxyInfo for RequestContext {
         if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
             return rs3.connector_id.clone();
         }
-        return RCTX_INVALID_UPPER_RS3_MSG;
+        return RCTX_INVALID_OUTER_RS3_MSG;
     }
 
     fn duration_millis(&self) -> i64 {
@@ -231,6 +240,10 @@ impl StreamState {
 }
 
 struct WssExchangeV3 {
+    weak_outer_router_socket_v3: Weak<RouterSocketV3>,
+
+    // FIXME: We copy the route and router socket id in case
+    //  of the outer router socket v3 is being removed
     route: String,
     router_socket_id: String,
     underlying_wss_tx: SplitSink<WebSocket, Message>,
@@ -239,7 +252,9 @@ struct WssExchangeV3 {
     err_chan_tx: Sender<CrankerRouterException>,
     err_chan_rx: Receiver<CrankerRouterException>,
 
-    rs_is_removed: Arc<AtomicBool>,
+    // FIXME: This should be no longer used, should use the weaker_outer_router_socket_v3.upgrade().is_removed()
+    //  see self.is_upper_rs3_removed()
+    // rs_is_removed: Arc<AtomicBool>,
 
     wss_send_task_tx: Sender<Message>,
     wss_send_task_rx: Receiver<Message>,
@@ -249,36 +264,20 @@ struct WssExchangeV3 {
 
 // Handle binary msg
 impl WssExchangeV3 {
-    pub async fn handle_data(&self, flags: u8, req_id: i32, bin: Bytes) -> Result<(), CrankerRouterException> {
-        let opt_ctx = self.wss_recv_dispatcher.get(&req_id);
-        if opt_ctx.is_none() {
-            return Err(CrankerRouterException::new(format!(
-                "can not found ctx for req id={} in router_socket_id={}",
-                req_id, self.router_socket_id
-            )));
-        }
-        let ctx = opt_ctx.unwrap().upgrade();
-        if ctx.is_none() {
-            return Err(CrankerRouterException::new(format!(
-                "found ctx for req id={} but seems already dropped in router_socket_id={}",
-                req_id, self.router_socket_id
-            )));
-        }
-        let ctx = ctx.unwrap();
-
-        let is_end_stream = is_end_stream(flags);
+    pub async fn handle_data(&self, ctx: &RequestContext, flags: u8, req_id: i32, bin: Bytes) -> Result<(), CrankerRouterException> {
+        let is_end_stream = judge_is_stream_end_from_flags(flags);
         let len = bin.remaining();
         if len == 0 {
             if is_end_stream {
-                self.notify_client_request_close(req_id, 1000/*ws status code*/);
+                self.notify_client_request_close(ctx, 1000/*ws status code*/);
             }
             return Ok(());
         }
 
         ctx.wss_on_binary_call_count.fetch_add(1, SeqCst);
-        if self.rs_is_removed.load(SeqCst) {
+        if self.is_upper_rs3_removed() {
             if is_end_stream {
-                self.notify_client_request_close(req_id, 1000/*ws status code*/);
+                self.notify_client_request_close(ctx, 1000/*ws status code*/);
             }
             return Err(CrankerRouterException::new(format!(
                 "recv bin msg from connector but router socket already removed. req_id={}, flags={}", req_id, flags
@@ -291,7 +290,7 @@ impl WssExchangeV3 {
                 // TODO: I think we should notify_xxx at the end of [s]loop[/s] no loop.
                 // here should be fine I think
                 if is_end_stream {
-                    self.notify_client_request_close(req_id, 1000);
+                    self.notify_client_request_close(ctx, 1000);
                 }
                 ok
             })
@@ -304,23 +303,134 @@ impl WssExchangeV3 {
     }
 
 
+    pub async fn handle_header(&self, ctx: &RequestContext, flags: u8, req_id: i32, bin: Bytes) -> Result<(), CrankerRouterException> {
+        let is_stream_end = judge_is_stream_end_from_flags(flags);
+        let is_header_end = judge_is_header_end_from_flags(flags);
+        let byte_len: i32 = bin.remaining().try_into().map_err(|e| {
+            CrankerRouterException::new(format!(
+                "failed to handle remaining bin msg len, it's even larger than i32::MAX, req id = {} , router socket id = {} , route = {}",
+                req_id, ctx.router_socket_id(), ctx.route())
+            )
+        })?;
+        let content = String::from_utf8(bin.to_vec()).map_err(|e| {
+            Err(CrankerRouterException::new(format!(
+                "failed to convert binary to header text in utf8, req id = {} , router socket id = {} , route = {}",
+                req_id, ctx.router_socket_id(), ctx.route())
+            ))
+        })?;
+        // FIXME: This try method returns error if can't acquire write lock immediately
+        // ctx.header_line_builder.try_write()
+        //     .map(|mut hlb| {
+        //         hlb.push_str(content.as_str())
+        //     })
+        //     .map_err(|e| {
+        //         CrankerRouterException::new(format!(
+        //             "failed to write lock header line builder, req id = {} , router socket id = {} , route = {}",
+        //             req_id, ctx.router_socket_id(), ctx.route()
+        //         ))
+        //     })?;
+        {
+            let mut hlb = ctx.header_line_builder.write().await;
+            hlb.push_str(content.as_str());
+        }
+        if is_header_end {
+            let full_content = ctx.header_line_builder.read().await.clone();
+            self.do_send_header_to_cli(ctx, full_content)?;
+        }
+        if is_stream_end {
+            self.notify_client_request_close(ctx, 1000); // TODO: What does 1000 mean?
+        }
+        let window_update_message = window_update_message(req_id, byte_len);
+        let _ = self.wss_send_task_tx.send(Message::Binary(window_update_message.into_vec())).await;
+        // no mu callbacks needed here ? (doneAndPullData, releaseBuffer)
+        Ok(())
+    }
+
+    fn do_send_header_to_cli(&self, ctx: &RequestContext, full_content: String) -> Result<(), CrankerRouterException> {
+        ctx.should_have_response_notify.notify_waiters();
+        if true { return Ok(()) }
+
+        // FIXME: The following lines should move to the `async on_cli_req()` method of
+        //  `impl RouterSocket for RouterSocketV3` block
+        let cpr = CrankerProtocolResponse::try_from_string(full_content)?;
+        let status_code = cpr.status;
+        let res_builder = cpr.build()?;
+        {
+            if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
+                for i in rs3.proxy_listeners.iter() {
+                    i.on_before_responding_to_client(self.as_ref())?;
+                    i.on_after_target_to_proxy_headers_received(
+                        self.as_ref(), status_code, res_builder.headers_ref(),
+                    )?;
+                }
+            } else {
+                return Err(CrankerRouterException::new(format!(
+                    "failed to invoke on before responding to client of proxy listeners because the router socket v3 no longer exists, req id = {} , router socket id = {} , route = {}",
+                    ctx.request_id, ctx.router_socket_id(), ctx.route()
+                )));
+            }
+        }
+
+        // let wrapped_stream = ctx.tgt_res_bdy_rx.clone();
+        // let stream_body = Body::from_stream(wrapped_stream);
+
+        Ok(())
+    }
+
+    fn is_upper_rs3_removed(&self) -> bool {
+        if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
+            return rs3.is_removed()
+        }
+        return true;
+    }
+
+
+    fn check_if_context_exists(&self, req_id: &i32) -> Result<Arc<RequestContext>, Result<(), CrankerRouterException>> {
+        let opt_ctx = self.wss_recv_dispatcher.get(&req_id);
+        if opt_ctx.is_none() {
+            return Err(Err(CrankerRouterException::new(format!(
+                "can not found ctx for req id={} in router_socket_id={}",
+                req_id, self.router_socket_id
+            ))));
+        }
+        let ctx = opt_ctx.unwrap().upgrade();
+        if ctx.is_none() {
+            return Err(Err(CrankerRouterException::new(format!(
+                "found ctx for req id={} but seems already dropped in router_socket_id={}",
+                req_id, self.router_socket_id
+            ))));
+        }
+        let ctx = ctx.unwrap();
+        Ok(ctx)
+    }
+
     // pretty like on_close in RouterSocketV1
-    fn notify_client_request_close(&self, req_id: i32, ws_status_code: u16) {
+    fn notify_client_request_close(&self, ctx: &RequestContext, ws_status_code: u16) {
         todo!()
     }
 }
+
 
 const _END_STREAM_FLAG_MASK: u8 = 0b00000001;
 const _END_HEADER_FLAG_MASK: u8 = 0b00000100;
 
 #[inline]
-fn is_end_stream(flags: u8) -> bool {
+fn judge_is_stream_end_from_flags(flags: u8) -> bool {
     flags & _END_STREAM_FLAG_MASK == _END_STREAM_FLAG_MASK
 }
 
 #[inline]
-fn is_end_header(flags: u8) -> bool {
+fn judge_is_header_end_from_flags(flags: u8) -> bool {
     flags & _END_HEADER_FLAG_MASK == _END_HEADER_FLAG_MASK
+}
+
+fn window_update_message(req_id: i32, window_update: i32) -> Bytes {
+    let mut bm = BytesMut::with_capacity(10);
+    bm.put_u8(MESSAGE_TYPE_WINDOW_UPDATE);
+    bm.put_u8(0);
+    bm.put_i32(req_id);
+    bm.put_i32(window_update); // FIXME
+    bm.into()
 }
 
 impl WssExchangeV3 {
@@ -371,18 +481,23 @@ impl WebSocketListener for WssExchangeV3 {
         }
         let req_id_int = bin.get_i32(); // big endian
 
+        let ctx = match self.check_if_context_exists(&req_id_int) {
+            Ok(value) => value,
+            Err(value) => return value,
+        };
+
         match msg_type_byte {
             MESSAGE_TYPE_DATA => {
-                self.handle_data(flags_byte, req_id_int, bin)?
+                self.handle_data(&ctx, flags_byte, req_id_int, bin)?
             }
             MESSAGE_TYPE_HEADER => {
-                self.handle_header(flags_byte, req_id_int, bin)?
+                self.handle_header(&ctx, flags_byte, req_id_int, bin)?
             }
             MESSAGE_TYPE_RST_STREAM => {
-                self.handle_rst_stream(flags_byte /*can be ignored*/, req_id_int, bin)?
+                self.handle_rst_stream(&ctx, flags_byte /*can be ignored*/, req_id_int, bin)?
             }
             MESSAGE_TYPE_WINDOW_UPDATE => {
-                self.handle_window_update(flags_byte, req_id_int, bin)?
+                self.handle_window_update(&ctx, flags_byte, req_id_int, bin)?
             }
             _ => {
                 // TODO: Should we on_error here?

@@ -25,7 +25,7 @@ impl CrankerProtocolResponse {
      * ===== Part 2 (if msg with body)======
      * **Binary Content
      */
-    pub fn new(message_to_apply: String) -> Result<Self, CrankerRouterException> {
+    pub fn try_from_string(message_to_apply: String) -> Result<Self, CrankerRouterException> {
         let lines: Vec<&str> = message_to_apply.split('\n').collect();
         let lines_len = lines.len();
         if lines_len <= 0 {
@@ -111,7 +111,7 @@ mod tests {
             "HTTP/1.1 200 OK",
             "User-Agent: curl/8.0"
         ].join("\n");
-        let res = CrankerProtocolResponse::new(msg);
+        let res = CrankerProtocolResponse::try_from_string(msg);
         assert!(res.is_ok());
         let res = res.unwrap();
         assert_eq!(res.status, 200);
@@ -125,7 +125,7 @@ content-length:10 \n
 content-type:text/plain \n
 date:Fri, 05 Jan 2024 16:29:44 GMT \n
 location:/history".to_string();
-        let res = CrankerProtocolResponse::new(msg.clone());
+        let res = CrankerProtocolResponse::try_from_string(msg.clone());
         assert!(res.is_ok());
         let res = res.unwrap();
         assert_eq!(res.status, 302);

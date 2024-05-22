@@ -87,7 +87,7 @@ pub struct RouterSocketV1 {
     pub proxy_listeners: Vec<Arc<dyn ProxyListener>>,
     pub remote_address: SocketAddr,
     pub is_removed: Arc<AtomicBool>,
-    pub has_response: Arc<AtomicBool>,
+    pub should_have_response: Arc<AtomicBool>,
     // from cli
     pub bytes_received: Arc<AtomicI64>,
     // to cli
@@ -118,7 +118,7 @@ pub struct RouterSocketV1 {
     wss_send_task_tx: Sender<Message>,
     wss_send_task_join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 
-    has_response_notify: Arc<Notify>,
+    should_have_response_notify: Arc<Notify>,
     really_need_on_response_body_chunk_received_from_target: bool,
 }
 
@@ -147,10 +147,10 @@ impl RouterSocketV1 {
 
         let is_removed = Arc::new(AtomicBool::new(false));
 
-        let has_response = Arc::new(AtomicBool::new(false));
+        let should_have_response = Arc::new(AtomicBool::new(false));
 
         let router_socket_id_clone = router_socket_id.clone();
-        let has_response_notify = Arc::new(Notify::new());
+        let should_have_response_notify = Arc::new(Notify::new());
         let really_need_on_response_body_chunk_received_from_target
             = proxy_listeners.iter().any(|i| i.really_need_on_response_body_chunk_received_from_target());
 
@@ -164,7 +164,7 @@ impl RouterSocketV1 {
             remote_address,
 
             is_removed: is_removed.clone(),
-            has_response: has_response.clone(),
+            should_have_response: should_have_response.clone(),
             bytes_received: bytes_received.clone(),
             bytes_sent: bytes_sent.clone(),
             binary_frame_received: AtomicI64::new(0),
@@ -179,7 +179,7 @@ impl RouterSocketV1 {
 
             cli_side_res_sender: RSv1ClientSideResponseSender::new(
                 router_socket_id_clone, bytes_sent,
-                is_removed, has_response,
+                is_removed, should_have_response,
                 tgt_res_hdr_tx.clone(), tgt_res_bdy_tx.clone(),
             ),
 
@@ -193,7 +193,7 @@ impl RouterSocketV1 {
             wss_send_task_tx,
             wss_send_task_join_handle: Arc::new(Mutex::new(None)),
 
-            has_response_notify,
+            should_have_response_notify,
 
             really_need_on_response_body_chunk_received_from_target,
         });
@@ -248,7 +248,7 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
     rs: Arc<RouterSocketV1>,
     mut underlying_wss_rx: SplitStream<WebSocket>,
 ) {
-    let mut local_has_response = rs.has_response.load(SeqCst);
+    let mut local_should_have_response = rs.should_have_response.load(SeqCst);
     let mut may_ex: Option<CrankerRouterException> = None;
     let idle_read_timeout_ms = rs.idle_read_timeout_ms;
     let read_notifier = Arc::new(Notify::new());
@@ -278,9 +278,9 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
     // @outer
     loop {
         tokio::select! {
-            _ = rs.has_response_notify.notified() => {
+            _ = rs.should_have_response_notify.notified() => {
                 trace!("30");
-                local_has_response = true;
+                local_should_have_response = true;
             }
             opt_res_msg = underlying_wss_rx.next() => {
                 match opt_res_msg {
@@ -299,7 +299,7 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
                                 read_notifier.notify_waiters();
                                 match msg {
                                     Message::Text(txt) => {
-                                        if !local_has_response {
+                                        if !local_should_have_response {
                                             let failed_reason = "recv txt bin before handle cli req.".to_string();
                                             may_ex = Some(CrankerRouterException::new(failed_reason));
                                             break; // @outer
@@ -309,7 +309,7 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
                                         trace!("32")
                                     }
                                     Message::Binary(bin) => {
-                                        if !local_has_response {
+                                        if !local_should_have_response {
                                             let failed_reason = "recv bin before handle cli req.".to_string();
                                             may_ex = Some(CrankerRouterException::new(failed_reason));
                                             break;
@@ -395,6 +395,9 @@ async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
             Ok(crex) = err_chan_rx.recv() => {
                 if !rs.is_removed() {
                     error!("err_chan_rx received err: {:?}. router_socket_id={}", crex.reason.as_str(), rs.router_socket_id);
+                    let _ = rs.error.try_write().map(|mut s|
+                        s.replace(crex.clone())
+                    );
                 }
                 // 0. Stop receiving message, flush underlying wss tx
                 let _ = wss_send_task_rx.close();
@@ -479,7 +482,7 @@ pub struct RSv1ClientSideResponseSender {
     pub router_socket_id: String,
     pub bytes_sent: Arc<AtomicI64>,
     pub is_removed: Arc<AtomicBool>,
-    pub has_response: Arc<AtomicBool>,
+    pub should_have_response: Arc<AtomicBool>,
 
     pub tgt_res_hdr_tx: Sender<Result<String, CrankerRouterException>>,
     pub tgt_res_bdy_tx: Sender<Result<Vec<u8>, CrankerRouterException>>,
@@ -496,7 +499,7 @@ impl RSv1ClientSideResponseSender {
         router_socket_id: String,
         bytes_sent: Arc<AtomicI64>,
         is_removed: Arc<AtomicBool>,
-        has_response: Arc<AtomicBool>,
+        should_have_response: Arc<AtomicBool>,
         tgt_res_hdr_tx: Sender<Result<String, CrankerRouterException>>,
         tgt_res_bdy_tx: Sender<Result<Vec<u8>, CrankerRouterException>>,
     ) -> Self {
@@ -505,7 +508,7 @@ impl RSv1ClientSideResponseSender {
             bytes_sent,
 
             is_removed,
-            has_response,
+            should_have_response,
 
             tgt_res_hdr_tx,
             tgt_res_bdy_tx,
@@ -597,7 +600,8 @@ impl WebSocketListener for RouterSocketV1 {
     }
 
     async fn on_binary(&self, bin: Vec<u8>) -> Result<(), CrankerRouterException> {
-        // slightly different from mu cranker router that it will judge the current state of websocket / has_response first
+        // slightly different from mu cranker router that mu will judge the current state of
+        // websocket / should_have_response (hasResponse) first
         self.binary_frame_received.fetch_add(1, SeqCst);
         let mut opt_bin_clone_for_listeners = None;
 
@@ -654,7 +658,7 @@ impl WebSocketListener for RouterSocketV1 {
         }
         trace!("42");
         // TODO: Handle the reason carefully like mu cranker router
-        if self.has_response.load(SeqCst)
+        if self.should_have_response.load(SeqCst)
             && self.bytes_received.load(Acquire) == 0
         {
             trace!("43");
@@ -795,18 +799,6 @@ impl RouterSocket for RouterSocketV1 {
         self.connector_id.clone()
     }
 
-    fn router_socket_id(&self) -> String {
-        self.router_socket_id.clone()
-    }
-
-    fn route(&self) -> String {
-        self.route.clone()
-    }
-
-    fn service_address(&self) -> SocketAddr {
-        self.remote_address
-    }
-
     #[inline]
     fn is_removed(&self) -> bool {
         self.is_removed.load(Acquire)
@@ -859,8 +851,8 @@ impl RouterSocket for RouterSocketV1 {
                 "try to handle cli req in a is_removed router socket. router_socket_id={}", &self.router_socket_id
             )));
         }
-        self.has_response_notify.notify_waiters();
-        self.has_response.store(true, SeqCst);
+        self.should_have_response_notify.notify_waiters();
+        self.should_have_response.store(true, SeqCst);
         let current_time_millis = time_utils::current_time_millis();
         self.socket_wait_in_millis.fetch_add(current_time_millis, SeqCst);
         self.client_req_start_ts.store(current_time_millis, SeqCst);
@@ -907,8 +899,8 @@ impl RouterSocket for RouterSocketV1 {
         if let Some(mut body) = opt_body {
             let mut body = body.map_err(|e| CrankerRouterException::new(format!("{:?}", e)));
             trace!("5.5");
-            while let Some(res_bdy_chunk) = body.next().await {
-                let bytes = res_bdy_chunk?;
+            while let Some(req_body_chunk) = body.next().await {
+                let bytes = req_body_chunk?;
                 // fast fail
                 trace!("6");
                 trace!("8");
@@ -950,7 +942,7 @@ impl RouterSocket for RouterSocketV1 {
             )??  // fast fail
         {
             let message_to_apply = hdr_res;
-            cranker_res = Some(CrankerProtocolResponse::new(message_to_apply)?); // fast fail
+            cranker_res = Some(CrankerProtocolResponse::try_from_string(message_to_apply)?); // fast fail
         }
 
         if cranker_res.is_none() {
