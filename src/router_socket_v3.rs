@@ -1,8 +1,8 @@
 use std::fmt::format;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Weak};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64};
-use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
+use std::sync::atomic::Ordering::{Acquire, SeqCst};
 
 use async_channel::{Receiver, Sender};
 use axum::async_trait;
@@ -15,9 +15,9 @@ use dashmap::DashMap;
 use futures::stream::{SplitSink, SplitStream};
 use futures::TryFutureExt;
 use log::{debug, error, warn};
-use tokio::sync::{Mutex, Notify};
-use crate::ACRState;
+use tokio::sync::{Mutex, Notify, RwLock};
 
+use crate::{ACRState, CRANKER_V_3_0};
 use crate::exceptions::CrankerRouterException;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
@@ -36,6 +36,8 @@ const MESSAGE_TYPE_HEADER: u8 = 1;
 const MESSAGE_TYPE_RST_STREAM: u8 = 3;
 const MESSAGE_TYPE_WINDOW_UPDATE: u8 = 8;
 const ERROR_INTERNAL: u8 = 1;
+
+const RCTX_INVALID_UPPER_RS3_MSG: String = "(invalid router socket v3)".to_string();
 
 
 pub struct RouterSocketV3 {
@@ -61,34 +63,36 @@ pub struct RouterSocketV3 {
 }
 
 
-#[async_trait]
-impl RouterSocket for RouterSocketV3 {
-    fn component_name(&self) -> String {
-        todo!()
-    }
-
-    fn connector_id(&self) -> String {
-        todo!()
-    }
-
+impl RouteIdentify for RouterSocketV3 {
     fn router_socket_id(&self) -> String {
-        todo!()
+        return self.router_socket_id.clone();
     }
 
     fn route(&self) -> String {
-        todo!()
+        return self.route.clone();
     }
 
     fn service_address(&self) -> SocketAddr {
-        todo!()
+        return self.service_address().clone();
+    }
+}
+
+#[async_trait]
+impl RouterSocket for RouterSocketV3 {
+    fn component_name(&self) -> String {
+        return self.component_name.clone();
+    }
+
+    fn connector_id(&self) -> String {
+        return self.connector_id.clone();
     }
 
     fn is_removed(&self) -> bool {
-        todo!()
+        return self.is_removed.load(SeqCst);
     }
 
     fn cranker_version(&self) -> &'static str {
-        todo!()
+        return CRANKER_V_3_0;
     }
 
     async fn on_client_req(self: Arc<Self>, app_state: ACRState, http_version: &Version, method: &Method, original_uri: &OriginalUri, headers: &HeaderMap, addr: &SocketAddr, opt_body: Option<BodyDataStream>) -> Result<Response<Body>, CrankerRouterException> {
@@ -101,6 +105,9 @@ const WATER_MARK_HIGH: i32 = 64 * 1024;
 const WATER_MARK_LOW: i32 = 16 * 1024;
 
 struct RequestContext {
+    // To mimic RouterSocketV3 in Java, we need a weak reference to
+    //  the outer class
+    pub weak_outer_router_socket_v3: Weak<RouterSocketV3>,
     // wss tunnel
     pub wss_received_ack_bytes: AtomicI32,
     pub is_wss_sending: AtomicI32,
@@ -125,12 +132,12 @@ struct RequestContext {
     pub to_client_bytes: AtomicI64,
 
     pub duration_millis: AtomicI64,
-    pub error: Mutex<Option<CrankerRouterException>>,
+    pub error: RwLock<Option<CrankerRouterException>>,
     // init false
     pub is_rst_stream_sent: AtomicBool,
     // init OPEN
-    pub state: Mutex<StreamState>,
-    pub header_line_builder: Mutex<String>,
+    pub state: RwLock<StreamState>,
+    pub header_line_builder: RwLock<String>,
 
     pub wss_exchange: Arc<WssExchangeV3>,
 
@@ -141,49 +148,68 @@ struct RequestContext {
 
 impl RouteIdentify for RequestContext {
     fn router_socket_id(&self) -> String {
-        todo!()
+        if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
+            return rs3.router_socket_id();
+        }
+        return RCTX_INVALID_UPPER_RS3_MSG;
     }
 
     fn route(&self) -> String {
-        todo!()
+        if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
+            return rs3.route();
+        }
+        return RCTX_INVALID_UPPER_RS3_MSG;
     }
 
     fn service_address(&self) -> SocketAddr {
-        todo!()
+        if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
+            return rs3.service_address();
+        }
+        return SocketAddr::new([255, 255, 255, 255].into(), 65535)
     }
 }
 
 impl ProxyInfo for RequestContext {
     fn is_catch_all(&self) -> bool {
-        todo!()
+        if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
+            return rs3.route.eq("*");
+        }
+        return false;
     }
 
     fn connector_id(&self) -> String {
-        todo!()
+        if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
+            return rs3.connector_id.clone();
+        }
+        return RCTX_INVALID_UPPER_RS3_MSG;
     }
 
     fn duration_millis(&self) -> i64 {
-        todo!()
+        return self.duration_millis.load(Acquire)
     }
 
     fn bytes_received(&self) -> i64 {
-        todo!()
+        return self.from_client_bytes.load(Acquire)
     }
 
     fn bytes_sent(&self) -> i64 {
-        todo!()
+        return self.to_client_bytes.load(Acquire)
     }
 
     fn response_body_frames(&self) -> i64 {
-        todo!()
+        return self.wss_on_binary_call_count.load(Acquire);
     }
 
     fn error_if_any(&self) -> Option<CrankerRouterException> {
-        todo!()
+        return self.error.try_read()
+            .ok()
+            .and_then(|ok|
+                ok.clone().map(|some| some.clone())
+            )
     }
 
     fn socket_wait_in_millis(&self) -> i64 {
-        todo!()
+        return 0;
     }
 }
 
