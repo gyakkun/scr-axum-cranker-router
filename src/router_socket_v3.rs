@@ -2,7 +2,7 @@ use std::fmt::format;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
-use std::sync::atomic::Ordering::{Acquire, SeqCst};
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
 
 use async_channel::{Receiver, Sender};
 use axum::async_trait;
@@ -39,7 +39,7 @@ const MESSAGE_TYPE_RST_STREAM: u8 = 3;
 const MESSAGE_TYPE_WINDOW_UPDATE: u8 = 8;
 const ERROR_INTERNAL: u8 = 1;
 
-const RCTX_INVALID_OUTER_RS3_MSG: String = "(invalid router socket v3)".to_string();
+const REQ_CTX_INVALID_OUTER_RS3_MSG: String = "(invalid router socket v3)".to_string();
 
 
 pub struct RouterSocketV3 {
@@ -153,6 +153,7 @@ struct RequestContext {
 
     // use to notify there's a target response available
     pub should_have_response_notify: Notify,
+    pub should_have_response: AtomicBool,
 }
 
 impl RouteIdentify for RequestContext {
@@ -160,21 +161,21 @@ impl RouteIdentify for RequestContext {
         if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
             return rs3.router_socket_id();
         }
-        return RCTX_INVALID_OUTER_RS3_MSG;
+        return REQ_CTX_INVALID_OUTER_RS3_MSG;
     }
 
     fn route(&self) -> String {
         if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
             return rs3.route();
         }
-        return RCTX_INVALID_OUTER_RS3_MSG;
+        return REQ_CTX_INVALID_OUTER_RS3_MSG;
     }
 
     fn service_address(&self) -> SocketAddr {
         if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
             return rs3.service_address();
         }
-        return SocketAddr::new([255, 255, 255, 255].into(), 65535)
+        return SocketAddr::new([255, 255, 255, 255].into(), 65535);
     }
 }
 
@@ -190,19 +191,19 @@ impl ProxyInfo for RequestContext {
         if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
             return rs3.connector_id.clone();
         }
-        return RCTX_INVALID_OUTER_RS3_MSG;
+        return REQ_CTX_INVALID_OUTER_RS3_MSG;
     }
 
     fn duration_millis(&self) -> i64 {
-        return self.duration_millis.load(Acquire)
+        return self.duration_millis.load(Acquire);
     }
 
     fn bytes_received(&self) -> i64 {
-        return self.from_client_bytes.load(Acquire)
+        return self.from_client_bytes.load(Acquire);
     }
 
     fn bytes_sent(&self) -> i64 {
-        return self.to_client_bytes.load(Acquire)
+        return self.to_client_bytes.load(Acquire);
     }
 
     fn response_body_frames(&self) -> i64 {
@@ -214,7 +215,7 @@ impl ProxyInfo for RequestContext {
             .ok()
             .and_then(|ok|
                 ok.clone().map(|some| some.clone())
-            )
+            );
     }
 
     fn socket_wait_in_millis(&self) -> i64 {
@@ -264,7 +265,7 @@ struct WssExchangeV3 {
 
 // Handle binary msg
 impl WssExchangeV3 {
-    pub async fn handle_data(&self, ctx: &RequestContext, flags: u8, req_id: i32, bin: Bytes) -> Result<(), CrankerRouterException> {
+    pub async fn handle_data(&self, ctx: &RequestContext, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
         let is_end_stream = judge_is_stream_end_from_flags(flags);
         let len = bin.remaining();
         if len == 0 {
@@ -285,8 +286,11 @@ impl WssExchangeV3 {
         }
 
         debug!("route={}, router_socket_id={}, sending {} bytes to client", self.route, self.router_socket_id, len);
+        // FIXME: bin.to_vec() is underlying copying the bin
+        //  try to do zero-copy here!
+        //  We should probably use `bin.into_vec()` here that seems cost-free
         ctx.tgt_res_bdy_tx.send(Ok(bin.to_vec())).await
-            .map(|ok|{
+            .map(|ok| {
                 // TODO: I think we should notify_xxx at the end of [s]loop[/s] no loop.
                 // here should be fine I think
                 if is_end_stream {
@@ -303,7 +307,7 @@ impl WssExchangeV3 {
     }
 
 
-    pub async fn handle_header(&self, ctx: &RequestContext, flags: u8, req_id: i32, bin: Bytes) -> Result<(), CrankerRouterException> {
+    pub async fn handle_header(&self, ctx: &RequestContext, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
         let is_stream_end = judge_is_stream_end_from_flags(flags);
         let is_header_end = judge_is_header_end_from_flags(flags);
         let byte_len: i32 = bin.remaining().try_into().map_err(|e| {
@@ -312,6 +316,8 @@ impl WssExchangeV3 {
                 req_id, ctx.router_socket_id(), ctx.route())
             )
         })?;
+        // FIXME: bin.to_vec() is underlying copying the bin
+        //  try to do zero-copy here!
         let content = String::from_utf8(bin.to_vec()).map_err(|e| {
             Err(CrankerRouterException::new(format!(
                 "failed to convert binary to header text in utf8, req id = {} , router socket id = {} , route = {}",
@@ -346,9 +352,26 @@ impl WssExchangeV3 {
         Ok(())
     }
 
+    pub async fn handle_rst_stream(&self, ctx: &RequestContext, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
+        let error_code = get_error_code(&mut bin);
+        let error_message = get_error_message(&mut bin);
+        self.notify_client_request_error(ctx, CrankerRouterException::new(format!(
+            "stream closed by connector, error code: {}, error message: {}, req id = {} , router socket id = {} , route = {}",
+            error_code, error_message, req_id, ctx.router_socket_id(), ctx.route()
+        )));
+        Ok(())
+    }
+
+    pub async fn handle_window_update(&self, ctx: &RequestContext, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
+        let window_update = bin.get_i32();
+        todo!()
+    }
+
+
     fn do_send_header_to_cli(&self, ctx: &RequestContext, full_content: String) -> Result<(), CrankerRouterException> {
+        ctx.should_have_response.store(true, Release);
         ctx.should_have_response_notify.notify_waiters();
-        if true { return Ok(()) }
+        if true { return Ok(()); }
 
         // FIXME: The following lines should move to the `async on_cli_req()` method of
         //  `impl RouterSocket for RouterSocketV3` block
@@ -379,7 +402,7 @@ impl WssExchangeV3 {
 
     fn is_upper_rs3_removed(&self) -> bool {
         if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
-            return rs3.is_removed()
+            return rs3.is_removed();
         }
         return true;
     }
@@ -408,6 +431,12 @@ impl WssExchangeV3 {
     fn notify_client_request_close(&self, ctx: &RequestContext, ws_status_code: u16) {
         todo!()
     }
+
+    fn notify_client_request_error(&self, ctx: &RequestContext, crex: CrankerRouterException) {
+        // TODO: Here need to judge if the crex is Timeout Exception or not
+        //  It would be good to define our own ErrorKind with `thiserror` crate ASAP!!!
+        todo!()
+    }
 }
 
 
@@ -431,6 +460,22 @@ fn window_update_message(req_id: i32, window_update: i32) -> Bytes {
     bm.put_i32(req_id);
     bm.put_i32(window_update); // FIXME
     bm.into()
+}
+
+fn get_error_code(bin: &mut Bytes) -> i32 {
+    if bin.remaining() >= 4 { return bin.get_i32(); }
+    return -1;
+}
+
+fn get_error_message(bin: &mut Bytes) -> String {
+    // TODO: Simplify it
+    if bin.remaining() > 0 {
+        let msg = String::from_utf8(bin.into_vec()).ok();
+        if let Some(msg) = msg {
+            return msg;
+        }
+    }
+    return String::new();
 }
 
 impl WssExchangeV3 {
@@ -459,9 +504,17 @@ impl WebSocketListener for WssExchangeV3 {
     }
 
     async fn on_binary(&self, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
+        // FIXME: We convert binary_msg to Bytes to make use of its APIs for convenience
+        //  but it means some operations are not cost-free
+
+        // From Rust API Guidelines - Naming (https://rust-lang.github.io/api-guidelines/naming.html)
+        // as_	Free	borrowed -> borrowed
+        // to_	Expensive	borrowed -> borrowed
+        // into_	Variable	owned -> owned (non-Copy types)
+
         // TODO: Can we make here zero copy???
         // TODO Add remaining length check here otherwise it will panic
-        let mut bin = Bytes::from(binary_msg);
+        let mut bin = Bytes::from(binary_msg); // This Bytes::from is likely to be cost-free
         if bin.remaining() < _MSG_TYPE_LEN_IN_BYTES {
             return Err(CrankerRouterException::new(
                 "recv bin msg len less than 1 to read msg type byte".to_string()
