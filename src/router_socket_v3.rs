@@ -103,6 +103,19 @@ impl RouterSocket for RouterSocketV3 {
         // For the response part
         // We need a latch / Notify here to let this function know if the corresponding request context
         // has already received the response header from target
+
+        // For flow control, when reading chunks of opt_body, we need to check the req ctx is_wss_writable
+        // everytime a chunk is received. And if it's not writable, wait on the Notify
+        // (typical wait on condition (Notify) with endless loop
+        /// ```rust
+        /// use std::sync::atomic::Ordering::SeqCst;
+        /// use super::router_socket_v3::RequestContext;
+        /// let ctx = RequestContext::new();
+        /// while !ctx.is_wss_writable.load(SeqCst) {
+        ///     ctx.is_wss_writable_notify.notified().await;
+        /// }
+        /// ```
+
     }
 }
 
@@ -148,12 +161,29 @@ struct RequestContext {
     pub wss_exchange: Arc<WssExchangeV3>,
 
     // use notify to flow control???
+    pub can_write: AtomicBool,
     pub can_write_notify: Notify,
     pub pause_write_notify: Notify,
 
     // use to notify there's a target response available
     pub should_have_response_notify: Notify,
     pub should_have_response: AtomicBool,
+}
+
+impl RequestContext {
+    fn acked_bytes(self: &Self, ack: i32) {
+        self.wss_received_ack_bytes.fetch_add(ack, SeqCst);
+        self.is_wss_sending.fetch_add(-ack, SeqCst);
+        if self.is_wss_sending.load(Acquire) < WATER_MARK_LOW {
+            if let Ok(_) = self.is_wss_writable.compare_exchange(false, true, SeqCst, SeqCst) {
+                self.write_it_maybe();
+            }
+        }
+    }
+
+    fn write_it_maybe(self:&Self){
+        if self.is_wss_writable.load(Acquire) && !wsswr
+    }
 }
 
 impl RouteIdentify for RequestContext {
@@ -364,6 +394,7 @@ impl WssExchangeV3 {
 
     pub async fn handle_window_update(&self, ctx: &RequestContext, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
         let window_update = bin.get_i32();
+        ctx.acked_bytes(window_update);
         todo!()
     }
 
