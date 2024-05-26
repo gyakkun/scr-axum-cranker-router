@@ -300,7 +300,7 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
                                 match msg {
                                     Message::Text(txt) => {
                                         if !local_should_have_response {
-                                            let failed_reason = "recv txt bin before handle cli req.".to_string();
+                                            let failed_reason = "recv txt before handle cli req.".to_string();
                                             may_ex = Some(CrankerRouterException::new(failed_reason));
                                             break; // @outer
                                         }

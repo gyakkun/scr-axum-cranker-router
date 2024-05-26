@@ -115,7 +115,6 @@ impl RouterSocket for RouterSocketV3 {
         ///     ctx.is_wss_writable_notify.notified().await;
         /// }
         /// ```
-
     }
 }
 
@@ -181,8 +180,8 @@ impl RequestContext {
         }
     }
 
-    fn write_it_maybe(self:&Self){
-        if self.is_wss_writable.load(Acquire) && !wsswr
+    fn write_it_maybe(self: &Self) {
+        // if self.is_wss_writable.load(Acquire) && !
     }
 }
 
@@ -535,6 +534,12 @@ impl WebSocketListener for WssExchangeV3 {
     }
 
     async fn on_binary(&self, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
+        // We may need a Notify / Channel here to tell this handler to `doneAndPullData` next chunk / ByteBuffer / Bytes
+        // on websocket
+        // Unlike Java, the binary_msg (bytebuffer) will be released once out of scope, so no `releaseBuffer`
+        // callback is not needed
+
+
         // FIXME: We convert binary_msg to Bytes to make use of its APIs for convenience
         //  but it means some operations are not cost-free
 
