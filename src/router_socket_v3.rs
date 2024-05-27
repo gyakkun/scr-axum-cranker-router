@@ -127,15 +127,15 @@ struct RequestContext {
     //  the outer class
     pub weak_outer_router_socket_v3: Weak<RouterSocketV3>,
     // wss tunnel
-    pub wss_received_ack_bytes: AtomicI32,
-    pub is_wss_sending: AtomicI32,
+    pub wss_tgt_connector_ack_bytes: AtomicI32,
+    pub wss_rtr_to_tgt_pending_ack_bytes: AtomicI32,
     // init true
     pub is_wss_writable: AtomicBool,
     // init false
     pub is_wss_writing: AtomicBool,
     // wssWriteCallbacks : ConcurrentLinkedQueue< > (), ???
-    pub wss_write_callback_tx: Sender<Result<WssWritableCallback, CrankerRouterException>>,
-    pub wss_write_callback_rx: Receiver<Result<WssWritableCallback, CrankerRouterException>>,
+    pub should_keep_read_from_cli_tx: Sender<Result<ShouldKeepReadFromCli, CrankerRouterException>>,
+    pub should_keep_read_from_cli_rx: Receiver<Result<ShouldKeepReadFromCli, CrankerRouterException>>,
     pub wss_on_binary_call_count: AtomicI64,
 
     pub request_id: i32,
@@ -167,15 +167,14 @@ struct RequestContext {
     pub pause_write_notify: Notify,
 
     // use to notify there's a target response available
-    pub should_have_response_notify: Notify,
     pub should_have_response: AtomicBool,
 }
 
 impl RequestContext {
-    fn acked_bytes(self: &Self, ack: i32) {
-        self.wss_received_ack_bytes.fetch_add(ack, SeqCst);
-        self.is_wss_sending.fetch_add(-ack, SeqCst);
-        if self.is_wss_sending.load(SeqCst) < WATER_MARK_LOW {
+    fn target_connector_ack_bytes(self: &Self, ack: i32) {
+        self.wss_tgt_connector_ack_bytes.fetch_add(ack, SeqCst);
+        self.wss_rtr_to_tgt_pending_ack_bytes.fetch_add(-ack, SeqCst);
+        if self.wss_rtr_to_tgt_pending_ack_bytes.load(SeqCst) < WATER_MARK_LOW {
             if let Ok(_) = self.is_wss_writable.compare_exchange(false, true, SeqCst, SeqCst) {
                 self.write_it_maybe();
             }
@@ -184,21 +183,21 @@ impl RequestContext {
 
     fn write_it_maybe(self: &Self) {
         // if self.is_wss_writable.load(SeqCst) && !
-        if self.is_wss_writable.load(SeqCst) && (!self.wss_write_callback_rx.is_empty()
-            && !self.wss_write_callback_rx.is_closed()
-            && !self.wss_write_callback_rx.is_terminated()
+        if self.is_wss_writable.load(SeqCst) && (!self.should_keep_read_from_cli_rx.is_empty()
+            && !self.should_keep_read_from_cli_rx.is_closed()
+            && !self.should_keep_read_from_cli_rx.is_terminated()
         ) {
             if let Ok(_) = self.is_wss_writing.compare_exchange(
                 false, true, SeqCst, SeqCst,
             ) {
                 while self.is_wss_writable.load(SeqCst)
-                    && (!self.wss_write_callback_rx.is_empty()
-                    && !self.wss_write_callback_rx.is_closed()
-                    && !self.wss_write_callback_rx.is_terminated()
+                    && (!self.should_keep_read_from_cli_rx.is_empty()
+                    && !self.should_keep_read_from_cli_rx.is_closed()
+                    && !self.should_keep_read_from_cli_rx.is_terminated()
                 ) {
                     // async or sync?
                     // try sync first
-                    if let Ok(cbrs) = self.wss_write_callback_rx.try_recv() {
+                    if let Ok(cbrs) = self.should_keep_read_from_cli_rx.try_recv() {
                         match cbrs {
                             Ok(cb) => {
                                 // let _ = cb.should_read_from_cli.compare_exchange(false, true, SeqCst, SeqCst);
@@ -387,7 +386,7 @@ impl WssExchangeV3 {
                 req_id, ctx.router_socket_id(), ctx.route())
             ))
         })?;
-        // FIXME: This try method returns error if can't SeqCst write lock immediately
+        // FIXME: This try method returns error if can't release write lock immediately
         // ctx.header_line_builder.try_write()
         //     .map(|mut hlb| {
         //         hlb.push_str(content.as_str())
@@ -427,14 +426,13 @@ impl WssExchangeV3 {
 
     pub async fn handle_window_update(&self, ctx: &RequestContext, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
         let window_update = bin.get_i32();
-        ctx.acked_bytes(window_update);
+        ctx.target_connector_ack_bytes(window_update);
         Ok(())
     }
 
 
     fn do_send_header_to_cli(&self, ctx: &RequestContext, full_content: String) -> Result<(), CrankerRouterException> {
         ctx.should_have_response.store(true, SeqCst);
-        ctx.should_have_response_notify.notify_waiters();
         if true { return Ok(()); }
 
         // FIXME: The following lines should move to the `async on_cli_req()` method of
@@ -686,7 +684,7 @@ impl RouterSocketV3 {
     }
 }
 
-struct WssWritableCallback {
+struct ShouldKeepReadFromCli {
     pub should_read_from_cli: AtomicBool,
     pub should_read_from_cli_notify: Notify,
 }
