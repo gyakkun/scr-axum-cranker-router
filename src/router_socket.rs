@@ -87,6 +87,7 @@ pub struct RouterSocketV1 {
     pub proxy_listeners: Vec<Arc<dyn ProxyListener>>,
     pub remote_address: SocketAddr,
     pub is_removed: Arc<AtomicBool>,
+    // To indicate potential out of order (e.g. binary (body) comes prior to text (header) , rarely possible)
     pub should_have_response: Arc<AtomicBool>,
     // from cli
     pub bytes_received: Arc<AtomicI64>,
@@ -123,17 +124,17 @@ pub struct RouterSocketV1 {
 }
 
 impl RouterSocketV1 {
-    pub fn new(route: String,
-               component_name: String,
-               router_socket_id: String,
-               websocket_farm: Weak<WebSocketFarm>,
-               connector_instance_id: String,
-               remote_address: SocketAddr,
-               underlying_wss_tx: SplitSink<WebSocket, Message>,
-               underlying_wss_rx: SplitStream<WebSocket>,
-               proxy_listeners: Vec<Arc<dyn ProxyListener>>,
-               idle_read_timeout_ms: i64,
-               ping_sent_after_no_write_for_ms: i64,
+    pub fn new_arc(route: String,
+                   component_name: String,
+                   router_socket_id: String,
+                   websocket_farm: Weak<WebSocketFarm>,
+                   connector_instance_id: String,
+                   remote_address: SocketAddr,
+                   underlying_wss_tx: SplitSink<WebSocket, Message>,
+                   underlying_wss_rx: SplitStream<WebSocket>,
+                   proxy_listeners: Vec<Arc<dyn ProxyListener>>,
+                   idle_read_timeout_ms: i64,
+                   ping_sent_after_no_write_for_ms: i64,
     ) -> Arc<Self> {
         let (tgt_res_hdr_tx, tgt_res_hdr_rx) = async_channel::unbounded();
         let (tgt_res_bdy_tx, tgt_res_bdy_rx) = async_channel::unbounded();
@@ -209,12 +210,12 @@ impl RouterSocketV1 {
                 underlying_wss_tx, wss_send_task_rx, err_chan_rx,
             ));
 
-        // Don't want to let registration handler wait so spawn these val assign somewhere
-        let arc_wrapped_clone = arc_rs.clone();
+        // Don't want to let registration handler wait so spawn these val assign in another task/thread
+        let arc_rs_clone = arc_rs.clone();
         tokio::spawn(async move {
-            let mut g = arc_wrapped_clone.wss_recv_pipe_join_handle.lock().await;
+            let mut g = arc_rs_clone.wss_recv_pipe_join_handle.lock().await;
             *g = Some(wss_recv_pipe_join_handle);
-            let mut g = arc_wrapped_clone.wss_send_task_join_handle.lock().await;
+            let mut g = arc_rs_clone.wss_send_task_join_handle.lock().await;
             *g = Some(wss_send_task_join_handle);
         });
 
@@ -280,7 +281,7 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
         tokio::select! {
             _ = rs.should_have_response_notify.notified() => {
                 trace!("30");
-                local_should_have_response = true;
+                local_should_have_response = rs.should_have_response.load(SeqCst);
             }
             opt_res_msg = underlying_wss_rx.next() => {
                 match opt_res_msg {
@@ -296,6 +297,8 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
                                 break; // @outer
                             }
                             Ok(msg) => {
+                                // mimic mu base websocket on anything so that the timeout on read
+                                // will be reset
                                 read_notifier.notify_waiters();
                                 match msg {
                                     Message::Text(txt) => {
@@ -851,8 +854,6 @@ impl RouterSocket for RouterSocketV1 {
                 "try to handle cli req in a is_removed router socket. router_socket_id={}", &self.router_socket_id
             )));
         }
-        self.should_have_response_notify.notify_waiters();
-        self.should_have_response.store(true, SeqCst);
         let current_time_millis = time_utils::current_time_millis();
         self.socket_wait_in_millis.fetch_add(current_time_millis, SeqCst);
         self.client_req_start_ts.store(current_time_millis, SeqCst);
@@ -889,6 +890,17 @@ impl RouterSocket for RouterSocketV1 {
 
         // 4. Send protocol header frame (slow, blocking)
         trace!("4");
+        // In theory, the target can respond once the client starts to send the request
+        // Ref:
+        //   check the golang http library issue:
+        //   1) https://github.com/golang/go/issues/57786
+        //   2) https://github.com/golang/go/issues/15527#issuecomment-218521262
+        //   3) https://lists.w3.org/Archives/Public/ietf-http-wg/2004JanMar/0041.html
+        //
+        //   RFC2616 - 8.2.2
+        //   https://datatracker.ietf.org/doc/html/rfc2616#section-8.2.2
+        self.should_have_response.store(true, SeqCst);
+        self.should_have_response_notify.notify_waiters();
         self.wss_send_task_tx.send(Message::Text(cranker_req)).await
             .map_err(|e| CrankerRouterException::new(format!(
                 "failed to send cli req hdr to tgt: {:?}", e
@@ -1003,7 +1015,7 @@ pub async fn harvest_router_socket(
     let weak_wsf = Arc::downgrade(&app_state.websocket_farm);
     if cranker_version == CRANKER_V_1_0 {
         let (wss_tx, wss_rx) = wss.split();
-        let rs = RouterSocketV1::new(
+        let rs = RouterSocketV1::new_arc(
             route.clone(),
             component_name.clone(),
             router_socket_id.clone(),
