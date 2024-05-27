@@ -76,6 +76,15 @@ pub(crate) trait RouterSocket: Send + Sync + RouteIdentify {
                            addr: &SocketAddr,
                            opt_body: Option<BodyDataStream>,
     ) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException>;
+
+    async fn send_ws_msg_to_uwss(self: Arc<Self>, message: Message) -> Result<(), CrankerRouterException>;
+    async fn terminate_all_conn(self: Arc<Self>, opt_crex: Option<CrankerRouterException>) -> Result<(), CrankerRouterException>;
+
+    fn inc_bytes_received_from_cli(&self, byte_count: i32);
+
+    fn try_provide_general_error(&self, opt_crex: Option<CrankerRouterException>) -> Result<(), CrankerRouterException>;
+
+    fn get_opt_arc_websocket_farm(&self) -> Option<Arc<WebSocketFarm>>;
 }
 
 pub struct ClientRequestIdentifier {
@@ -103,6 +112,7 @@ pub struct RouterSocketV1 {
     pub error: RwLock<Option<CrankerRouterException>>,
     pub client_req_start_ts: Arc<AtomicI64>,
     pub duration_millis: Arc<AtomicI64>,
+    // FIXME: Should move the definition to websocket listener, and make as a getter in the interface
     pub idle_read_timeout_ms: i64,
     pub ping_sent_after_no_write_for_ms: i64,
     /**** below should be private for inner routine ****/
@@ -206,10 +216,12 @@ impl RouterSocketV1 {
         let wss_recv_pipe_join_handle = tokio::spawn(
             pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
                 arc_rs.clone(),
+                arc_rs.clone(),
                 underlying_wss_rx,
             ));
         let wss_send_task_join_handle = tokio::spawn(
             pipe_and_queue_the_wss_send_task_and_handle_err_chan(
+                arc_rs.clone(),
                 arc_rs.clone(),
                 underlying_wss_tx, wss_send_task_rx, err_chan_rx,
             ));
@@ -250,12 +262,12 @@ impl Drop for RouterSocketV1 {
 }
 
 async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
-    rs: Arc<RouterSocketV1>,
+    rs: Arc<dyn RouterSocket>,
+    wss_listener: Arc<dyn WebSocketListener>,
     mut underlying_wss_rx: SplitStream<WebSocket>,
 ) {
-    let mut local_should_have_response = rs.should_have_response.load(SeqCst);
     let mut may_ex: Option<CrankerRouterException> = None;
-    let idle_read_timeout_ms = rs.idle_read_timeout_ms;
+    let idle_read_timeout_ms = wss_listener.get_idle_read_timeout_ms();
     let read_notifier = Arc::new(Notify::new());
     let read_notifier_clone = read_notifier.clone();
     let rs_weak = Arc::downgrade(&rs);
@@ -268,11 +280,11 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
                 Err(_) => {
                     // if strong arc(rs) already end of life then no need to send
                     if let Some(rs) = rs_weak.upgrade() {
-                        let _ = rs.wss_send_task_tx.send(Message::Close(Some(CloseFrame {
+                        let _ = rs.send_ws_msg_to_uwss(Message::Close(Some(CloseFrame {
                             code: 1001,
                             reason: Cow::from("timeout"),
                         }))).await;
-                        let _ = rs.on_error(CrankerRouterException::new("uwss read idle timeout".to_string()));
+                        let _ = wss_listener.on_error(CrankerRouterException::new("uwss read idle timeout".to_string()));
                     }
                     break; // @outer
                 }
@@ -281,64 +293,46 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
         }
     });
     // @outer
-    loop {
-        tokio::select! {
-            _ = rs.should_have_response_notify.notified() => {
-                trace!("30");
-                local_should_have_response = rs.should_have_response.load(SeqCst);
+    while let opt_res_msg = underlying_wss_rx.next().await {
+        match opt_res_msg {
+            None => {
+                break; // @outer
             }
-            opt_res_msg = underlying_wss_rx.next() => {
-                match opt_res_msg {
-                    None => {
+            Some(res_msg) => {
+                match res_msg {
+                    Err(wss_recv_err) => {
+                        may_ex = Some(CrankerRouterException::new(format!(
+                            "underlying wss recv err: {:?}.", wss_recv_err
+                        )));
                         break; // @outer
                     }
-                    Some(res_msg) => {
-                        match res_msg {
-                            Err(wss_recv_err) => {
-                                may_ex = Some(CrankerRouterException::new(format!(
-                                    "underlying wss recv err: {:?}.", wss_recv_err
-                                )));
-                                break; // @outer
+                    Ok(msg) => {
+                        // mimic mu base websocket on anything so that the timeout on read
+                        // will be reset
+                        read_notifier.notify_waiters();
+                        match msg {
+                            Message::Text(txt) => {
+                                trace!("31");
+                                may_ex = wss_listener.on_text(txt).await.err();
+                                trace!("32")
                             }
-                            Ok(msg) => {
-                                // mimic mu base websocket on anything so that the timeout on read
-                                // will be reset
-                                read_notifier.notify_waiters();
-                                match msg {
-                                    Message::Text(txt) => {
-                                        if !local_should_have_response {
-                                            let failed_reason = "recv txt before handle cli req.".to_string();
-                                            may_ex = Some(CrankerRouterException::new(failed_reason));
-                                            break; // @outer
-                                        }
-                                        trace!("31");
-                                        may_ex = rs.on_text(txt).await.err();
-                                        trace!("32")
-                                    }
-                                    Message::Binary(bin) => {
-                                        if !local_should_have_response {
-                                            let failed_reason = "recv bin before handle cli req.".to_string();
-                                            may_ex = Some(CrankerRouterException::new(failed_reason));
-                                            break;
-                                        }
-                                        may_ex = rs.on_binary(bin).await.err();
-                                    }
-                                    Message::Ping(ping_hello) => {
-                                        may_ex = rs.on_ping(ping_hello).await.err();
-                                    }
-                                    Message::Pong(pong_msg) => {
-                                        may_ex = rs.on_pong(pong_msg).await.err();
-                                    }
-                                    Message::Close(opt_clo_fra) => {
-                                        may_ex = rs.on_close(opt_clo_fra).await.err();
-                                        // break; // @outer
-                                    }
-                                }
-                                if let Some(ex) = may_ex {
-                                    may_ex = None;
-                                    let _ = rs.on_error(ex);
-                                }
+                            Message::Binary(bin) => {
+                                may_ex = wss_listener.on_binary(bin).await.err();
                             }
+                            Message::Ping(ping_hello) => {
+                                may_ex = wss_listener.on_ping(ping_hello).await.err();
+                            }
+                            Message::Pong(pong_msg) => {
+                                may_ex = wss_listener.on_pong(pong_msg).await.err();
+                            }
+                            Message::Close(opt_clo_fra) => {
+                                may_ex = wss_listener.on_close(opt_clo_fra).await.err();
+                                // break; // @outer
+                            }
+                        }
+                        if let Some(ex) = may_ex {
+                            may_ex = None;
+                            let _ = wss_listener.on_error(ex);
                         }
                     }
                 }
@@ -350,26 +344,27 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
 
     if let Some(ex) = may_ex {
         may_ex = None;
-        let _ = rs.on_error(ex);
+        let _ = wss_listener.on_error(ex);
     }
 
     // recv nothing from underlying wss, implicating it already closed
-    debug!("seems router socket normally closed. router_socket_id={}", rs.router_socket_id);
+    debug!("seems router socket normally closed. router_socket_id={}", rs.router_socket_id());
     if !rs.is_removed() {
         // means the is_removed is still false, which is not expected
-        let _ = rs.on_error(CrankerRouterException::new(
+        let _ = wss_listener.on_error(CrankerRouterException::new(
             "underlying wss already closed but is_removed=false after 50ms.".to_string()
         ));
     }
 }
 
 async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
-    rs: Arc<RouterSocketV1>,
+    rs: Arc<dyn RouterSocket>,
+    wss_listener: Arc<dyn WebSocketListener>,
     mut underlying_wss_tx: SplitSink<WebSocket, Message>,
     wss_send_task_rx: Receiver<Message>,
     err_chan_rx: Receiver<CrankerRouterException>,
 ) {
-    let ping_sent_after_no_write_for_ms = rs.ping_sent_after_no_write_for_ms;
+    let ping_sent_after_no_write_for_ms = wss_listener.get_ping_sent_after_no_write_for_ms();
     let write_notifier = Arc::new(Notify::new());
     let write_notifier_clone = write_notifier.clone();
     let rs_weak = Arc::downgrade(&rs);
@@ -382,7 +377,7 @@ async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
                 Err(_) => {
                     if let Some(rs) = rs_weak.upgrade() {
                         trace!("80");
-                        let _ = rs.wss_send_task_tx.send(Message::Ping("ping".as_bytes().to_vec())).await;
+                        let _ = rs.send_ws_msg_to_uwss(Message::Ping("ping".as_bytes().to_vec())).await;
                         trace!("83");
                     } else {
                         trace!("84");
@@ -401,10 +396,8 @@ async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
         tokio::select! {
             Ok(crex) = err_chan_rx.recv() => {
                 if !rs.is_removed() {
-                    error!("err_chan_rx received err: {:?}. router_socket_id={}", crex.reason.as_str(), rs.router_socket_id);
-                    let _ = rs.error.try_write().map(|mut s|
-                        s.replace(crex.clone())
-                    );
+                    error!("err_chan_rx received err: {:?}. router_socket_id={}", crex.reason.as_str(), rs.router_socket_id());
+                    let _ = rs.try_provide_general_error(Some(crex.clone()));
                 }
                 // 0. Stop receiving message, flush underlying wss tx
                 let _ = wss_send_task_rx.close();
@@ -425,15 +418,12 @@ async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
                 let _ = underlying_wss_tx.close();
                 // 2. Remove bad router_socket
                 if !rs.is_removed() {
-                    if let Some(wsf) = rs.websocket_farm.upgrade() {
-                        wsf.remove_router_socket_in_background(rs.route.clone(), rs.router_socket_id.clone(), rs.is_removed.clone());
+                    if let Some(wsf) = rs.get_opt_arc_websocket_farm() {
+                        wsf.remove_router_socket_in_background(rs.route(), rs.router_socket_id(), rs.get_is_removed_arc_atomic_bool().clone());
                     }
                 }
                 // 3. Close the res to cli
-                let _ = rs.tgt_res_hdr_tx.send(Err(crex.clone())).await;
-                let _ = rs.tgt_res_bdy_tx.send(Err(crex.clone())).await;
-                rs.tgt_res_hdr_tx.close();
-                rs.tgt_res_bdy_tx.close();
+                let _ = rs.terminate_all_conn(Some(crex.clone()));
                 break;
             }
             recv_res = wss_send_task_rx.recv() => {
@@ -442,28 +432,28 @@ async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
                         write_notifier.notify_waiters();
                         let may_err_msg = msg.err_msg_for_uwss();
                         if let Message::Binary(bin) = msg {
-                            rs.bytes_received.fetch_add(bin.len().try_into().unwrap(),SeqCst);
+                            rs.inc_bytes_received_from_cli(bin.len().try_into().unwrap());
                             if let Err(e) = underlying_wss_tx.send(Message::Binary(bin)).await {
-                                let _ = rs.on_error(CrankerRouterException::new(format!("{may_err_msg} : {:?}", e)));
+                                let _ = wss_listener.on_error(CrankerRouterException::new(format!("{may_err_msg} : {:?}", e)));
                             }
                         } else if let Message::Text(txt) = msg {
-                            rs.bytes_received.fetch_add(txt.len().try_into().unwrap(),SeqCst);
+                            rs.inc_bytes_received_from_cli(txt.len().try_into().unwrap());
                             if let Err(e) = underlying_wss_tx.send(Message::Text(txt)).await {
-                                let _ = rs.on_error(CrankerRouterException::new(format!("{may_err_msg} : {:?}", e)));
+                                let _ = wss_listener.on_error(CrankerRouterException::new(format!("{may_err_msg} : {:?}", e)));
                             }
                         } else if let Message::Close(opt_clo_fra) = msg {
                             trace!("85");
                             if let Err(e) = underlying_wss_tx.send(Message::Close(opt_clo_fra)).await {
                                 trace!("86");
                                 // here failing is expected when is_removed
-                                let _ = rs.on_error(CrankerRouterException::new(format!("{may_err_msg} : {:?}", e)));
+                                let _ = wss_listener.on_error(CrankerRouterException::new(format!("{may_err_msg} : {:?}", e)));
                             }
                             trace!("87");
                         } else if let Err(e) = underlying_wss_tx.send(msg).await {
                             // ping / pong
                             if !rs.is_removed() {
                                 trace!("88");
-                                let _ = rs.on_error(CrankerRouterException::new(format!("{may_err_msg} : {:?}", e)));
+                                let _ = wss_listener.on_error(CrankerRouterException::new(format!("{may_err_msg} : {:?}", e)));
                             } else {
                                 trace!("89");
                                 let _ = underlying_wss_tx.close().await;
@@ -472,7 +462,7 @@ async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
                         }
                     }
                     Err(recv_err) => { // Indicates the wss_send_task_rx is EMPTY AND CLOSED
-                        debug!("the wss_send_task_rx is EMPTY AND CLOSED. router_socket_id={}", rs.router_socket_id);
+                        debug!("the wss_send_task_rx is EMPTY AND CLOSED. router_socket_id={}", rs.router_socket_id());
                         break;
                     }
                 }
@@ -603,10 +593,18 @@ impl RSv1ClientSideResponseSender {
 #[async_trait]
 impl WebSocketListener for RouterSocketV1 {
     async fn on_text(&self, txt: String) -> Result<(), CrankerRouterException> {
+        if !self.should_have_response.load(SeqCst) {
+            let failed_reason = "recv txt before handle cli req.".to_string();
+            return Err(CrankerRouterException::new(failed_reason));
+        }
         self.cli_side_res_sender.send_target_response_header_text_to_client(txt).await
     }
 
     async fn on_binary(&self, bin: Vec<u8>) -> Result<(), CrankerRouterException> {
+        if !self.should_have_response.load(SeqCst) {
+            let failed_reason = "recv bin before handle cli req.".to_string();
+            return Err(CrankerRouterException::new(failed_reason));
+        }
         // slightly different from mu cranker router that mu will judge the current state of
         // websocket / should_have_response (hasResponse) first
         self.binary_frame_received.fetch_add(1, SeqCst);
@@ -750,6 +748,9 @@ impl WebSocketListener for RouterSocketV1 {
         //     }
         // }
     }
+
+    fn get_idle_read_timeout_ms(&self) -> i64 { self.idle_read_timeout_ms }
+    fn get_ping_sent_after_no_write_for_ms(&self) -> i64 { self.ping_sent_after_no_write_for_ms }
 }
 
 impl RouteIdentify for RouterSocketV1 {
@@ -985,6 +986,45 @@ impl RouterSocket for RouterSocketV1 {
             .map_err(|ie| CrankerRouterException::new(
                 format!("failed to build body: {:?}", ie)
             ))
+    }
+
+    async fn send_ws_msg_to_uwss(self: Arc<Self>, message: Message) -> Result<(), CrankerRouterException> {
+        let _ = self.wss_send_task_tx.send(message).await.map_err(|e| {
+            let failed_reason = format!("failed to send ws msg to wss_send_task_tx: {:?}", e);
+            error!("{}", failed_reason);
+            CrankerRouterException::new(failed_reason);
+        })?;
+        Ok(())
+    }
+
+    async fn terminate_all_conn(self: Arc<Self>, opt_crex: Option<CrankerRouterException>) -> Result<(), CrankerRouterException> {
+        let crex = opt_crex.unwrap_or(CrankerRouterException::new("ex occurs and should terminate all conn.".to_string()));
+        let _ = self.tgt_res_hdr_tx.send(Err(crex.clone())).await;
+        let _ = self.tgt_res_bdy_tx.send(Err(crex.clone())).await;
+        self.tgt_res_hdr_tx.close();
+        self.tgt_res_bdy_tx.close();
+        Ok(())
+    }
+
+    fn inc_bytes_received_from_cli(&self, byte_count: i64) {
+        self.bytes_received.fetch_add(byte_count, SeqCst);
+    }
+
+    fn try_provide_general_error(&self, opt_crex: Option<CrankerRouterException>) -> Result<(), CrankerRouterException> {
+        self.error.try_write().map(|mut s| {
+            *s = opt_crex;
+        }).map_err(|e| {
+            let failed_reason = format!(
+                "failed at try_provide_general_error. router_socket_id = {} : {:?}",
+                self.router_socket_id(), e
+            );
+            error!("{}", failed_reason);
+            CrankerRouterException::new(failed_reason)
+        })
+    }
+
+    fn get_opt_arc_websocket_farm(&self) -> Option<Arc<WebSocketFarm>> {
+        self.websocket_farm.upgrade()
     }
 }
 

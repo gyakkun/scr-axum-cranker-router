@@ -28,4 +28,7 @@ pub trait WebSocketListener: Send + Sync {
         error!("error: {:?}", err);
         Ok(())
     }
+
+    fn get_idle_read_timeout_ms(&self) -> i64;
+    fn get_ping_sent_after_no_write_for_ms(&self) -> i64;
 }
