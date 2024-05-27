@@ -59,7 +59,7 @@ pub(crate) trait RouterSocket: Send + Sync + RouteIdentify {
 
     fn cranker_version(&self) -> &'static str;
 
-    fn raise_completion_event(&self) -> Result<(), CrankerRouterException> {
+    fn raise_completion_event(&self, opt_cli_req_id: Option<ClientRequestIdentifier>) -> Result<(), CrankerRouterException> {
         Ok(())
     }
 
@@ -75,7 +75,11 @@ pub(crate) trait RouterSocket: Send + Sync + RouteIdentify {
                            headers: &HeaderMap,
                            addr: &SocketAddr,
                            opt_body: Option<BodyDataStream>,
-    ) -> Result<Response<Body>, CrankerRouterException>;
+    ) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException>;
+}
+
+pub struct ClientRequestIdentifier {
+    pub request_id: i32,
 }
 
 pub struct RouterSocketV1 {
@@ -714,7 +718,7 @@ impl WebSocketListener for RouterSocketV1 {
         }
         trace!("49");
 
-        let may_ex = self.raise_completion_event();
+        let may_ex = self.raise_completion_event(None);
         total_err = exceptions::compose_ex(total_err, may_ex);
         if total_err.is_some() {
             return Err(total_err.unwrap());
@@ -728,7 +732,7 @@ impl WebSocketListener for RouterSocketV1 {
         // The actual heavy burden is done in `pipe_and_queue_the_wss_send_task_and_handle_err_chan`
         self.err_chan_tx.send_blocking(err)
             .map(|ok| {
-                let _ = self.raise_completion_event();
+                let _ = self.raise_completion_event(None);
                 ok
             })
             .map_err(|se| CrankerRouterException::new(format!(
@@ -815,7 +819,7 @@ impl RouterSocket for RouterSocketV1 {
         return CRANKER_V_1_0;
     }
 
-    fn raise_completion_event(&self) -> Result<(), CrankerRouterException> {
+    fn raise_completion_event(&self, opt_cli_req_id: Option<ClientRequestIdentifier>) -> Result<(), CrankerRouterException> {
         if let Some(wsf) = self.websocket_farm.upgrade() {
             wsf.remove_router_socket_in_background(
                 self.route.clone(), self.router_socket_id.clone(), self.is_removed.clone(),

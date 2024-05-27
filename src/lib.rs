@@ -257,17 +257,17 @@ impl CrankerRouter {
                     &addr,
                     opt_body,
                 ).await {
-                    Ok(res) => {
+                    Ok((res, opt_cli_req_id)) => {
                         debug!("recv tgt res bdy from rs!");
                         if !res.status().is_success() && !rs_clone.is_removed() {
-                            let _ = rs_clone.raise_completion_event();
+                            let _ = rs_clone.raise_completion_event(opt_cli_req_id);
                         }
                         return res;
                     }
                     Err(e) => {
                         debug!("recv err from rs, expect tgt res bdy: {:?}", e);
                         if !rs_clone.is_removed() {
-                            let _ = rs_clone.raise_completion_event();
+                            let _ = rs_clone.raise_completion_event(None);
                         }
                         return e.into_response();
                     }
