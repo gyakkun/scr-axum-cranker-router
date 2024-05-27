@@ -2,7 +2,7 @@ use std::fmt::format;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
-use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
+use std::sync::atomic::Ordering::SeqCst;
 
 use async_channel::{Receiver, Sender};
 use axum::async_trait;
@@ -13,7 +13,7 @@ use axum_core::body::{Body, BodyDataStream};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dashmap::DashMap;
 use futures::{SinkExt, TryFutureExt};
-use futures::stream::{SplitSink, SplitStream};
+use futures::stream::{FusedStream, SplitSink, SplitStream};
 use log::{debug, error, warn};
 use tokio::sync::{Mutex, Notify, RwLock};
 
@@ -134,6 +134,8 @@ struct RequestContext {
     // init false
     pub is_wss_writing: AtomicBool,
     // wssWriteCallbacks : ConcurrentLinkedQueue< > (), ???
+    pub wss_write_callback_tx: Sender<Result<WssWritableCallback, CrankerRouterException>>,
+    pub wss_write_callback_rx: Receiver<Result<WssWritableCallback, CrankerRouterException>>,
     pub wss_on_binary_call_count: AtomicI64,
 
     pub request_id: i32,
@@ -173,7 +175,7 @@ impl RequestContext {
     fn acked_bytes(self: &Self, ack: i32) {
         self.wss_received_ack_bytes.fetch_add(ack, SeqCst);
         self.is_wss_sending.fetch_add(-ack, SeqCst);
-        if self.is_wss_sending.load(Acquire) < WATER_MARK_LOW {
+        if self.is_wss_sending.load(SeqCst) < WATER_MARK_LOW {
             if let Ok(_) = self.is_wss_writable.compare_exchange(false, true, SeqCst, SeqCst) {
                 self.write_it_maybe();
             }
@@ -181,7 +183,39 @@ impl RequestContext {
     }
 
     fn write_it_maybe(self: &Self) {
-        // if self.is_wss_writable.load(Acquire) && !
+        // if self.is_wss_writable.load(SeqCst) && !
+        if self.is_wss_writable.load(SeqCst) && (!self.wss_write_callback_rx.is_empty()
+            && !self.wss_write_callback_rx.is_closed()
+            && !self.wss_write_callback_rx.is_terminated()
+        ) {
+            if let Ok(_) = self.is_wss_writing.compare_exchange(
+                false, true, SeqCst, SeqCst,
+            ) {
+                while self.is_wss_writable.load(SeqCst)
+                    && (!self.wss_write_callback_rx.is_empty()
+                    && !self.wss_write_callback_rx.is_closed()
+                    && !self.wss_write_callback_rx.is_terminated()
+                ) {
+                    // async or sync?
+                    // try sync first
+                    if let Ok(cbrs) = self.wss_write_callback_rx.try_recv() {
+                        match cbrs {
+                            Ok(cb) => {
+                                // let _ = cb.should_read_from_cli.compare_exchange(false, true, SeqCst, SeqCst);
+                                cb.should_read_from_cli.store(true, SeqCst);
+                                cb.should_read_from_cli_notify.notify_waiters();
+                            }
+                            Err(err) => {
+                                error!("received error during write it maybe: {:?}", err);
+                                break;
+                            }
+                        }
+                    }
+                }
+                self.is_wss_writing.store(false, SeqCst);
+                self.write_it_maybe();
+            }
+        }
     }
 }
 
@@ -224,19 +258,19 @@ impl ProxyInfo for RequestContext {
     }
 
     fn duration_millis(&self) -> i64 {
-        return self.duration_millis.load(Acquire);
+        return self.duration_millis.load(SeqCst);
     }
 
     fn bytes_received(&self) -> i64 {
-        return self.from_client_bytes.load(Acquire);
+        return self.from_client_bytes.load(SeqCst);
     }
 
     fn bytes_sent(&self) -> i64 {
-        return self.to_client_bytes.load(Acquire);
+        return self.to_client_bytes.load(SeqCst);
     }
 
     fn response_body_frames(&self) -> i64 {
-        return self.wss_on_binary_call_count.load(Acquire);
+        return self.wss_on_binary_call_count.load(SeqCst);
     }
 
     fn error_if_any(&self) -> Option<CrankerRouterException> {
@@ -353,7 +387,7 @@ impl WssExchangeV3 {
                 req_id, ctx.router_socket_id(), ctx.route())
             ))
         })?;
-        // FIXME: This try method returns error if can't acquire write lock immediately
+        // FIXME: This try method returns error if can't SeqCst write lock immediately
         // ctx.header_line_builder.try_write()
         //     .map(|mut hlb| {
         //         hlb.push_str(content.as_str())
@@ -377,7 +411,7 @@ impl WssExchangeV3 {
         }
         let window_update_message = window_update_message(req_id, byte_len);
         let _ = self.wss_send_task_tx.send(Message::Binary(window_update_message.into_vec())).await;
-        // no mu callbacks needed here ? (doneAndPullData, releaseBuffer)
+        // no mu callbacks needed here ? (doneAndPullData, SeqCstBuffer)
         Ok(())
     }
 
@@ -394,12 +428,12 @@ impl WssExchangeV3 {
     pub async fn handle_window_update(&self, ctx: &RequestContext, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
         let window_update = bin.get_i32();
         ctx.acked_bytes(window_update);
-        todo!()
+        Ok(())
     }
 
 
     fn do_send_header_to_cli(&self, ctx: &RequestContext, full_content: String) -> Result<(), CrankerRouterException> {
-        ctx.should_have_response.store(true, Release);
+        ctx.should_have_response.store(true, SeqCst);
         ctx.should_have_response_notify.notify_waiters();
         if true { return Ok(()); }
 
@@ -536,8 +570,12 @@ impl WebSocketListener for WssExchangeV3 {
     async fn on_binary(&self, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
         // We may need a Notify / Channel here to tell this handler to `doneAndPullData` next chunk / ByteBuffer / Bytes
         // on websocket
-        // Unlike Java, the binary_msg (bytebuffer) will be released once out of scope, so no `releaseBuffer`
+        // Unlike Java, the binary_msg (bytebuffer) will be SeqCstd once out of scope, so no `SeqCstBuffer`
         // callback is not needed
+        // It turns out that mu-cranker-router calls `doneAndPullData` immediately when one binary
+        // is arrived.
+        // The flow control happens in the direction where tgt->router->cli
+        // this should be controlled and triggered in `while(body.next())` in `on_client_req` method
 
 
         // FIXME: We convert binary_msg to Bytes to make use of its APIs for convenience
@@ -646,6 +684,11 @@ impl RouterSocketV3 {
     ) -> Arc<Self> {
         todo!()
     }
+}
+
+struct WssWritableCallback {
+    pub should_read_from_cli: AtomicBool,
+    pub should_read_from_cli_notify: Notify,
 }
 
 #[cfg(test)]
