@@ -23,7 +23,7 @@ use crate::cranker_protocol_response::CrankerProtocolResponse;
 use crate::exceptions::CrankerRouterException;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
-use crate::router_socket::{RouteIdentify, RouterSocket};
+use crate::router_socket::{ClientRequestIdentifier, RouteIdentify, RouterSocket};
 use crate::websocket_farm::WebSocketFarm;
 use crate::websocket_listener::WebSocketListener;
 
@@ -332,7 +332,7 @@ impl WssExchangeV3 {
         let len = bin.remaining();
         if len == 0 {
             if is_end_stream {
-                let _ =  self.notify_client_request_close(ctx, 1000/*ws status code*/, None).await;
+                let _ = self.notify_client_request_close(ctx, 1000/*ws status code*/, None).await;
             }
             return Ok(());
         }
@@ -512,15 +512,61 @@ impl WssExchangeV3 {
             // also send a crex to ctx.tgt_res_bdy_tx (will be wrapped
             // into stream body)
             if code == 1011 {
-                let failed_reason = "ws code 1011. should res to cli 502";
-                let ex = CrankerRouterException::new(failed_reason.to_string());
-                let _ = ctx.tgt_res_hdr_tx.send(Err(ex.clone())).await;
-                let _ = ctx.tgt_res_bdy_tx.send(Err(ex)).await;
+                self.cli_fail_prior_to_tgt_res(
+                    ctx,
+                    Some("ws code 1011. should res to cli 502".to_string()),
+                    Some(502),
+                ).await;
+            } else if code == 1008 {
+                self.cli_fail_prior_to_tgt_res(
+                    ctx,
+                    "ws code 1008. should res to cli 400".to_string(),
+                    Some(400),
+                ).await;
             }
-
         }
 
+        if !ctx.tgt_res_hdr_rx.is_closed() || !ctx.tgt_res_bdy_rx.is_closed() {
+            if code == 1000 {
+                // ALL GOOD
+            } else {
+                error!("closing client request early due to cranker wss connection close with status code={}, reason={}", code, reason);
+                let ex = CrankerRouterException::new(format!(
+                    "upstream server error: ws code={}, reason={}", code, reason
+                ));
+                // I think here same as asyncHandle.complete(exception) in mu cranker router
+                // FIXME: It occurs that the client browser will hang if ex sent here
+                // FIXME: 240528 what the heck is this in v1, it doesn't do anything
+                //  but defines an not invoked future!!!1
+                let _ = async { let _ = ctx.tgt_res_hdr_tx.send(Err(ex.clone())).await; };
+                let _ = async { let _ = ctx.tgt_res_bdy_tx.send(Err(ex.clone())).await; };
+            }
+            ctx.tgt_res_hdr_rx.close();
+            ctx.tgt_res_bdy_rx.close();
+        }
+
+        // TODO: total_err??? v1
+        let may_ex = rs3.raise_completion_event(Some(ClientRequestIdentifier {
+            request_id: ctx.request_id,
+        }));
+        if may_ex.is_err() {
+            return may_ex;
+        }
         Ok(())
+    }
+
+    async fn cli_fail_prior_to_tgt_res(
+        &self,
+        ctx: &RequestContext,
+        opt_reason: Option<String>,
+        opt_status_code_to_cli: Option<u16>,
+    ) {
+        let failed_reason = opt_reason.unwrap_or("unknown early failed reason".to_string());
+        let failed_code = opt_status_code_to_cli.unwrap_or(500);
+        // TODO: Make crex support define status code
+        let ex = CrankerRouterException::new(failed_reason.to_string());
+        let _ = ctx.tgt_res_hdr_tx.send(Err(ex.clone())).await;
+        let _ = ctx.tgt_res_bdy_tx.send(Err(ex)).await;
     }
 
     fn notify_client_request_error(&self, ctx: &RequestContext, crex: CrankerRouterException) {
