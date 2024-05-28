@@ -2,7 +2,7 @@ use std::fmt::format;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
-use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::Ordering::{Acquire, SeqCst};
 
 use async_channel::{Receiver, Sender};
 use axum::async_trait;
@@ -332,7 +332,7 @@ impl WssExchangeV3 {
         let len = bin.remaining();
         if len == 0 {
             if is_end_stream {
-                let _ =  self.notify_client_request_close(ctx, 1000/*ws status code*/).await;
+                let _ =  self.notify_client_request_close(ctx, 1000/*ws status code*/, None).await;
             }
             return Ok(());
         }
@@ -340,7 +340,7 @@ impl WssExchangeV3 {
         ctx.wss_on_binary_call_count.fetch_add(1, SeqCst);
         if self.is_upper_rs3_removed() {
             if is_end_stream {
-                let _ = self.notify_client_request_close(ctx, 1000/*ws status code*/).await;
+                let _ = self.notify_client_request_close(ctx, 1000/*ws status code*/, None).await;
             }
             return Err(CrankerRouterException::new(format!(
                 "recv bin msg from connector but router socket already removed. req_id={}, flags={}", req_id, flags
@@ -356,7 +356,7 @@ impl WssExchangeV3 {
                 // TODO: I think we should notify_xxx at the end of [s]loop[/s] no loop.
                 // here should be fine I think
                 if is_end_stream {
-                    let _ = self.notify_client_request_close(ctx, 1000).await;
+                    let _ = self.notify_client_request_close(ctx, 1000, None).await;
                 }
                 ok
             })
@@ -406,7 +406,7 @@ impl WssExchangeV3 {
             self.do_send_header_to_cli(ctx, full_content)?;
         }
         if is_stream_end {
-            let _ = self.notify_client_request_close(ctx, 1000).await; // TODO: What does 1000 mean?
+            let _ = self.notify_client_request_close(ctx, 1000, None).await; // TODO: What does 1000 mean?
         }
         let window_update_message = window_update_message(req_id, byte_len);
         let _ = self.wss_send_task_tx.send(Message::Binary(window_update_message.into_vec())).await;
@@ -490,7 +490,7 @@ impl WssExchangeV3 {
     }
 
     // pretty like on_close in RouterSocketV1
-    async fn notify_client_request_close(&self, ctx: &RequestContext, ws_status_code: u16) -> Result<(), CrankerRouterException> {
+    async fn notify_client_request_close(&self, ctx: &RequestContext, ws_status_code: u16, opt_reason: Option<String>) -> Result<(), CrankerRouterException> {
         // TODO: make this upgrade a function call
         let rs3 = self.weak_outer_router_socket_v3.upgrade().ok_or(
             CrankerRouterException::new(format!(
@@ -501,9 +501,24 @@ impl WssExchangeV3 {
         rs3.proxy_listeners.iter().for_each(|pl| {
             let _ = pl.on_response_body_chunk_received(ctx);
         });
+        let code = ws_status_code;
+        let reason = opt_reason.unwrap_or("closed by router".to_string());
 
-        if ctx.tgt_res_bdy_tx
+        if ctx.should_have_response.load(SeqCst)
+            && ctx.bytes_received().load(Acquire) == 0 {
+            // since here nothing has been sent to cli yet
+            // we can send a crex to the ctx.tgt_res_hdr_tx
+            // and in case at this moment it's going to response,
+            // also send a crex to ctx.tgt_res_bdy_tx (will be wrapped
+            // into stream body)
+            if code == 1011 {
+                let failed_reason = "ws code 1011. should res to cli 502";
+                let ex = CrankerRouterException::new(failed_reason.to_string());
+                let _ = ctx.tgt_res_hdr_tx.send(Err(ex.clone())).await;
+                let _ = ctx.tgt_res_bdy_tx.send(Err(ex)).await;
+            }
 
+        }
 
         Ok(())
     }
