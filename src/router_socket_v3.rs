@@ -332,7 +332,7 @@ impl WssExchangeV3 {
         let len = bin.remaining();
         if len == 0 {
             if is_end_stream {
-                self.notify_client_request_close(ctx, 1000/*ws status code*/);
+                let _ =  self.notify_client_request_close(ctx, 1000/*ws status code*/).await;
             }
             return Ok(());
         }
@@ -340,7 +340,7 @@ impl WssExchangeV3 {
         ctx.wss_on_binary_call_count.fetch_add(1, SeqCst);
         if self.is_upper_rs3_removed() {
             if is_end_stream {
-                self.notify_client_request_close(ctx, 1000/*ws status code*/);
+                let _ = self.notify_client_request_close(ctx, 1000/*ws status code*/).await;
             }
             return Err(CrankerRouterException::new(format!(
                 "recv bin msg from connector but router socket already removed. req_id={}, flags={}", req_id, flags
@@ -352,11 +352,11 @@ impl WssExchangeV3 {
         //  try to do zero-copy here!
         //  We should probably use `bin.into_vec()` here that seems cost-free
         ctx.tgt_res_bdy_tx.send(Ok(bin.to_vec())).await
-            .map(|ok| {
+            .map(|ok| async {
                 // TODO: I think we should notify_xxx at the end of [s]loop[/s] no loop.
                 // here should be fine I think
                 if is_end_stream {
-                    self.notify_client_request_close(ctx, 1000);
+                    let _ = self.notify_client_request_close(ctx, 1000).await;
                 }
                 ok
             })
@@ -406,7 +406,7 @@ impl WssExchangeV3 {
             self.do_send_header_to_cli(ctx, full_content)?;
         }
         if is_stream_end {
-            self.notify_client_request_close(ctx, 1000); // TODO: What does 1000 mean?
+            let _ = self.notify_client_request_close(ctx, 1000).await; // TODO: What does 1000 mean?
         }
         let window_update_message = window_update_message(req_id, byte_len);
         let _ = self.wss_send_task_tx.send(Message::Binary(window_update_message.into_vec())).await;
@@ -490,8 +490,22 @@ impl WssExchangeV3 {
     }
 
     // pretty like on_close in RouterSocketV1
-    fn notify_client_request_close(&self, ctx: &RequestContext, ws_status_code: u16) {
-        todo!()
+    async fn notify_client_request_close(&self, ctx: &RequestContext, ws_status_code: u16) -> Result<(), CrankerRouterException> {
+        // TODO: make this upgrade a function call
+        let rs3 = self.weak_outer_router_socket_v3.upgrade().ok_or(
+            CrankerRouterException::new(format!(
+                "failed to get upper router socket v3 arc when notify_client_request_close.req id = {} , router socket id = {} , route = {}",
+                ctx.request_id, ctx.router_socket_id(), ctx.route()
+            )))?;
+
+        rs3.proxy_listeners.iter().for_each(|pl| {
+            let _ = pl.on_response_body_chunk_received(ctx);
+        });
+
+        if ctx.tgt_res_bdy_tx
+
+
+        Ok(())
     }
 
     fn notify_client_request_error(&self, ctx: &RequestContext, crex: CrankerRouterException) {
