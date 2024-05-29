@@ -112,7 +112,6 @@ pub struct RouterSocketV1 {
     pub error: RwLock<Option<CrankerRouterException>>,
     pub client_req_start_ts: Arc<AtomicI64>,
     pub duration_millis: Arc<AtomicI64>,
-    // FIXME: Should move the definition to websocket listener, and make as a getter in the interface
     pub idle_read_timeout_ms: i64,
     pub ping_sent_after_no_write_for_ms: i64,
     /**** below should be private for inner routine ****/

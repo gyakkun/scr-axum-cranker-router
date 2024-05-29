@@ -630,16 +630,21 @@ pub struct CrankerRouterConfig {
     supported_cranker_protocols: HashMap<&'static str, &'static str>,
 }
 
+const DEF_IDLE_READ_TIMEOUT_MS: i64 = 60_000;
+const DEF_ROUTES_KEEP_TIME_MILLIS: i64 = 2 * 60 * 60 * 1_000; // 2 hours
+const DEF_PING_SENT_AFTER_NO_WRITE_FOR_MS: i64 = 10_000;
+const DEF_CONNECTOR_MAX_WAIT_TIME_MILLIS: i64 = 5_000;
+
 impl CrankerRouterBuilder {
     pub fn new() -> CrankerRouterBuilder {
         Self {
             discard_client_forwarded_headers: false,
             send_legacy_forwarded_headers: false,
             via_name: "scr-axum".to_string(),
-            idle_read_timeout_ms: 60_000,
-            routes_keep_time_millis: 2 * 60 * 60 * 1_000, // 2hours
-            ping_sent_after_no_write_for_ms: 10_000,
-            connector_max_wait_time_millis: 5_000,
+            idle_read_timeout_ms: DEF_IDLE_READ_TIMEOUT_MS,
+            routes_keep_time_millis: DEF_ROUTES_KEEP_TIME_MILLIS,
+            ping_sent_after_no_write_for_ms: DEF_PING_SENT_AFTER_NO_WRITE_FOR_MS,
+            connector_max_wait_time_millis: DEF_CONNECTOR_MAX_WAIT_TIME_MILLIS,
             do_not_proxy_headers: REPRESSED_HEADERS.clone(),
             registration_ip_validator: Arc::new(AllowAll::new()),
             proxy_listeners: vec![],

@@ -17,14 +17,14 @@ use futures::stream::{FusedStream, SplitSink, SplitStream};
 use log::{debug, error, warn};
 use tokio::sync::{Mutex, Notify, RwLock};
 
-use crate::{ACRState, CRANKER_V_3_0};
+use crate::{ACRState, CRANKER_V_3_0, DEF_IDLE_READ_TIMEOUT_MS, DEF_PING_SENT_AFTER_NO_WRITE_FOR_MS};
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::cranker_protocol_response::CrankerProtocolResponse;
 use crate::exceptions::{CrankerRouterException, CREXKind};
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
 use crate::router_socket::{ClientRequestIdentifier, RouteIdentify, RouterSocket};
-use crate::websocket_farm::WebSocketFarm;
+use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
 
 const _MSG_TYPE_LEN_IN_BYTES: usize = 1;
@@ -56,6 +56,9 @@ pub struct RouterSocketV3 {
     pub remote_address: SocketAddr,
 
     pub is_removed: Arc<AtomicBool>,
+
+    pub idle_read_timeout_ms: i64,
+    pub ping_sent_after_no_write_for_ms: i64,
 
     // The only place to store strong Arc of RequestContext
     pub context_map: DashMap<i32, Arc<RequestContext>>,
@@ -794,6 +797,18 @@ impl WebSocketListener for WssExchangeV3 {
             .map_err(|se| CrankerRouterException::new(format!(
                 "rare ex that failed to send error to err chan: {:?}", se
             )))
+    }
+
+    fn get_idle_read_timeout_ms(&self) -> i64 {
+        self.weak_outer_router_socket_v3.upgrade()
+            .map(|i| i.idle_read_timeout_ms)
+            .unwrap_or(DEF_IDLE_READ_TIMEOUT_MS)
+    }
+
+    fn get_ping_sent_after_no_write_for_ms(&self) -> i64 {
+        self.weak_outer_router_socket_v3.upgrade()
+            .map(|i| i.ping_sent_after_no_write_for_ms)
+            .unwrap_or(DEF_PING_SENT_AFTER_NO_WRITE_FOR_MS)
     }
 }
 
