@@ -8,7 +8,7 @@ use async_channel::{Receiver, Sender};
 use axum::async_trait;
 use axum::extract::OriginalUri;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use axum::http::{HeaderMap, Method, Request, Response, Version};
+use axum::http::{HeaderMap, Method, Request, Response, StatusCode, Version};
 use axum_core::body::{Body, BodyDataStream};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dashmap::DashMap;
@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, Notify, RwLock};
 use crate::{ACRState, CRANKER_V_3_0};
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::cranker_protocol_response::CrankerProtocolResponse;
-use crate::exceptions::CrankerRouterException;
+use crate::exceptions::{CrankerRouterException, CREXKind};
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
 use crate::router_socket::{ClientRequestIdentifier, RouteIdentify, RouterSocket};
@@ -142,6 +142,8 @@ struct RequestContext {
     // MuRequest request,
     // MuResponse response,
     // AsyncHandle asyncHandle,
+    pub req_method: Method,
+    pub req_uri: OriginalUri,
     pub tgt_res_hdr_tx: Sender<Result<String, CrankerRouterException>>,
     pub tgt_res_hdr_rx: Receiver<Result<String, CrankerRouterException>>,
     pub tgt_res_bdy_tx: Sender<Result<Vec<u8>, CrankerRouterException>>,
@@ -420,7 +422,7 @@ impl WssExchangeV3 {
         self.notify_client_request_error(ctx, CrankerRouterException::new(format!(
             "stream closed by connector, error code: {}, error message: {}, req id = {} , router socket id = {} , route = {}",
             error_code, error_message, req_id, ctx.router_socket_id(), ctx.route()
-        )));
+        ))).await;
         Ok(())
     }
 
@@ -451,7 +453,7 @@ impl WssExchangeV3 {
             } else {
                 return Err(CrankerRouterException::new(format!(
                     "failed to invoke on before responding to client of proxy listeners because the router socket v3 no longer exists, req id = {} , router socket id = {} , route = {}",
-                    ctx.request_id, ctx.router_socket_id(), ctx.route()
+                    ctx.request_id(), ctx.router_socket_id(), ctx.route()
                 )));
             }
         }
@@ -495,7 +497,7 @@ impl WssExchangeV3 {
         let rs3 = self.weak_outer_router_socket_v3.upgrade().ok_or(
             CrankerRouterException::new(format!(
                 "failed to get upper router socket v3 arc when notify_client_request_close.req id = {} , router socket id = {} , route = {}",
-                ctx.request_id, ctx.router_socket_id(), ctx.route()
+                ctx.request_id(), ctx.router_socket_id(), ctx.route()
             )))?;
 
         rs3.proxy_listeners.iter().for_each(|pl| {
@@ -504,8 +506,7 @@ impl WssExchangeV3 {
         let code = ws_status_code;
         let reason = opt_reason.unwrap_or("closed by router".to_string());
 
-        if ctx.should_have_response.load(SeqCst)
-            && ctx.bytes_received().load(Acquire) == 0 {
+        if Self::cli_req_not_start_to_send_yet(ctx) {
             // since here nothing has been sent to cli yet
             // we can send a crex to the ctx.tgt_res_hdr_tx
             // and in case at this moment it's going to response,
@@ -520,7 +521,7 @@ impl WssExchangeV3 {
             } else if code == 1008 {
                 self.cli_fail_prior_to_tgt_res(
                     ctx,
-                    "ws code 1008. should res to cli 400".to_string(),
+                    Some("ws code 1008. should res to cli 400".to_string()),
                     Some(400),
                 ).await;
             }
@@ -547,12 +548,17 @@ impl WssExchangeV3 {
 
         // TODO: total_err??? v1
         let may_ex = rs3.raise_completion_event(Some(ClientRequestIdentifier {
-            request_id: ctx.request_id,
+            request_id: ctx.request_id(),
         }));
         if may_ex.is_err() {
             return may_ex;
         }
         Ok(())
+    }
+
+    fn cli_req_not_start_to_send_yet(ctx: &RequestContext) -> bool {
+        ctx.should_have_response.load(SeqCst)
+            && ctx.bytes_received().load(Acquire) == 0
     }
 
     async fn cli_fail_prior_to_tgt_res(
@@ -569,10 +575,60 @@ impl WssExchangeV3 {
         let _ = ctx.tgt_res_bdy_tx.send(Err(ex)).await;
     }
 
-    fn notify_client_request_error(&self, ctx: &RequestContext, crex: CrankerRouterException) {
+    async fn notify_client_request_error(&self, ctx: &RequestContext, crex: CrankerRouterException) {
         // TODO: Here need to judge if the crex is Timeout Exception or not
         //  It would be good to define our own ErrorKind with `thiserror` crate ASAP!!!
-        todo!()
+        let _ = ctx.error.try_write().map(|mut g| {
+            g.replace(crex.clone())
+        });
+        if crex.clone().opt_err_kind.is_some_and(|ck| {
+            #[allow(unreachable_patterns)]
+            match ck {
+                CREXKind::TIMEOUT => { true }
+                _ => { false }
+            }
+        }) {
+            if Self::cli_req_not_start_to_send_yet(ctx) {
+                let _ = ctx.tgt_res_hdr_tx.send(Err(crex.clone())).await;
+                let _ = ctx.tgt_res_bdy_tx.send(Err(crex.clone())).await;
+            } else {
+                let failed_reason = "closing cli req early due to timeout";
+                error!("{} , req id = {} , router socket id = {} , route = {}",
+                 failed_reason, ctx.request_id(), ctx.router_socket_id(), ctx.route());
+                let crex = crex.clone()
+                    .with_status_code(StatusCode::GATEWAY_TIMEOUT.as_u16())
+                    .append_str(failed_reason)
+                    .prepend_str("504 Gateway Timeout");
+                let _ = ctx.tgt_res_hdr_tx.send(Err(crex.clone())).await;
+                let _ = ctx.tgt_res_bdy_tx.send(Err(crex.clone())).await;
+            }
+        } else {
+            if Self::cli_req_not_start_to_send_yet(ctx) {
+                let crex = crex.clone()
+                    .with_status_code(StatusCode::BAD_GATEWAY.as_u16())
+                    .prepend_str("502 Bad Gateway");
+                let _ = ctx.tgt_res_hdr_tx.send(Err(crex.clone())).await;
+                let _ = ctx.tgt_res_bdy_tx.send(Err(crex.clone())).await;
+            } else {
+                let res_str = "closing cli req early due to cranker wss conn err";
+                let failed_reason = format!("{} {}", res_str, crex.reason);
+                error!("{} , req id = {} , router socket id = {} , route = {}",
+                 failed_reason, ctx.request_id(), ctx.router_socket_id(), ctx.route());
+                let crex = crex.clone().append_str(res_str);
+                let _ = ctx.tgt_res_hdr_tx.send(Err(crex.clone())).await;
+                let _ = ctx.tgt_res_bdy_tx.send(Err(crex.clone())).await;
+            }
+        }
+        if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
+            let _ = rs3.raise_completion_event(Some(ClientRequestIdentifier {
+                request_id: ctx.request_id()
+            }));
+            rs3.context_map.remove(ctx.request_id());
+        }
+        warn!(
+            "stream error: req id = {} , router socket id = {} , route = {}, target = {} {}, ex = {}",
+            ctx.request_id(), ctx.router_socket_id(), ctx.route(), ctx.req_method, ctx.req_uri, crex
+        );
     }
 }
 

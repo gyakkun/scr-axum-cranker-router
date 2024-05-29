@@ -2,41 +2,104 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use axum::body::Body;
-
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 #[derive(Debug, Clone)]
 pub struct CrankerRouterException {
     pub reason: String,
+    pub opt_status_code: Option<u16>,
+    pub(crate) opt_err_kind: Option<CREXKind>
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub(crate) enum CREXKind {
+    TIMEOUT
 }
 
 impl CrankerRouterException {
     pub fn new(reason: String) -> Self {
-        Self { reason }
+        Self {
+            reason,
+            opt_status_code: None,
+            opt_err_kind: None,
+        }
+    }
+
+    pub fn with_status_code(self, status_code: u16) -> Self {
+        Self {
+            reason: self.reason,
+            opt_status_code: Some(status_code),
+            opt_err_kind: self.opt_err_kind,
+        }
+    }
+
+    pub fn with_err_kind(self, err_kind: CREXKind) -> Self {
+        Self {
+            reason: self.reason,
+            opt_status_code: self.opt_status_code,
+            opt_err_kind: Some(err_kind),
+        }
     }
 
     pub fn plus(self, another: CrankerRouterException) -> Self {
         let mut reason = self.reason;
         reason.push_str(another.reason.as_str());
         Self {
-            reason
+            reason,
+            opt_err_kind: self.opt_err_kind.or(another.opt_err_kind),
+            opt_status_code: self.opt_status_code.or(another.opt_status_code)
         }
     }
 
-    pub fn plus_string(self, further_reason: String) -> Self {
+    pub fn append_string(self, further_reason: String) -> Self {
         let mut reason = self.reason;
         reason.push_str(further_reason.as_str());
         Self {
-            reason
+            reason,
+            opt_err_kind: self.opt_err_kind,
+            opt_status_code: self.opt_status_code
+        }
+    }
+
+    pub fn append_str(self, further_reason: &str) -> Self {
+        let mut reason = self.reason;
+        reason.push_str(further_reason);
+        Self {
+            reason,
+            opt_err_kind: self.opt_err_kind,
+            opt_status_code: self.opt_status_code
         }
     }
 
     pub fn plus_str(self, further_reason: &str) -> Self {
-        let mut reason = self.reason;
-        reason.push_str(further_reason);
+        self.append_str(further_reason)
+    }
+
+    pub fn plus_string(self, further_reason: String) -> Self {
+        self.append_string(further_reason)
+    }
+
+    pub fn prepend_str(self, prior_reason: &str) -> Self {
+        let mut reason = prior_reason.to_string();
+        reason.push(' ');
+        reason.push_str(self.reason.as_str());
         Self {
-            reason
+            reason,
+            opt_err_kind: self.opt_err_kind,
+            opt_status_code: self.opt_status_code,
+        }
+    }
+
+    pub fn prepend_string(self, prior_reason: String) -> Self {
+        let mut reason = prior_reason.clone();
+        reason.push(' ');
+        reason.push_str(self.reason.as_str());
+        Self {
+            reason,
+            opt_err_kind: self.opt_err_kind,
+            opt_status_code: self.opt_status_code,
         }
     }
 }
@@ -52,7 +115,7 @@ impl Error for CrankerRouterException {}
 impl IntoResponse for CrankerRouterException {
     fn into_response(self) -> Response {
         Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .status(self.opt_status_code.unwrap_or(StatusCode::INTERNAL_SERVER_ERROR.as_u16()))
             .body(Body::new(self.reason))
             .unwrap()
     }
