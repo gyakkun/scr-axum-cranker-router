@@ -2,7 +2,7 @@ use std::fmt::format;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
-use std::sync::atomic::Ordering::{Acquire, SeqCst};
+use std::sync::atomic::Ordering::{Acquire, Release, SeqCst};
 
 use async_channel::{Receiver, Sender};
 use axum::async_trait;
@@ -24,6 +24,7 @@ use crate::exceptions::{CrankerRouterException, CREXKind};
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
 use crate::router_socket::{ClientRequestIdentifier, RouteIdentify, RouterSocket};
+use crate::router_socket_v3::StreamState::Open;
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
 
@@ -44,6 +45,7 @@ const REQ_CTX_INVALID_OUTER_RS3_MSG: String = "(invalid router socket v3)".to_st
 
 pub struct RouterSocketV3 {
     pub route: String,
+    // pub domain:String,
     pub component_name: String,
     pub router_socket_id: String,
     pub web_socket_farm: Weak<WebSocketFarm>,
@@ -62,9 +64,10 @@ pub struct RouterSocketV3 {
 
     // The only place to store strong Arc of RequestContext
     pub context_map: DashMap<i32, Arc<RequestContext>>,
+    // idMaker
     pub req_id_generator: AtomicI32,
 
-    pub wss_exchange: Arc<WssExchangeV3>,
+    pub wss_exchange: Arc<RwLock<WssExchangeV3>>,
 }
 
 
@@ -100,8 +103,35 @@ impl RouterSocket for RouterSocketV3 {
         return CRANKER_V_3_0;
     }
 
-    async fn on_client_req(self: Arc<Self>, app_state: ACRState, http_version: &Version, method: &Method, original_uri: &OriginalUri, headers: &HeaderMap, addr: &SocketAddr, opt_body: Option<BodyDataStream>) -> Result<Response<Body>, CrankerRouterException> {
-        todo!()
+    async fn on_client_req(self: Arc<Self>,
+                           app_state: ACRState,
+                           http_version: &Version,
+                           method: &Method,
+                           original_uri: &OriginalUri,
+                           headers: &HeaderMap,
+                           addr: &SocketAddr,
+                           opt_body: Option<BodyDataStream>,
+    ) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException> {
+        // 0. if is removed then should not run into this method (fast)
+        if self.is_removed() {
+            return Err(CrankerRouterException::new(format!(
+                "try to handle cli req in a is_removed router socket. router_socket_id={}", &self.router_socket_id
+            )));
+        }
+        let req_id = self.req_id_generator.fetch_add(1, SeqCst);
+        let cli_req_id = Some(ClientRequestIdentifier { request_id: req_id });
+        let ctx = Arc::new(RequestContext::new(
+            Arc::downgrade(&self),
+            req_id,
+            method.clone(),
+            original_uri.clone(),
+        ));
+        let old_v = self.context_map.insert(req_id, ctx);
+        assert!(old_v.is_none());
+
+
+        todo!();
+        Err(CrankerRouterException::new("".to_string()))
 
         // For the response part
         // We need a latch / Notify here to let this function know if the corresponding request context
@@ -121,7 +151,10 @@ impl RouterSocket for RouterSocketV3 {
     }
 
     async fn send_ws_msg_to_uwss(self: Arc<Self>, message: Message) -> Result<(), CrankerRouterException> {
-        self.wss_exchange.underlying_wss_tx.send(message).await.map_err(|e| {
+        self.wss_exchange.read().await
+            .underlying_wss_tx
+            .send(message).await
+            .map_err(|e| {
             let failed_reason = format!("failed to send_ws_msg_to_uwss: {:?}", e);
             CrankerRouterException::new(failed_reason)
         })
@@ -172,8 +205,12 @@ struct RequestContext {
     // To mimic RouterSocketV3 in Java, we need a weak reference to
     //  the outer class
     pub weak_outer_router_socket_v3: Weak<RouterSocketV3>,
-    // wss tunnel
+
+    /* wss tunnel related */
+
+    // wssReceivedAckBytes
     pub wss_tgt_connector_ack_bytes: AtomicI32,
+    // isWssSending
     pub wss_rtr_to_tgt_pending_ack_bytes: AtomicI32,
     // init true
     pub is_wss_writable: AtomicBool,
@@ -188,8 +225,10 @@ struct RequestContext {
     // MuRequest request,
     // MuResponse response,
     // AsyncHandle asyncHandle,
+
     pub req_method: Method,
     pub req_uri: OriginalUri,
+
     pub tgt_res_hdr_tx: Sender<Result<String, CrankerRouterException>>,
     pub tgt_res_hdr_rx: Receiver<Result<String, CrankerRouterException>>,
     pub tgt_res_bdy_tx: Sender<Result<Vec<u8>, CrankerRouterException>>,
@@ -207,18 +246,76 @@ struct RequestContext {
     pub state: RwLock<StreamState>,
     pub header_line_builder: RwLock<String>,
 
-    pub wss_exchange: Arc<WssExchangeV3>,
-
-    // use notify to flow control???
+    // use notify to flow control
+    // init true
     pub can_write: AtomicBool,
     pub can_write_notify: Notify,
     pub pause_write_notify: Notify,
 
     // use to notify there's a target response available
+    // init false
     pub should_have_response: AtomicBool,
 }
 
 impl RequestContext {
+    fn new(
+        router_socket_v3: Weak<RouterSocketV3>,
+        req_id: i32,
+        req_method: Method,
+        req_uri: OriginalUri,
+    ) -> Self {
+        let (should_keep_read_from_cli_tx, should_keep_read_from_cli_rx) = async_channel::unbounded();
+        let (tgt_res_hdr_tx, tgt_res_hdr_rx) = async_channel::unbounded();
+        let (tgt_res_bdy_tx, tgt_res_bdy_rx) = async_channel::unbounded();
+        RequestContext {
+            // To mimic RouterSocketV3 in Java, we need a weak reference to
+            //  the outer class
+            weak_outer_router_socket_v3: router_socket_v3,
+            // wss tunnel
+            wss_tgt_connector_ack_bytes: AtomicI32::new(0),
+            wss_rtr_to_tgt_pending_ack_bytes: AtomicI32::new(0),
+            // init true
+            is_wss_writable: AtomicBool::new(true),
+            // init false
+            is_wss_writing: AtomicBool::new(false),
+            // wssWriteCallbacks : ConcurrentLinkedQueue< > (), ???
+            should_keep_read_from_cli_tx,
+            should_keep_read_from_cli_rx,
+            wss_on_binary_call_count: AtomicI64::new(0),
+
+            request_id: req_id,
+            // MuRequest request,
+            // MuResponse response,
+            // AsyncHandle asyncHandle,
+            req_method,
+            req_uri,
+            tgt_res_hdr_tx,
+            tgt_res_hdr_rx,
+            tgt_res_bdy_tx,
+            tgt_res_bdy_rx,
+
+            // client
+            from_client_bytes: AtomicI64::new(0),
+            to_client_bytes: AtomicI64::new(0),
+
+            duration_millis: AtomicI64::new(0),
+            error: RwLock::new(None),
+            // init false
+            is_rst_stream_sent: AtomicBool::new(false),
+            // init OPEN
+            state: RwLock::new(Open),
+            header_line_builder: RwLock::new(String::new()),
+
+            // use notify to flow control???
+            can_write: AtomicBool::new(true),
+            can_write_notify: Notify::new(),
+            pause_write_notify: Notify::new(),
+
+            // use to notify there's a target response available
+            should_have_response: AtomicBool::new(false),
+        }
+    }
+
     fn target_connector_ack_bytes(self: &Self, ack: i32) {
         self.wss_tgt_connector_ack_bytes.fetch_add(ack, SeqCst);
         self.wss_rtr_to_tgt_pending_ack_bytes.fetch_add(-ack, SeqCst);
@@ -351,7 +448,7 @@ impl StreamState {
 }
 
 struct WssExchangeV3 {
-    weak_outer_router_socket_v3: Weak<RouterSocketV3>,
+    pub(crate) weak_outer_router_socket_v3: Weak<RouterSocketV3>,
 
     // FIXME: We copy the route and router socket id in case
     //  of the outer router socket v3 is being removed
@@ -375,6 +472,36 @@ struct WssExchangeV3 {
 
 // Handle binary msg
 impl WssExchangeV3 {
+    pub fn new(
+        weak_outer_router_socket_v3: Weak<RouterSocketV3>,
+        route: String,
+        router_socket_id: String,
+        underlying_wss_tx: SplitSink<WebSocket, Message>,
+        underlying_wss_rx: SplitStream<WebSocket>,
+    ) -> Self {
+        let (err_chan_tx, err_chan_rx) = async_channel::unbounded();
+        let (wss_send_task_tx, wss_send_task_rx) = async_channel::unbounded();
+        Self {
+            weak_outer_router_socket_v3,
+
+            // FIXME: We copy the route and router socket id in case
+            //  of the outer router socket v3 is being removed
+            route,
+            router_socket_id,
+            underlying_wss_tx,
+            underlying_wss_rx,
+
+            err_chan_tx,
+            err_chan_rx,
+
+            wss_send_task_tx,
+            wss_send_task_rx,
+            // recv a msg from uwss, and dispatch to exact req context
+            wss_recv_dispatcher: DashMap::new(),
+        }
+    }
+
+
     pub async fn handle_data(&self, ctx: &RequestContext, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
         let is_end_stream = judge_is_stream_end_from_flags(flags);
         let len = bin.remaining();
@@ -863,20 +990,56 @@ impl WebSocketListener for WssExchangeV3 {
 }
 
 impl RouterSocketV3 {
+    #[allow(unused_variables)]
     pub fn new(route: String,
+               // TODO: Reserved for future enhancement,
+               //  currently domain is not in actual use even in mu-cranker-router
                domain: String,
                component_name: String,
                router_socket_id: String,
-               websocket_farm: Weak<WebSocketFarm>,
-               connector_instance_id: String,
+               web_socket_farm: Weak<WebSocketFarm>,
+               connector_id: String,
                remote_address: SocketAddr,
                underlying_wss_tx: SplitSink<WebSocket, Message>,
                underlying_wss_rx: SplitStream<WebSocket>,
                proxy_listeners: Vec<Arc<dyn ProxyListener>>,
+               discard_client_forwarded_headers: bool,
+               send_legacy_forwarded_headers: bool,
+               via_value: String,
                idle_read_timeout_ms: i64,
                ping_sent_after_no_write_for_ms: i64,
-    ) -> Arc<Self> {
-        todo!()
+    ) -> Self {
+        Self {
+            route: route.clone(),
+            component_name,
+            router_socket_id: router_socket_id.clone(),
+            web_socket_farm,
+            connector_id,
+            proxy_listeners,
+            discard_client_forwarded_headers,
+            send_legacy_forwarded_headers,
+            via_value,
+            // private Runnable onReadyForAction;
+            remote_address,
+
+            is_removed: Arc::new(AtomicBool::new(false)),
+
+            idle_read_timeout_ms,
+            ping_sent_after_no_write_for_ms,
+
+            // The only place to store strong Arc of RequestContext
+            context_map: DashMap::new(),
+            // idMaker
+            req_id_generator: AtomicI32::new(0),
+
+            wss_exchange: Arc::new(RwLock::new(WssExchangeV3::new(
+                Weak::new(), // TODO: Replace it with downgraded self
+                route,
+                router_socket_id,
+                underlying_wss_tx,
+                underlying_wss_rx,
+            ))),
+        }
     }
 }
 

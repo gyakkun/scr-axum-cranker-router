@@ -1052,8 +1052,7 @@ pub async fn harvest_router_socket(
     domain: String, // V3 only
     route: String,
     addr: SocketAddr,
-)
-{
+) -> Result<(), CrankerRouterException> {
     let router_socket_id = Uuid::new_v4().to_string();
     let weak_wsf = Arc::downgrade(&app_state.websocket_farm);
     if cranker_version == CRANKER_V_1_0 {
@@ -1077,7 +1076,7 @@ pub async fn harvest_router_socket(
             .add_router_socket_in_background(rs);
     } else if cranker_version == CRANKER_V_3_0 {
         let (wss_tx, wss_rx) = wss.split();
-        let rs = RouterSocketV3::new(
+        let rs = Arc::new(RouterSocketV3::new(
             route.clone(),
             domain.clone(),
             component_name.clone(),
@@ -1088,9 +1087,23 @@ pub async fn harvest_router_socket(
             wss_tx,
             wss_rx,
             app_state.config.proxy_listeners.clone(),
+            app_state.config.discard_client_forwarded_headers,
+            app_state.config.send_legacy_forwarded_headers,
+            app_state.config.via_name.clone(),
             app_state.config.idle_read_timeout_ms,
             app_state.config.ping_sent_after_no_write_for_ms,
-        );
+        ));
+        // FIXME: This is not graceful. Can we do better?
+        rs.wss_exchange.try_write().map(|mut g| {
+            g.weak_outer_router_socket_v3 = Arc::downgrade(&rs);
+        }).map_err(|e| {
+            let failed_reason = format!(
+                "failed to replace and downgrade wss_exchange.weak_outer_router_socket_v3, route = {} , router_socket_id = {}", route, router_socket_id
+            );
+            CrankerRouterException::new(
+                failed_reason
+            )
+        })?;
         info!("Connector (v3) registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
         app_state
             .websocket_farm
@@ -1099,11 +1112,7 @@ pub async fn harvest_router_socket(
         error!("not supported cranker version: {}", cranker_version);
         let _ = wss.close();
     }
-    {
-        // Prepare for some counter
-        // let write_guard = state.clone();
-        // let _ = write_guard.counter.fetch_add(1, SeqCst);
-    }
+    Ok(())
 }
 
 trait MessageIdentifier {
