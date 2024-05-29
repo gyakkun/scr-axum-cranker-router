@@ -270,6 +270,7 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
     let read_notifier = Arc::new(Notify::new());
     let read_notifier_clone = read_notifier.clone();
     let rs_weak = Arc::downgrade(&rs);
+    let wss_listener_clone = wss_listener.clone();
     let read_timeout_handle = tokio::spawn(async move {
         loop { // @outer
             match tokio::time::timeout(
@@ -283,7 +284,7 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
                             code: 1001,
                             reason: Cow::from("timeout"),
                         }))).await;
-                        let _ = wss_listener.on_error(CrankerRouterException::new("uwss read idle timeout".to_string()));
+                        let _ = wss_listener_clone.on_error(CrankerRouterException::new("uwss read idle timeout".to_string()));
                     }
                     break; // @outer
                 }
@@ -851,7 +852,7 @@ impl RouterSocket for RouterSocketV1 {
                            cli_headers: &HeaderMap,
                            addr: &SocketAddr,
                            opt_body: Option<BodyDataStream>,
-    ) -> Result<Response<Body>, CrankerRouterException> {
+    ) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException> {
         // 0. if is removed then should not run into this method (fast)
         if self.is_removed() {
             return Err(CrankerRouterException::new(format!(
@@ -982,6 +983,9 @@ impl RouterSocket for RouterSocketV1 {
         let stream_body = Body::from_stream(wrapped_stream);
         res_builder
             .body(stream_body)
+            .map(|body|{
+                (body, None)
+            })
             .map_err(|ie| CrankerRouterException::new(
                 format!("failed to build body: {:?}", ie)
             ))
@@ -991,7 +995,7 @@ impl RouterSocket for RouterSocketV1 {
         let _ = self.wss_send_task_tx.send(message).await.map_err(|e| {
             let failed_reason = format!("failed to send ws msg to wss_send_task_tx: {:?}", e);
             error!("{}", failed_reason);
-            CrankerRouterException::new(failed_reason);
+            CrankerRouterException::new(failed_reason)
         })?;
         Ok(())
     }
@@ -1005,8 +1009,8 @@ impl RouterSocket for RouterSocketV1 {
         Ok(())
     }
 
-    fn inc_bytes_received_from_cli(&self, byte_count: i64) {
-        self.bytes_received.fetch_add(byte_count, SeqCst);
+    fn inc_bytes_received_from_cli(&self, byte_count: i32) {
+        self.bytes_received.fetch_add(byte_count.try_into().unwrap(), SeqCst);
     }
 
     fn try_provide_general_error(&self, opt_crex: Option<CrankerRouterException>) -> Result<(), CrankerRouterException> {
@@ -1052,7 +1056,7 @@ pub async fn harvest_router_socket(
     domain: String, // V3 only
     route: String,
     addr: SocketAddr,
-) -> Result<(), CrankerRouterException> {
+) {
     let router_socket_id = Uuid::new_v4().to_string();
     let weak_wsf = Arc::downgrade(&app_state.websocket_farm);
     if cranker_version == CRANKER_V_1_0 {
@@ -1094,16 +1098,20 @@ pub async fn harvest_router_socket(
             app_state.config.ping_sent_after_no_write_for_ms,
         ));
         // FIXME: This is not graceful. Can we do better?
-        rs.wss_exchange.try_write().map(|mut g| {
+        let success = rs.wss_exchange.try_write().map(|mut g| {
             g.weak_outer_router_socket_v3 = Arc::downgrade(&rs);
         }).map_err(|e| {
             let failed_reason = format!(
                 "failed to replace and downgrade wss_exchange.weak_outer_router_socket_v3, route = {} , router_socket_id = {}", route, router_socket_id
             );
+            error!("{}",failed_reason);
             CrankerRouterException::new(
                 failed_reason
             )
-        })?;
+        });
+        if success.is_err() {
+            return;
+        }
         info!("Connector (v3) registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
         app_state
             .websocket_farm
@@ -1112,7 +1120,6 @@ pub async fn harvest_router_socket(
         error!("not supported cranker version: {}", cranker_version);
         let _ = wss.close();
     }
-    Ok(())
 }
 
 trait MessageIdentifier {
