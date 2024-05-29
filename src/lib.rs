@@ -240,6 +240,12 @@ impl CrankerRouter {
         match socket_fut {
             Ok(rs) => {
                 debug!("Get a socket router_socket_id={}, cranker_ver={}", rs.router_socket_id(), rs.cranker_version());
+
+                // FIXME: Put back v3 socket for reuse. Any better idea?
+                if rs.cranker_version() == CRANKER_V_3_0 {
+                    app_state.websocket_farm.clone().add_router_socket_in_background(rs.clone());
+                }
+
                 let mut opt_body = None;
                 if has_body {
                     let boxed_body_byte_stream

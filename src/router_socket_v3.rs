@@ -119,6 +119,49 @@ impl RouterSocket for RouterSocketV3 {
         /// }
         /// ```
     }
+
+    async fn send_ws_msg_to_uwss(self: Arc<Self>, message: Message) -> Result<(), CrankerRouterException> {
+        self.wss_exchange.underlying_wss_tx.send(message).await.map_err(|e| {
+            let failed_reason = format!("failed to send_ws_msg_to_uwss: {:?}", e);
+            CrankerRouterException::new(failed_reason)
+        })
+    }
+
+    async fn terminate_all_conn(self: Arc<Self>, opt_crex: Option<CrankerRouterException>) -> Result<(), CrankerRouterException> {
+        let crex = opt_crex.unwrap_or(CrankerRouterException::new(
+            "terminating all connections on cranker router v3 for unknown reason".to_string()
+        ));
+        self.context_map.iter().for_each(|i| {
+            let req_id = i.key();
+            let ctx = i.value().as_ref();
+            debug!("terminating req id = {}", req_id);
+            // FIXME: #DL1 since here we are holding the ref multi here, the remove
+            //  inside notify_client_request_error may deadlock
+            self.wss_exchange.notify_client_request_error(ctx, crex.clone())
+        });
+        // TODO: Better method to remove all ?
+        self.context_map.retain(|_, _| { return false });
+        Ok(())
+    }
+
+    fn inc_bytes_received_from_cli(&self, _: i32) {
+        // In V3 it offloads to RequestContext
+        // Need to do nothing
+    }
+
+    fn try_provide_general_error(&self, opt_crex: Option<CrankerRouterException>) -> Result<(), CrankerRouterException> {
+        self.context_map.iter().for_each(|i| {
+            let ctx = i.value();
+            let _ = ctx.error.try_write().map(|mut s| {
+                *s = opt_crex;
+            }); // ignore failure
+        });
+        Ok(())
+    }
+
+    fn get_opt_arc_websocket_farm(&self) -> Option<Arc<WebSocketFarm>> {
+        self.web_socket_farm.upgrade()
+    }
 }
 
 
@@ -518,13 +561,13 @@ impl WssExchangeV3 {
             if code == 1011 {
                 self.cli_fail_prior_to_tgt_res(
                     ctx,
-                    Some("ws code 1011. should res to cli 502".to_string()),
+                    Some("ws code 1011".to_string()),
                     Some(502),
                 ).await;
             } else if code == 1008 {
                 self.cli_fail_prior_to_tgt_res(
                     ctx,
-                    Some("ws code 1008. should res to cli 400".to_string()),
+                    Some("ws code 1008".to_string()),
                     Some(400),
                 ).await;
             }
@@ -549,14 +592,18 @@ impl WssExchangeV3 {
             ctx.tgt_res_bdy_rx.close();
         }
 
-        // TODO: total_err??? v1
         let may_ex = rs3.raise_completion_event(Some(ClientRequestIdentifier {
             request_id: ctx.request_id(),
         }));
-        if may_ex.is_err() {
-            return may_ex;
+        return match may_ex {
+            Ok(_) => { Ok(()) }
+            Err(crex) => {
+                let _ = ctx.error.try_write().map(|mut g| {
+                    g.replace(crex.clone());
+                });
+                crex
+            }
         }
-        Ok(())
     }
 
     fn cli_req_not_start_to_send_yet(ctx: &RequestContext) -> bool {
@@ -573,7 +620,9 @@ impl WssExchangeV3 {
         let failed_reason = opt_reason.unwrap_or("unknown early failed reason".to_string());
         let failed_code = opt_status_code_to_cli.unwrap_or(500);
         // TODO: Make crex support define status code
-        let ex = CrankerRouterException::new(failed_reason.to_string());
+        let ex = CrankerRouterException::new(
+            failed_reason.to_string()
+        ).with_status_code(failed_code);
         let _ = ctx.tgt_res_hdr_tx.send(Err(ex.clone())).await;
         let _ = ctx.tgt_res_bdy_tx.send(Err(ex)).await;
     }
@@ -626,7 +675,8 @@ impl WssExchangeV3 {
             let _ = rs3.raise_completion_event(Some(ClientRequestIdentifier {
                 request_id: ctx.request_id()
             }));
-            rs3.context_map.remove(ctx.request_id());
+            // FIXME: Check #DL1
+            // rs3.context_map.remove(ctx.request_id());
         }
         warn!(
             "stream error: req id = {} , router socket id = {} , route = {}, target = {} {}, ex = {}",
