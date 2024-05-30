@@ -1,4 +1,4 @@
-use std::fmt::format;
+use std::fmt::{format, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::string::FromUtf8Error;
 use std::sync::{Arc, Weak};
@@ -22,6 +22,7 @@ use crate::{ACRState, CRANKER_V_3_0, DEF_IDLE_READ_TIMEOUT_MS, DEF_PING_SENT_AFT
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::cranker_protocol_response::CrankerProtocolResponse;
 use crate::exceptions::{CrankerRouterException, CREXKind};
+use crate::http_utils::set_target_request_headers;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
 use crate::router_socket::{ClientRequestIdentifier, RouteIdentify, RouterSocket};
@@ -68,7 +69,16 @@ pub struct RouterSocketV3 {
     // idMaker
     pub req_id_generator: AtomicI32,
 
-    pub wss_exchange: Arc<RwLock<WssExchangeV3>>,
+    // START WSS EXCHANGE PART
+    underlying_wss_tx: SplitSink<WebSocket, Message>,
+    underlying_wss_rx: SplitStream<WebSocket>,
+
+    err_chan_tx: Sender<CrankerRouterException>,
+    err_chan_rx: Receiver<CrankerRouterException>,
+
+    wss_send_task_tx: Sender<Message>,
+    wss_send_task_rx: Receiver<Message>,
+    // END OF WSS EXCHANGE PART
 }
 
 
@@ -127,8 +137,23 @@ impl RouterSocket for RouterSocketV3 {
             method.clone(),
             original_uri.clone(),
         ));
-        let old_v = self.context_map.insert(req_id, ctx);
+        let old_v = self.context_map.insert(req_id, ctx.clone());
         assert!(old_v.is_none());
+
+        // 1. Cli header processing (fast)
+        let mut hdr_to_tgt = HeaderMap::new();
+        set_target_request_headers(
+            headers, &mut hdr_to_tgt, &app_state, http_version, addr, original_uri,
+        );
+
+        // 2. No text based request line is needed, Skip
+
+        for i in self.proxy_listeners.iter() {
+            i.on_before_proxy_to_target(ctx.as_ref(), &mut hdr_to_tgt)?;
+        }
+
+        // 3. No text based end marker is needed
+        // but we need to decide the frame type and flag
 
 
         // todo!();
@@ -152,13 +177,7 @@ impl RouterSocket for RouterSocketV3 {
     }
 
     async fn send_ws_msg_to_uwss(self: Arc<Self>, message: Message) -> Result<(), CrankerRouterException> {
-        self.wss_exchange.write().await
-            .underlying_wss_tx
-            .send(message).await
-            .map_err(|e| {
-            let failed_reason = format!("failed to send_ws_msg_to_uwss: {:?}", e);
-            CrankerRouterException::new(failed_reason)
-        })
+        self.send_data(message).await
     }
 
     async fn terminate_all_conn(self: Arc<Self>, opt_crex: Option<CrankerRouterException>) -> Result<(), CrankerRouterException> {
@@ -168,11 +187,11 @@ impl RouterSocket for RouterSocketV3 {
         let mut iter = self.context_map.iter();
         while let Some(i) = iter.next() {
             let req_id = i.key();
-            let ctx = i.value().as_ref();
+            let ctx = i.value().clone();
             debug!("terminating req id = {}", req_id);
             // FIXME: #DL1 since here we are holding the ref multi here, the remove
             //  inside notify_client_request_error may deadlock
-            let _ = self.wss_exchange.read().await.notify_client_request_error(ctx, crex.clone()).await;
+            let _ = self.notify_client_request_error(ctx, crex.clone()).await;
         }
 
         // TODO: Better method to remove all ?
@@ -456,62 +475,21 @@ impl StreamState {
     }
 }
 
-pub(crate) struct WssExchangeV3 {
-    pub(crate) weak_outer_router_socket_v3: Weak<RouterSocketV3>,
-
-    // FIXME: We copy the route and router socket id in case
-    //  of the outer router socket v3 is being removed
-    route: String,
-    router_socket_id: String,
-    underlying_wss_tx: SplitSink<WebSocket, Message>,
-    underlying_wss_rx: SplitStream<WebSocket>,
-
-    err_chan_tx: Sender<CrankerRouterException>,
-    err_chan_rx: Receiver<CrankerRouterException>,
-
-    // FIXME: This should be no longer used, should use the weaker_outer_router_socket_v3.upgrade().is_removed()
-    //  see self.is_upper_rs3_removed()
-    // rs_is_removed: Arc<AtomicBool>,
-
-    wss_send_task_tx: Sender<Message>,
-    wss_send_task_rx: Receiver<Message>,
-    // recv a msg from uwss, and dispatch to exact req context
-    wss_recv_dispatcher: DashMap<i32, Weak<RequestContext>>,
-}
-
-// Handle binary msg
-impl WssExchangeV3 {
-    pub fn new(
-        weak_outer_router_socket_v3: Weak<RouterSocketV3>,
-        route: String,
-        router_socket_id: String,
-        underlying_wss_tx: SplitSink<WebSocket, Message>,
-        underlying_wss_rx: SplitStream<WebSocket>,
-    ) -> Self {
-        let (err_chan_tx, err_chan_rx) = async_channel::unbounded();
-        let (wss_send_task_tx, wss_send_task_rx) = async_channel::unbounded();
-        Self {
-            weak_outer_router_socket_v3,
-
-            // FIXME: We copy the route and router socket id in case
-            //  of the outer router socket v3 is being removed
-            route,
-            router_socket_id,
-            underlying_wss_tx,
-            underlying_wss_rx,
-
-            err_chan_tx,
-            err_chan_rx,
-
-            wss_send_task_tx,
-            wss_send_task_rx,
-            // recv a msg from uwss, and dispatch to exact req context
-            wss_recv_dispatcher: DashMap::new(),
-        }
+// WSS EXCHANGE PART
+impl RouterSocketV3 {
+    pub async fn send_data(&self, wss_msg: Message) -> Result<(), CrankerRouterException> {
+        self.wss_send_task_tx.send(wss_msg).await
+            .map_err(|e| {
+                let failed_reason = format!(
+                    "failed to send_data: {:?}. route = {} , router socket id = {}",
+                    e, self.route, self.router_socket_id
+                );
+                error!("{}", failed_reason);
+                CrankerRouterException::new(failed_reason)
+            })
     }
 
-
-    pub async fn handle_data(&self, ctx: &RequestContext, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
+    pub async fn handle_data(&self, ctx: Arc<RequestContext>, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
         let is_end_stream = judge_is_stream_end_from_flags(flags);
         let len = bin.remaining();
         if len == 0 {
@@ -522,7 +500,7 @@ impl WssExchangeV3 {
         }
 
         ctx.wss_on_binary_call_count.fetch_add(1, SeqCst);
-        if self.is_upper_rs3_removed() {
+        if self.is_removed() {
             if is_end_stream {
                 let _ = self.notify_client_request_close(ctx, 1000/*ws status code*/, None).await;
             }
@@ -554,7 +532,7 @@ impl WssExchangeV3 {
     }
 
 
-    pub async fn handle_header(&self, ctx: &RequestContext, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
+    pub async fn handle_header(&self, ctx: Arc<RequestContext>, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
         let is_stream_end = judge_is_stream_end_from_flags(flags);
         let is_header_end = judge_is_header_end_from_flags(flags);
         let byte_len: i32 = bin.remaining().try_into().map_err(|e| {
@@ -597,28 +575,28 @@ impl WssExchangeV3 {
         }
         if is_header_end {
             let full_content = ctx.header_line_builder.read().await.clone();
-            self.do_send_header_to_cli(ctx, full_content)?;
+            self.do_send_header_to_cli(ctx.as_ref(), full_content)?;
         }
         if is_stream_end {
             let _ = self.notify_client_request_close(ctx, 1000, None).await; // TODO: What does 1000 mean?
         }
         let window_update_message = window_update_message(req_id, byte_len);
-        let _ = self.wss_send_task_tx.send(Message::Binary(window_update_message.to_vec())).await;
+        self.send_data(Message::Binary(window_update_message.to_vec())).await
         // no mu callbacks needed here ? (doneAndPullData, SeqCstBuffer)
-        Ok(())
     }
 
-    pub async fn handle_rst_stream(&self, ctx: &RequestContext, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
+    pub async fn handle_rst_stream(&self, ctx_arc: Arc<RequestContext>, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
         let error_code = get_error_code(&mut bin);
         let error_message = get_error_message(&mut bin);
-        self.notify_client_request_error(ctx, CrankerRouterException::new(format!(
+        self.notify_client_request_error(ctx_arc.clone(), CrankerRouterException::new(format!(
             "stream closed by connector, error code: {}, error message: {}, req id = {} , router socket id = {} , route = {}",
-            error_code, error_message, req_id, ctx.router_socket_id(), ctx.route()
+            error_code, error_message, req_id, ctx_arc.router_socket_id(), ctx_arc.route()
         ))).await;
         Ok(())
     }
 
-    pub async fn handle_window_update(&self, ctx: &RequestContext, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
+    pub async fn handle_window_update(&self, ctx_arc: Arc<RequestContext>, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
+        let ctx = ctx_arc.as_ref();
         let window_update = bin.get_i32();
         ctx.target_connector_ack_bytes(window_update);
         Ok(())
@@ -634,65 +612,36 @@ impl WssExchangeV3 {
         let cpr = CrankerProtocolResponse::try_from_string(full_content)?;
         let status_code = cpr.status;
         let res_builder = cpr.build()?;
-        {
-            if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
-                for i in rs3.proxy_listeners.iter() {
-                    i.on_before_responding_to_client(ctx)?;
-                    i.on_after_target_to_proxy_headers_received(
-                        ctx, status_code, res_builder.headers_ref(),
-                    )?;
-                }
-            } else {
-                return Err(CrankerRouterException::new(format!(
-                    "failed to invoke on before responding to client of proxy listeners because the router socket v3 no longer exists, req id = {} , router socket id = {} , route = {}",
-                    ctx.request_id(), ctx.router_socket_id(), ctx.route()
-                )));
-            }
-        }
 
+        for i in self.proxy_listeners.iter() {
+            i.on_before_responding_to_client(ctx)?;
+            i.on_after_target_to_proxy_headers_received(
+                ctx, status_code, res_builder.headers_ref(),
+            )?;
+        }
         // let wrapped_stream = ctx.tgt_res_bdy_rx.clone();
         // let stream_body = Body::from_stream(wrapped_stream);
 
         Ok(())
     }
 
-    fn is_upper_rs3_removed(&self) -> bool {
-        if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
-            return rs3.is_removed();
-        }
-        return true;
-    }
-
 
     fn check_if_context_exists(&self, req_id: &i32) -> Result<Arc<RequestContext>, Result<(), CrankerRouterException>> {
-        let opt_ctx = self.wss_recv_dispatcher.get(&req_id);
+        let opt_ctx = self.context_map.get(&req_id);
         if opt_ctx.is_none() {
             return Err(Err(CrankerRouterException::new(format!(
                 "can not found ctx for req id={} in router_socket_id={}",
                 req_id, self.router_socket_id
             ))));
         }
-        let ctx = opt_ctx.unwrap().upgrade();
-        if ctx.is_none() {
-            return Err(Err(CrankerRouterException::new(format!(
-                "found ctx for req id={} but seems already dropped in router_socket_id={}",
-                req_id, self.router_socket_id
-            ))));
-        }
-        let ctx = ctx.unwrap();
+        let ctx = opt_ctx.unwrap().value().clone();
         Ok(ctx)
     }
 
     // pretty like on_close in RouterSocketV1
-    async fn notify_client_request_close(&self, ctx: &RequestContext, ws_status_code: u16, opt_reason: Option<String>) -> Result<(), CrankerRouterException> {
-        // TODO: make this upgrade a function call
-        let rs3 = self.weak_outer_router_socket_v3.upgrade().ok_or(
-            CrankerRouterException::new(format!(
-                "failed to get upper router socket v3 arc when notify_client_request_close.req id = {} , router socket id = {} , route = {}",
-                ctx.request_id(), ctx.router_socket_id(), ctx.route()
-            )))?;
-
-        rs3.proxy_listeners.iter().for_each(|pl| {
+    async fn notify_client_request_close(&self, ctx_arc: Arc<RequestContext>, ws_status_code: u16, opt_reason: Option<String>) -> Result<(), CrankerRouterException> {
+        let ctx = ctx_arc.as_ref();
+        self.proxy_listeners.iter().for_each(|pl| {
             let _ = pl.on_response_body_chunk_received(ctx);
         });
         let code = ws_status_code;
@@ -738,9 +687,11 @@ impl WssExchangeV3 {
             ctx.tgt_res_bdy_rx.close();
         }
 
-        let may_ex = rs3.raise_completion_event(Some(ClientRequestIdentifier {
+        let may_ex = self.raise_completion_event(Some(ClientRequestIdentifier {
             request_id: ctx.request_id(),
         }));
+        // FIXME: Check #DL1 and tests
+        // self.context_map.remove(&ctx.request_id());
         return match may_ex {
             Ok(_) => { Ok(()) }
             Err(crex) => {
@@ -773,7 +724,8 @@ impl WssExchangeV3 {
         let _ = ctx.tgt_res_bdy_tx.send(Err(ex)).await;
     }
 
-    async fn notify_client_request_error(&self, ctx: &RequestContext, crex: CrankerRouterException) {
+    async fn notify_client_request_error(&self, ctx_arc: Arc<RequestContext>, crex: CrankerRouterException) {
+        let ctx = ctx_arc.as_ref();
         // TODO: Here need to judge if the crex is Timeout Exception or not
         //  It would be good to define our own ErrorKind with `thiserror` crate ASAP!!!
         let _ = ctx.error.try_write().map(|mut g| {
@@ -817,13 +769,11 @@ impl WssExchangeV3 {
                 let _ = ctx.tgt_res_bdy_tx.send(Err(crex.clone())).await;
             }
         }
-        if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
-            let _ = rs3.raise_completion_event(Some(ClientRequestIdentifier {
-                request_id: ctx.request_id()
-            }));
-            // FIXME: Check #DL1
-            // rs3.context_map.remove(ctx.request_id());
-        }
+        let _ = self.raise_completion_event(Some(ClientRequestIdentifier {
+            request_id: ctx.request_id()
+        }));
+        // FIXME: Check #DL1 and tests
+        // self.context_map.remove(&ctx.request_id());
         warn!(
             "stream error: req id = {} , router socket id = {} , route = {}, target = {} {:?}, ex = {}",
             ctx.request_id(), ctx.router_socket_id(), ctx.route(), ctx.req_method, ctx.req_uri, crex
@@ -850,7 +800,17 @@ fn window_update_message(req_id: i32, window_update: i32) -> Bytes {
     bm.put_u8(MESSAGE_TYPE_WINDOW_UPDATE);
     bm.put_u8(0);
     bm.put_i32(req_id);
-    bm.put_i32(window_update); // FIXME
+    bm.put_i32(window_update);
+    bm.into()
+}
+
+fn rst_message(req_id: i32, err_code: i32, msg: String) -> Bytes {
+    let mut bm = BytesMut::new();
+    bm.put_u8(MESSAGE_TYPE_RST_STREAM);
+    bm.put_u8(0); // No flag
+    bm.put_i32(req_id);
+    bm.put_i32(err_code);
+    bm.put(msg.as_str().as_bytes());
     bm.into()
 }
 
@@ -870,26 +830,9 @@ fn get_error_message(bin: &mut Bytes) -> String {
     return String::new();
 }
 
-impl WssExchangeV3 {
-    pub fn reset_request_context_by_id(&self, req_ctx_id: i32) {
-        if let Some(weak_req_ctx) = self.wss_recv_dispatcher.get(&req_ctx_id) {
-            if let Some(req_ctx) = weak_req_ctx.upgrade() {
-                // req_ctx.reset_and_close(); // TODO: async / bg method, take &Arc<Self> as first param
-            }
-        }
-    }
-
-    pub fn reset_all(&self) {
-        self.wss_recv_dispatcher.iter().for_each(|e| {
-            if let Some(req_ctx) = e.value().upgrade() {
-                // req_ctx.reset_and_close() // TODO
-            }
-        })
-    }
-}
 
 #[async_trait]
-impl WebSocketListener for WssExchangeV3 {
+impl WebSocketListener for RouterSocketV3 {
     async fn on_text(&self, text_msg: String) -> Result<(), CrankerRouterException> {
         // should we on error here?
         Err(CrankerRouterException::new(format!("v3 should not send txt msg bug got: {:?}", text_msg)))
@@ -943,16 +886,16 @@ impl WebSocketListener for WssExchangeV3 {
 
         match msg_type_byte {
             MESSAGE_TYPE_DATA => {
-                self.handle_data(&ctx, flags_byte, req_id_int, bin).await?
+                self.handle_data(ctx, flags_byte, req_id_int, bin).await?
             }
             MESSAGE_TYPE_HEADER => {
-                self.handle_header(&ctx, flags_byte, req_id_int, bin).await?
+                self.handle_header(ctx, flags_byte, req_id_int, bin).await?
             }
             MESSAGE_TYPE_RST_STREAM => {
-                self.handle_rst_stream(&ctx, flags_byte /*can be ignored*/, req_id_int, bin).await?
+                self.handle_rst_stream(ctx, flags_byte /*can be ignored*/, req_id_int, bin).await?
             }
             MESSAGE_TYPE_WINDOW_UPDATE => {
-                self.handle_window_update(&ctx, flags_byte, req_id_int, bin).await?
+                self.handle_window_update(ctx, flags_byte, req_id_int, bin).await?
             }
             _ => {
                 // TODO: Should we on_error here?
@@ -966,7 +909,7 @@ impl WebSocketListener for WssExchangeV3 {
 
     async fn on_ping(&self, ping_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
         // Same as RouterSocketV1
-        if let Err(e) = self.wss_send_task_tx.send(Message::Pong(ping_msg)).await {
+        if let Err(e) = self.send_data(Message::Pong(ping_msg)).await {
             return self.on_error(CrankerRouterException::new(format!(
                 "failed to pong back {:?}", e
             )));
@@ -975,9 +918,31 @@ impl WebSocketListener for WssExchangeV3 {
     }
 
     async fn on_close(&self, close_msg: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException> {
-        warn!("uwss get close frame: {:?}. router_socket_id={}", close_msg, self.router_socket_id);
-        // TODO: Ref v1
-        self.reset_all();
+        warn!("uwss get close frame: {:?}. router socket id = {}", close_msg, self.router_socket_id);
+        let mut code: u16 = 4000; // reserved
+        let mut reason: Option<String> = None;
+        if !self.is_removed() {
+            self.web_socket_farm.upgrade().map(|wsf| {
+                wsf.remove_router_socket_in_background(self.route(), self.router_socket_id(), self.get_is_removed_arc_atomic_bool());
+            });
+            self.is_removed.store(true, SeqCst);
+        }
+        if let Some(clo) = close_msg {
+            let clo_code = clo.code;
+            let clo_reason = clo.reason.to_string();
+            code = clo_code;
+            reason = Some(clo_reason.clone());
+            if clo_code != 1000 {
+                warn!(
+                    "websocket exceptional closed from client: status code = {} , reason = {}",
+                    clo_code, clo_reason
+                );
+            }
+        }
+        for i in self.context_map.iter() {
+            let ctx_arc = i.value().clone();
+            let _ = self.notify_client_request_close(ctx_arc, code, reason.clone());
+        }
         Ok(())
     }
 
@@ -996,15 +961,11 @@ impl WebSocketListener for WssExchangeV3 {
     }
 
     fn get_idle_read_timeout_ms(&self) -> i64 {
-        self.weak_outer_router_socket_v3.upgrade()
-            .map(|i| i.idle_read_timeout_ms)
-            .unwrap_or(DEF_IDLE_READ_TIMEOUT_MS)
+        self.idle_read_timeout_ms
     }
 
     fn get_ping_sent_after_no_write_for_ms(&self) -> i64 {
-        self.weak_outer_router_socket_v3.upgrade()
-            .map(|i| i.ping_sent_after_no_write_for_ms)
-            .unwrap_or(DEF_PING_SENT_AFTER_NO_WRITE_FOR_MS)
+        self.ping_sent_after_no_write_for_ms
     }
 }
 
@@ -1028,6 +989,8 @@ impl RouterSocketV3 {
                idle_read_timeout_ms: i64,
                ping_sent_after_no_write_for_ms: i64,
     ) -> Self {
+        let (err_chan_tx, err_chan_rx) = async_channel::unbounded();
+        let (wss_send_task_tx, wss_send_task_rx) = async_channel::unbounded();
         Self {
             route: route.clone(),
             component_name,
@@ -1051,15 +1014,29 @@ impl RouterSocketV3 {
             // idMaker
             req_id_generator: AtomicI32::new(0),
 
-            wss_exchange: Arc::new(RwLock::new(WssExchangeV3::new(
-                Weak::new(), // TODO: Replace it with downgraded self
-                route,
-                router_socket_id,
-                underlying_wss_tx,
-                underlying_wss_rx,
-            ))),
+            // START WSS EXCHANGE PART
+            underlying_wss_tx,
+            underlying_wss_rx,
+
+            err_chan_tx,
+            err_chan_rx,
+
+            wss_send_task_tx,
+            wss_send_task_rx,
+            // END WSS EXCHANGE PART
         }
     }
+
+    pub async fn reset_stream(&self, ctx: &RequestContext, err_code: i32, msg: String) {
+        if !ctx.state.read().await.is_completed() && !ctx.is_rst_stream_sent.load(SeqCst) {
+            let rst_msg = rst_message(ctx.request_id(), err_code, msg);
+            let _ = self.send_data(Message::Binary(rst_msg.to_vec()));
+            ctx.is_rst_stream_sent.store(true, SeqCst)
+        }
+
+        self.context_map.remove(&ctx.request_id);
+    }
+
 }
 
 struct ShouldKeepReadFromCli {
@@ -1070,6 +1047,11 @@ struct ShouldKeepReadFromCli {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+
+    use dashmap::DashMap;
+    use tokio::sync::Notify;
+    use tokio::task::JoinHandle;
 
     #[test]
     pub fn test_from_vec_v8_to_i32() {
@@ -1088,5 +1070,48 @@ mod tests {
         let into = SocketAddr::new([u8::MAX, u8::MAX, u8::MAX, u8::MAX].into(), u16::MAX);
         let direct = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(u8::MAX, u8::MAX, u8::MAX, u8::MAX)), u16::MAX);
         assert_eq!(into, direct)
+    }
+
+    // #[test]
+    pub fn test_dashmap_dead_lock_will_hang() {
+        struct ForTest {
+            notify: Notify,
+        }
+        let dm: DashMap<i32, Arc<ForTest>> = DashMap::new();
+        dm.insert(1024, Arc::new(ForTest {
+            notify: Notify::new()
+        }));
+        for i in dm.iter() {
+            let k = i.key();
+            let v = i.value();
+            // Will dead lock here
+            dm.remove(k);
+        }
+        assert!(dm.is_empty())
+    }
+
+
+    #[tokio::test]
+    pub async fn test_dashmap_dead_lock_will_pass() {
+        struct ForTest {
+            notify: Notify,
+        }
+        let dm: Arc<DashMap<i32, Arc<ForTest>>> = Arc::new(DashMap::new());
+        dm.insert(1024, Arc::new(ForTest {
+            notify: Notify::new()
+        }));
+        let mut join: Option<JoinHandle<()>> = None;
+        for i in dm.iter() {
+            let k = i.key().clone();
+            let v = i.value();
+            // Will deadlock and hang here
+            let dm = dm.clone();
+            let ts = tokio::spawn(async move {
+                dm.remove(&k);
+            });
+            join.replace(ts);
+        }
+        let _ = join.unwrap().await;
+        assert!(dm.is_empty())
     }
 }

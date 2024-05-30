@@ -1097,21 +1097,6 @@ pub async fn harvest_router_socket(
             app_state.config.idle_read_timeout_ms,
             app_state.config.ping_sent_after_no_write_for_ms,
         ));
-        // FIXME: This is not graceful. Can we do better?
-        let success = rs.wss_exchange.try_write().map(|mut g| {
-            g.weak_outer_router_socket_v3 = Arc::downgrade(&rs);
-        }).map_err(|e| {
-            let failed_reason = format!(
-                "failed to replace and downgrade wss_exchange.weak_outer_router_socket_v3, route = {} , router_socket_id = {}", route, router_socket_id
-            );
-            error!("{}",failed_reason);
-            CrankerRouterException::new(
-                failed_reason
-            )
-        });
-        if success.is_err() {
-            return;
-        }
         info!("Connector (v3) registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
         app_state
             .websocket_farm
