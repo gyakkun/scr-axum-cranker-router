@@ -188,9 +188,9 @@ impl RouterSocket for RouterSocketV3 {
         let _ = futures::future::join_all(
             self.context_map.iter()
                 // now it's out of iter scope
-                .map(|i| { i.value().clone() })
-                .map(|ctx_arc| async move {
-                    let _ = self.notify_client_request_error(ctx_arc, crex.clone()).await;
+                .map(|i| { (self.clone(), i.value().clone(), crex.clone()) })
+                .map(|(self_arc, ctx_arc, crex_clone)| async move {
+                    let _ = self_arc.notify_client_request_error(ctx_arc, crex_clone).await;
                 })
         ).await;
 
