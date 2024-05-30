@@ -185,15 +185,6 @@ impl RouterSocket for RouterSocketV3 {
             "terminating all connections on cranker router v3 for unknown reason".to_string()
         ));
 
-        // for i in self.context_map.iter() {
-        //     let req_id = i.key().clone();
-        //     let ctx_ref = i.value();
-        //     let ctx = ctx_ref.clone();
-        //     // FIXME: #DL1 since here we are holding the ref multi here, the remove
-        //     //  inside notify_client_request_error may deadlock
-        //     //  here CTX_REF still in the scope, thus can not be removed, otherwise deadlock
-        //     let _ = self.notify_client_request_error(ctx, crex.clone()).await;
-        // }
         let _ = futures::future::join_all(
             self.context_map.iter()
                 // now it's out of iter scope
@@ -202,12 +193,15 @@ impl RouterSocket for RouterSocketV3 {
                     let _ = self.notify_client_request_error(ctx_arc, crex.clone()).await;
                 })
         ).await;
+
         assert!(self.context_map.is_empty());
+
         if !self.context_map.is_empty() {
             error!("seems our dirty deadlock experiment failed! Manually retain all false");
             // TODO: Better method to remove all ?
             self.context_map.retain(|_, _| { return false });
         }
+
         Ok(())
     }
 
