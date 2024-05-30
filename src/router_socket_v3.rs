@@ -184,18 +184,30 @@ impl RouterSocket for RouterSocketV3 {
         let crex = opt_crex.unwrap_or(CrankerRouterException::new(
             "terminating all connections on cranker router v3 for unknown reason".to_string()
         ));
-        let mut iter = self.context_map.iter();
-        while let Some(i) = iter.next() {
-            let req_id = i.key();
-            let ctx = i.value().clone();
-            debug!("terminating req id = {}", req_id);
-            // FIXME: #DL1 since here we are holding the ref multi here, the remove
-            //  inside notify_client_request_error may deadlock
-            let _ = self.notify_client_request_error(ctx, crex.clone()).await;
-        }
 
-        // TODO: Better method to remove all ?
-        self.context_map.retain(|_, _| { return false });
+        // for i in self.context_map.iter() {
+        //     let req_id = i.key().clone();
+        //     let ctx_ref = i.value();
+        //     let ctx = ctx_ref.clone();
+        //     // FIXME: #DL1 since here we are holding the ref multi here, the remove
+        //     //  inside notify_client_request_error may deadlock
+        //     //  here CTX_REF still in the scope, thus can not be removed, otherwise deadlock
+        //     let _ = self.notify_client_request_error(ctx, crex.clone()).await;
+        // }
+        let _ = futures::future::join_all(
+            self.context_map.iter()
+                // now it's out of iter scope
+                .map(|i| { i.value().clone() })
+                .map(|ctx_arc| async move {
+                    let _ = self.notify_client_request_error(ctx_arc, crex.clone()).await;
+                })
+        ).await;
+        assert!(self.context_map.is_empty());
+        if !self.context_map.is_empty() {
+            error!("seems our dirty deadlock experiment failed! Manually retain all false");
+            // TODO: Better method to remove all ?
+            self.context_map.retain(|_, _| { return false });
+        }
         Ok(())
     }
 
@@ -690,8 +702,7 @@ impl RouterSocketV3 {
         let may_ex = self.raise_completion_event(Some(ClientRequestIdentifier {
             request_id: ctx.request_id(),
         }));
-        // FIXME: Check #DL1 and tests
-        // self.context_map.remove(&ctx.request_id());
+        self.context_map.remove(&ctx.request_id());
         return match may_ex {
             Ok(_) => { Ok(()) }
             Err(crex) => {
@@ -772,8 +783,7 @@ impl RouterSocketV3 {
         let _ = self.raise_completion_event(Some(ClientRequestIdentifier {
             request_id: ctx.request_id()
         }));
-        // FIXME: Check #DL1 and tests
-        // self.context_map.remove(&ctx.request_id());
+        self.context_map.remove(&ctx.request_id());
         warn!(
             "stream error: req id = {} , router socket id = {} , route = {}, target = {} {:?}, ex = {}",
             ctx.request_id(), ctx.router_socket_id(), ctx.route(), ctx.req_method, ctx.req_uri, crex
@@ -1072,21 +1082,23 @@ mod tests {
         assert_eq!(into, direct)
     }
 
-    // #[test]
-    pub fn test_dashmap_dead_lock_will_hang() {
+    #[tokio::test]
+    pub async fn test_dashmap_dead_lock_will_pass_but_ugly() {
         struct ForTest {
             notify: Notify,
         }
-        let dm: DashMap<i32, Arc<ForTest>> = DashMap::new();
+        let dm: Arc<DashMap<i32, Arc<ForTest>>> = Arc::new(DashMap::new());
         dm.insert(1024, Arc::new(ForTest {
             notify: Notify::new()
         }));
-        for i in dm.iter() {
-            let k = i.key();
-            let v = i.value();
-            // Will dead lock here
-            dm.remove(k);
-        }
+
+        let _ = futures::future::join_all(
+            dm.iter()
+                .map(|i| { (dm.clone(), i.key().clone()) })
+                .map(|(dmc, k)| async move {
+                    dmc.remove(&k);
+                })
+        ).await;
         assert!(dm.is_empty())
     }
 
