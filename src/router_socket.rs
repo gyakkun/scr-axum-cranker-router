@@ -225,9 +225,9 @@ impl RouterSocketV1 {
         let arc_rs_clone = arc_rs.clone();
         tokio::spawn(async move {
             let mut g = arc_rs_clone.wss_recv_pipe_join_handle.lock().await;
-            *g = Some(wss_recv_pipe_join_handle);
+            g.replace(wss_recv_pipe_join_handle);
             let mut g = arc_rs_clone.wss_send_task_join_handle.lock().await;
-            *g = Some(wss_send_task_join_handle);
+            g.replace(wss_send_task_join_handle);
         });
 
         arc_rs

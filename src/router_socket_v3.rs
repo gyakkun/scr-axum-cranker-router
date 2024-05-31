@@ -18,7 +18,8 @@ use futures::{FutureExt, SinkExt, TryFutureExt, TryStreamExt};
 use futures::future::BoxFuture;
 use futures::stream::{FusedStream, SplitSink, SplitStream};
 use log::{debug, error, info, trace, warn};
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock, RwLockWriteGuard};
+use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
 use crate::{
@@ -30,7 +31,7 @@ use crate::exceptions::{CrankerRouterException, CREXKind};
 use crate::http_utils::set_target_request_headers;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
-use crate::router_socket::{ClientRequestIdentifier, create_request_line, pipe_and_queue_the_wss_send_task_and_handle_err_chan, pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary, RouteIdentify, RouterSocket};
+use crate::router_socket::{ClientRequestIdentifier, create_request_line, pipe_and_queue_the_wss_send_task_and_handle_err_chan, pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary, RouteIdentify, RouterSocket, RouterSocketV1};
 use crate::router_socket_v3::StreamState::{Error, Open};
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
@@ -58,6 +59,7 @@ const ERROR_INTERNAL: i32 = 1;
 const REQ_CTX_INVALID_OUTER_RS3_MSG: &str = "(invalid router socket v3)";
 
 pub struct RouterSocketV3 {
+    pub weak_self: RwLock<Option<Weak<RouterSocketV3>>>,
     pub route: String,
     // pub domain:String,
     pub component_name: String,
@@ -91,6 +93,9 @@ pub struct RouterSocketV3 {
     wss_send_task_tx: Sender<Message>,
     // wss_send_task_rx: Receiver<Message>,
     // END OF WSS EXCHANGE PART
+
+    wss_recv_pipe_join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    wss_send_task_join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl RouteIdentify for RouterSocketV3 {
@@ -791,6 +796,12 @@ impl RouterSocketV3 {
         self.check_if_tgt_can_send_res_first(&ctx, req_id).await?;
         let is_end_stream = judge_is_stream_end_from_flags(flags);
         let len = bin.remaining();
+        let mut opt_copy = None;
+        let really_need_on_response_body_chunk_received_from_target
+            = self.proxy_listeners.iter().all(|i| { i.really_need_on_request_body_chunk_sent_to_target() });
+        if(really_need_on_response_body_chunk_received_from_target) {
+            opt_copy.replace(bin.clone());
+        }
         if len == 0 {
             if is_end_stream {
                 let _ = self
@@ -820,7 +831,7 @@ impl RouterSocketV3 {
         //  try to do zero-copy here!
         //  We should probably use `bin.into_vec()` here that seems cost-free
         let send_tgt_bdy_to_chan_res = ctx.tgt_res_bdy_tx.send(Ok(bin.to_vec())).await;
-        return match send_tgt_bdy_to_chan_res {
+        let res = match send_tgt_bdy_to_chan_res {
             Ok(_) => {
                 if is_end_stream {
                     let _ = self.notify_client_request_close(ctx.clone(), 1000, None).await;
@@ -833,12 +844,31 @@ impl RouterSocketV3 {
             Err(send_err) => {
                 // TODO: in mu they handle error in the asyncHandle.write callback
                 // where should we deal with this?
-                Err(CrankerRouterException::new(format!(
+                info!(
+                    "route = {}, router socket id = {} , could not write to client response \
+                    (maybe the user closed their browser) so will cancel the request. ex: {:?}",
+                    self.route(), self.router_socket_id() , send_err
+                );
+                let failed_reason = format!(
                     "rare ex failed to send bin to tgt_res_bdy chan: {:?}",
                     send_err
-                )))
+                );
+                let crex = CrankerRouterException::new(failed_reason);
+                let _ = self.try_provide_general_error(Some(crex.clone()));
+                Err(crex)
             }
         };
+
+        if really_need_on_response_body_chunk_received_from_target {
+            let copy = opt_copy.unwrap();
+            for i in self.proxy_listeners.iter() {
+                if let Err(crex) = i.on_response_body_chunk_received_from_target(ctx.as_ref(), &copy) {
+                    return Err(crex);
+                }
+            }
+        }
+
+        res
     }
 
     async fn check_if_tgt_can_send_res_first(
@@ -1334,22 +1364,22 @@ impl WebSocketListener for RouterSocketV3 {
             }
         };
 
-        let mut res = Ok(());
+        let mut bin_handle_res = Ok(());
         let ctx_for_err = ctx.clone();
         match msg_type_byte {
             MESSAGE_TYPE_DATA => {
-                res = self.handle_data(ctx, flags_byte, req_id_int, bin).await;
+                bin_handle_res = self.handle_data(ctx, flags_byte, req_id_int, bin).await;
             }
             MESSAGE_TYPE_HEADER => {
-                res = self.handle_header(ctx, flags_byte, req_id_int, bin).await;
+                bin_handle_res = self.handle_header(ctx, flags_byte, req_id_int, bin).await;
             }
             MESSAGE_TYPE_RST_STREAM => {
-                res = self
+                bin_handle_res = self
                     .handle_rst_stream(ctx, flags_byte /*can be ignored*/, req_id_int, bin)
                     .await;
             }
             MESSAGE_TYPE_WINDOW_UPDATE => {
-                res = self
+                bin_handle_res = self
                     .handle_window_update(ctx, flags_byte, req_id_int, bin)
                     .await;
             }
@@ -1363,8 +1393,7 @@ impl WebSocketListener for RouterSocketV3 {
                 error!("{}", failed_reason);
             }
         }
-        if res.is_err() {
-            let crex = res.err().unwrap();
+        if let Err(crex) = bin_handle_res {
             error!("err when handling binary: {:?}", crex);
             let _ = self
                 .notify_client_request_error(ctx_for_err.clone(), crex.clone())
@@ -1478,6 +1507,7 @@ impl RouterSocketV3 {
         let (err_chan_tx, err_chan_rx) = async_channel::unbounded();
         let (wss_send_task_tx, wss_send_task_rx) = async_channel::unbounded();
         let arc_rs = Arc::new(Self {
+            weak_self: RwLock::new(None),
             route: route.clone(),
             component_name,
             router_socket_id: router_socket_id.clone(),
@@ -1510,6 +1540,14 @@ impl RouterSocketV3 {
             wss_send_task_tx,
             // wss_send_task_rx,
             // END WSS EXCHANGE PART
+
+            wss_recv_pipe_join_handle: Arc::new(Mutex::new(None)),
+            wss_send_task_join_handle: Arc::new(Mutex::new(None)),
+
+        });
+        let weak_self = Arc::downgrade(&arc_rs);
+        let _ = arc_rs.weak_self.try_write().map(|mut g|{
+            g.replace(weak_self);
         });
         // Abort these two handles in Drop
         let wss_recv_pipe_join_handle = tokio::spawn(
@@ -1525,6 +1563,14 @@ impl RouterSocketV3 {
                 underlying_wss_tx, wss_send_task_rx, err_chan_rx,
             ));
 
+        let arc_rs_clone = arc_rs.clone();
+        tokio::spawn(async move {
+            let mut g = arc_rs_clone.wss_recv_pipe_join_handle.lock().await;
+            g.replace(wss_recv_pipe_join_handle);
+            let mut g = arc_rs_clone.wss_send_task_join_handle.lock().await;
+            g.replace(wss_send_task_join_handle);
+        });
+
         arc_rs
     }
 
@@ -1536,6 +1582,41 @@ impl RouterSocketV3 {
         }
 
         self.context_map.remove(&ctx.request_id);
+    }
+}
+
+impl Drop for RouterSocketV3 {
+    fn drop(&mut self) {
+        trace!("70v3: dropping :{}", self.router_socket_id);
+        let _ = self.weak_self.try_write().map(|mut g| {
+            let weak = g.replace(Weak::new());
+            match weak {
+                None => {}
+                Some(weak_rs3) => {
+                    match weak_rs3.upgrade() {
+                        None => {}
+                        Some(strong_rs3) => {
+                            tokio::spawn(async move {
+                                let _  = strong_rs3.terminate_all_conn(None);
+                            });
+                        }
+                    }
+                }
+            }
+        });
+
+
+        trace!("71v3");
+        self.wss_send_task_tx.close();
+        let wrpjh = self.wss_recv_pipe_join_handle.clone();
+        let wstjh = self.wss_send_task_join_handle.clone();
+        tokio::spawn(async move {
+            wrpjh.lock().await.as_ref()
+                .map(|o| o.abort());
+            wstjh.lock().await.as_ref()
+                .map(|o| o.abort());
+        });
+        trace!("72v3");
     }
 }
 
