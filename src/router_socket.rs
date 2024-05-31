@@ -906,6 +906,11 @@ impl RouterSocket for RouterSocketV1 {
                 "failed to send cli req hdr to tgt: {:?}", e
             )))?; // fast fail
 
+        // FIXME: So from RFC2616, no need to wait for the whole
+        //  req body sent to target, actually this "pipe req body"
+        //  part can be done in another thread/tokio task.
+        //  Currently it's not fully async that may lead to performance
+        //  issue. Need to make this pipe part separated.
         // 5. Pipe cli req body to underlying wss (slow, blocking)
         trace!("5");
         if let Some(mut body) = opt_body {

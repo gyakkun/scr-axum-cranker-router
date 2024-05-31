@@ -27,7 +27,7 @@ use crate::http_utils::set_target_request_headers;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
 use crate::router_socket::{ClientRequestIdentifier, create_request_line, RouteIdentify, RouterSocket};
-use crate::router_socket_v3::StreamState::Open;
+use crate::router_socket_v3::StreamState::{Error, Open};
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
 
@@ -167,42 +167,40 @@ impl RouterSocket for RouterSocketV3 {
         // WARNING: Start from this line, we are dealing with network I/O
         // Be careful to handle errors. Notify client error ASAP.
 
-        // 3. No text based end marker is needed
-        // but we need to decide the frame type and flag
+        // 3. No text based end marker is needed,
+        // but we need to decide the frame type and flag.
+        // As always, header first, later body
+
+        let is_stream_end = opt_body.is_none(); // if no body, stream should end right now
+        let header_bytes = header_messages(req_id, true, is_stream_end, header_text);
         ctx.should_have_response.store(true, SeqCst);
-
-        // No req body
-        if opt_body.is_none() {
-            // FIXME: The flags should depend on flags
-            let header_bytes = header_messages(req_id, true, false, header_text);
-            for hb in header_bytes {
-                let payload_len = (hb.len() - HEADER_LEN_IN_BYTES) as i32;
-                ctx.wss_rtr_to_tgt_pending_ack_bytes.fetch_add(
-                    payload_len, SeqCst,
-                );
-                if let Err(crex) = self.send_data(Message::Binary(hb.into())).await {
-                    self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-                }
-                ctx.from_client_bytes.fetch_add(
-                    payload_len as i64, SeqCst,
-                );
+        for hb in header_bytes {
+            let payload_len = (hb.len() - HEADER_LEN_IN_BYTES) as i32;
+            ctx.wss_rtr_to_tgt_pending_ack_bytes.fetch_add(
+                payload_len, SeqCst,
+            );
+            if let Err(crex) = self.send_data(Message::Binary(hb.into())).await {
+                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
             }
+            ctx.from_client_bytes.fetch_add(
+                payload_len as i64, SeqCst,
+            );
+        }
 
-            for i in self.proxy_listeners.iter() {
-                if let Err(crex) = i.on_after_proxy_to_target_headers_sent(
-                    ctx.as_ref(), Some(headers),
-                ) {
-                    self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-                }
-                if let Err(crex) = i.on_request_body_sent_to_target(
-                    ctx.as_ref()
-                ) {
-                    self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-                }
+        for i in self.proxy_listeners.iter() {
+            if let Err(crex) = i.on_after_proxy_to_target_headers_sent(
+                ctx.as_ref(), Some(headers),
+            ) {
+                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
             }
-        } else
-        // Some req body
-        {
+            if let Err(crex) = i.on_request_body_sent_to_target(
+                ctx.as_ref()
+            ) {
+                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+            }
+        }
+
+        if opt_body.is_some() {
             let mut body = opt_body.unwrap()
                 .map_err(|e| {
                     CrankerRouterException::new(
@@ -627,6 +625,7 @@ impl RouterSocketV3 {
     }
 
     pub async fn handle_data(&self, ctx: Arc<RequestContext>, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
+        self.check_should_have_response_first(&ctx, req_id).await?;
         let is_end_stream = judge_is_stream_end_from_flags(flags);
         let len = bin.remaining();
         if len == 0 {
@@ -668,8 +667,24 @@ impl RouterSocketV3 {
         };
     }
 
+    async fn check_should_have_response_first(
+        &self, ctx: &Arc<RequestContext>, req_id: i32,
+    ) -> Result<(), CrankerRouterException> {
+        if !ctx.should_have_response.load(SeqCst) {
+            let failed_reason = format!(
+                "recv data/bin before handle cli req. route = {} , router socket id = {} , req id = {}",
+                self.route(), self.router_socket_id(), req_id
+            );
+            error!("{}", failed_reason);
+            let crex = CrankerRouterException::new(failed_reason);
+            return Err(crex);
+        }
+        Ok(())
+    }
+
 
     pub async fn handle_header(&self, ctx: Arc<RequestContext>, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
+        self.check_should_have_response_first(&ctx, req_id).await?;
         let is_stream_end = judge_is_stream_end_from_flags(flags);
         let is_header_end = judge_is_header_end_from_flags(flags);
         let byte_len: i32 = bin.remaining().try_into().map_err(|e| {
@@ -763,13 +778,13 @@ impl RouterSocketV3 {
     }
 
 
-    fn check_if_context_exists(&self, req_id: &i32) -> Result<Arc<RequestContext>, Result<(), CrankerRouterException>> {
+    fn check_if_context_exists(&self, req_id: &i32) -> Result<Arc<RequestContext>, CrankerRouterException> {
         let opt_ctx = self.context_map.get(&req_id);
         if opt_ctx.is_none() {
-            return Err(Err(CrankerRouterException::new(format!(
-                "can not found ctx for req id={} in router_socket_id={}",
-                req_id, self.router_socket_id
-            ))));
+            return Err(CrankerRouterException::new(format!(
+                "can not found ctx for req id={} in router_socket_id={}. route = {}",
+                req_id, self.router_socket_id(), self.route()
+            )));
         }
         let ctx = opt_ctx.unwrap().value().clone();
         Ok(ctx)
@@ -784,7 +799,7 @@ impl RouterSocketV3 {
         let code = ws_status_code;
         let reason = opt_reason.unwrap_or("closed by router".to_string());
 
-        if Self::cli_req_not_start_to_send_yet(ctx) {
+        if Self::cli_req_not_start_to_send_to_tgt_yet(ctx) {
             // since here nothing has been sent to cli yet
             // we can send a crex to the ctx.tgt_res_hdr_tx
             // and in case at this moment it's going to response,
@@ -839,7 +854,8 @@ impl RouterSocketV3 {
         }
     }
 
-    fn cli_req_not_start_to_send_yet(ctx: &RequestContext) -> bool {
+    // Including cli req header
+    fn cli_req_not_start_to_send_to_tgt_yet(ctx: &RequestContext) -> bool {
         ctx.should_have_response.load(SeqCst)
             && ctx.bytes_received() == 0
     }
@@ -874,7 +890,7 @@ impl RouterSocketV3 {
                 _ => { false }
             }
         }) {
-            if Self::cli_req_not_start_to_send_yet(ctx) {
+            if Self::cli_req_not_start_to_send_to_tgt_yet(ctx) {
                 let _ = ctx.tgt_res_hdr_tx.send(Err(crex.clone())).await;
                 let _ = ctx.tgt_res_bdy_tx.send(Err(crex.clone())).await;
             } else {
@@ -889,7 +905,7 @@ impl RouterSocketV3 {
                 let _ = ctx.tgt_res_bdy_tx.send(Err(crex.clone())).await;
             }
         } else {
-            if Self::cli_req_not_start_to_send_yet(ctx) {
+            if Self::cli_req_not_start_to_send_to_tgt_yet(ctx) {
                 let crex = crex.clone()
                     .with_status_code(StatusCode::BAD_GATEWAY.as_u16())
                     .prepend_str("502 Bad Gateway");
@@ -1035,20 +1051,23 @@ fn get_error_message(bin: &mut Bytes) -> String {
 #[async_trait]
 impl WebSocketListener for RouterSocketV3 {
     async fn on_text(&self, text_msg: String) -> Result<(), CrankerRouterException> {
-        // should we on error here?
-        Err(CrankerRouterException::new(format!("v3 should not send txt msg bug got: {:?}", text_msg)))
+        // WARNING: Here must return Ok(()).
+        // We can not return Error here, otherwise the websocket listener `on_error`
+        // will be trigger and error sent to err chan and all connection on the same
+        // websocket will all be terminated
+        let failed_reason = format!(
+            "v3 should not send txt msg bug got: {:?}. route = {} , router socket id = {}",
+            text_msg, self.route(), self.router_socket_id()
+        );
+        error!("{}", failed_reason);
+        Ok(())
     }
 
     async fn on_binary(&self, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
-        // We may need a Notify / Channel here to tell this handler to `doneAndPullData` next chunk / ByteBuffer / Bytes
-        // on websocket
-        // Unlike Java, the binary_msg (bytebuffer) will be SeqCstd once out of scope, so no `SeqCstBuffer`
-        // callback is not needed
-        // It turns out that mu-cranker-router calls `doneAndPullData` immediately when one binary
-        // is arrived.
-        // The flow control happens in the direction where tgt->router->cli
-        // this should be controlled and triggered in `while(body.next())` in `on_client_req` method
-
+        // WARNING: Here must return Ok(()).
+        // We can not return Error here, otherwise the websocket listener `on_error`
+        // will be trigger and error sent to err chan and all connection on the same
+        // websocket will all be terminated
 
         // FIXME: We convert binary_msg to Bytes to make use of its APIs for convenience
         //  but it means some operations are not cost-free
@@ -1062,41 +1081,48 @@ impl WebSocketListener for RouterSocketV3 {
         // TODO Add remaining length check here otherwise it will panic
         let mut bin = Bytes::from(binary_msg); // This Bytes::from is likely to be cost-free
         if bin.remaining() < _MSG_TYPE_LEN_IN_BYTES {
-            return Err(CrankerRouterException::new(
+            error!("{:?}", Err(CrankerRouterException::new(
                 "recv bin msg len less than 1 to read msg type byte".to_string()
-            ));
+            )));
+            return Ok(());
         }
         let msg_type_byte = bin.get_u8();
         if bin.remaining() < _FLAGS_LEN_IN_BYTES {
-            return Err(CrankerRouterException::new(
+            error!("{:?}",CrankerRouterException::new(
                 "recv bin msg len less than 2 to read flags byte".to_string()
             ));
+            return Ok(());
         }
         let flags_byte = bin.get_u8();
         if bin.remaining() < _REQ_ID_LEN_IN_BYTES {
-            return Err(CrankerRouterException::new(
+            error!("{:?}",CrankerRouterException::new(
                 "recv bin msg len less than 6 to read request id".to_string()
             ));
+            return Ok(());
         }
         let req_id_int = bin.get_i32(); // big endian
 
         let ctx = match self.check_if_context_exists(&req_id_int) {
-            Ok(value) => value,
-            Err(value) => return value,
+            Ok(ctx_arc) => ctx_arc,
+            Err(err) => {
+                error!("{:?}", err);
+                return Ok(());
+            },
         };
 
+        let mut res = Ok(());
         match msg_type_byte {
             MESSAGE_TYPE_DATA => {
-                self.handle_data(ctx, flags_byte, req_id_int, bin).await?
+                res = self.handle_data(ctx, flags_byte, req_id_int, bin).await;
             }
             MESSAGE_TYPE_HEADER => {
-                self.handle_header(ctx, flags_byte, req_id_int, bin).await?
+                res = self.handle_header(ctx, flags_byte, req_id_int, bin).await;
             }
             MESSAGE_TYPE_RST_STREAM => {
-                self.handle_rst_stream(ctx, flags_byte /*can be ignored*/, req_id_int, bin).await?
+                res = self.handle_rst_stream(ctx, flags_byte /*can be ignored*/, req_id_int, bin).await;
             }
             MESSAGE_TYPE_WINDOW_UPDATE => {
-                self.handle_window_update(ctx, flags_byte, req_id_int, bin).await?
+                res = self.handle_window_update(ctx, flags_byte, req_id_int, bin).await;
             }
             _ => {
                 // TODO: Should we on_error here?
@@ -1105,11 +1131,20 @@ impl WebSocketListener for RouterSocketV3 {
                 error!("{}", failed_reason);
             }
         }
+        if res.is_err() {
+            let crex = res.err().unwrap();
+            error!("err when handling binary: {:?}", crex);
+            let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
+            let _ = self.handle_on_cli_request_err(ctx.as_ref(), crex.clone()).await;
+        }
+
         Ok(())
     }
 
     async fn on_ping(&self, ping_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
-        // Same as RouterSocketV1
+        // FIXME: Is pong not being sent critical?
+        //  Here we decide to terminate all conn (on_error) once the pong
+        //  cannot even be put into the wss send task channel / queue
         if let Err(e) = self.send_data(Message::Pong(ping_msg)).await {
             return self.on_error(CrankerRouterException::new(format!(
                 "failed to pong back {:?}", e
