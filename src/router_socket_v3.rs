@@ -1588,24 +1588,16 @@ impl RouterSocketV3 {
 impl Drop for RouterSocketV3 {
     fn drop(&mut self) {
         trace!("70v3: dropping :{}", self.router_socket_id);
-        let _ = self.weak_self.try_write().map(|mut g| {
-            let weak = g.replace(Weak::new());
-            match weak {
-                None => {}
-                Some(weak_rs3) => {
-                    match weak_rs3.upgrade() {
-                        None => {}
-                        Some(strong_rs3) => {
-                            tokio::spawn(async move {
-                                let _  = strong_rs3.terminate_all_conn(None);
-                            });
-                        }
-                    }
-                }
-            }
-        });
-
-
+        self.weak_self
+            .try_write()
+            .ok()
+            .and_then(|mut g| g.replace(Weak::new()))
+            .and_then(|weak_rs3| weak_rs3.upgrade())
+            .map(|strong_rs3| {
+                tokio::spawn(async move {
+                    let _ = strong_rs3.terminate_all_conn(None);
+                });
+            });
         trace!("71v3");
         self.wss_send_task_tx.close();
         let wrpjh = self.wss_recv_pipe_join_handle.clone();
