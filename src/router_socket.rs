@@ -256,7 +256,7 @@ impl Drop for RouterSocketV1 {
     }
 }
 
-async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
+pub(crate) async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
     rs: Arc<dyn RouterSocket>,
     wss_listener: Arc<dyn WebSocketListener>,
     mut underlying_wss_rx: SplitStream<WebSocket>,
@@ -353,7 +353,7 @@ async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
     }
 }
 
-async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
+pub(crate) async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
     rs: Arc<dyn RouterSocket>,
     wss_listener: Arc<dyn WebSocketListener>,
     mut underlying_wss_tx: SplitSink<WebSocket, Message>,
@@ -1074,13 +1074,13 @@ pub async fn harvest_router_socket(
             app_state.config.idle_read_timeout_ms,
             app_state.config.ping_sent_after_no_write_for_ms,
         );
-        info!("Connector (v1) registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
+        info!("Connector (v1) registered! route: {} , connector_id: {} , router_socket_id: {}",route, connector_id, router_socket_id);
         app_state
             .websocket_farm
             .add_router_socket_in_background(rs);
     } else if cranker_version == CRANKER_V_3_0 {
         let (wss_tx, wss_rx) = wss.split();
-        let rs = Arc::new(RouterSocketV3::new(
+        let rs = RouterSocketV3::new_arc(
             route.clone(),
             domain.clone(),
             component_name.clone(),
@@ -1096,8 +1096,8 @@ pub async fn harvest_router_socket(
             app_state.config.via_name.clone(),
             app_state.config.idle_read_timeout_ms,
             app_state.config.ping_sent_after_no_write_for_ms,
-        ));
-        info!("Connector (v3) registered! connector_id: {}, router_socket_id: {}", connector_id, router_socket_id);
+        );
+        info!("Connector (v3) registered! route: {} , connector_id: {} , router_socket_id: {}", route,  connector_id, router_socket_id);
         app_state
             .websocket_farm
             .add_router_socket_in_background(rs);

@@ -72,7 +72,7 @@ lazy_static! {
         let mut s = HashMap::new();
         s.insert(_VER_1_0, CRANKER_V_1_0);
         // V3 not implemented yet
-        // s.insert(_VER_3_0, CRANKER_V_3_0);
+        s.insert(_VER_3_0, CRANKER_V_3_0);
         s
     };
 
@@ -581,7 +581,10 @@ fn extract_cranker_version(
 
     match sub_protocols {
         Some(sp) => {
-            let split = sp.to_str().ok().unwrap().split(",");
+            // error!("sp len {}",sp.len());
+            let spunw = sp.to_str().ok().unwrap();
+            // error!("spunw: {}", spunw);
+            let split = spunw.split(",");
             for v in split.into_iter() {
                 let trimmed = v.trim().replace("cranker_", "");
                 let trimmed = trimmed.as_str();

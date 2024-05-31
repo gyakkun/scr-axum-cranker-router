@@ -17,7 +17,7 @@ use dashmap::DashMap;
 use futures::{FutureExt, SinkExt, TryFutureExt, TryStreamExt};
 use futures::future::BoxFuture;
 use futures::stream::{FusedStream, SplitSink, SplitStream};
-use log::{debug, error, warn};
+use log::{debug, error, info, trace, warn};
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio_stream::StreamExt;
 
@@ -30,9 +30,7 @@ use crate::exceptions::{CrankerRouterException, CREXKind};
 use crate::http_utils::set_target_request_headers;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
-use crate::router_socket::{
-    ClientRequestIdentifier, create_request_line, RouteIdentify, RouterSocket,
-};
+use crate::router_socket::{ClientRequestIdentifier, create_request_line, pipe_and_queue_the_wss_send_task_and_handle_err_chan, pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary, RouteIdentify, RouterSocket};
 use crate::router_socket_v3::StreamState::{Error, Open};
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
@@ -84,14 +82,14 @@ pub struct RouterSocketV3 {
     pub req_id_generator: AtomicI32,
 
     // START WSS EXCHANGE PART
-    underlying_wss_tx: SplitSink<WebSocket, Message>,
-    underlying_wss_rx: SplitStream<WebSocket>,
+    // underlying_wss_tx: SplitSink<WebSocket, Message>,
+    // underlying_wss_rx: SplitStream<WebSocket>,
 
     err_chan_tx: Sender<CrankerRouterException>,
     err_chan_rx: Receiver<CrankerRouterException>,
 
     wss_send_task_tx: Sender<Message>,
-    wss_send_task_rx: Receiver<Message>,
+    // wss_send_task_rx: Receiver<Message>,
     // END OF WSS EXCHANGE PART
 }
 
@@ -137,6 +135,7 @@ impl RouterSocket for RouterSocketV3 {
         addr: &SocketAddr,
         opt_body: Option<BodyDataStream>,
     ) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException> {
+        trace!("1");
         // 0. if is removed then should not run into this method (fast)
         if self.is_removed() {
             return Err(CrankerRouterException::new(format!(
@@ -144,6 +143,7 @@ impl RouterSocket for RouterSocketV3 {
                 &self.router_socket_id
             )));
         }
+        trace!("2");
         let req_id = self.req_id_generator.fetch_add(1, SeqCst);
         let cli_req_ident = Some(ClientRequestIdentifier { request_id: req_id });
         let ctx = Arc::new(RequestContext::new(
@@ -154,6 +154,7 @@ impl RouterSocket for RouterSocketV3 {
         ));
         let old_v = self.context_map.insert(req_id, ctx.clone());
         assert!(old_v.is_none());
+        trace!("3");
 
         // 1. Cli header processing (fast)
         let mut hdr_to_tgt = HeaderMap::new();
@@ -165,6 +166,7 @@ impl RouterSocket for RouterSocketV3 {
             addr,
             original_uri,
         );
+        trace!("4");
 
         // 2. No text based request line is needed, Skip
 
@@ -178,6 +180,7 @@ impl RouterSocket for RouterSocketV3 {
         }
 
         let header_text = create_request_line(method, original_uri);
+        trace!("5");
 
         // WARNING: Start from this line, we are dealing with network I/O
         // Be careful to handle errors. Notify client error ASAP.
@@ -201,6 +204,7 @@ impl RouterSocket for RouterSocketV3 {
             }
             ctx.from_client_bytes.fetch_add(payload_len as i64, SeqCst);
         }
+        trace!("6");
 
         for i in self.proxy_listeners.iter() {
             if let Err(crex) = i.on_after_proxy_to_target_headers_sent(ctx.as_ref(), Some(headers))
@@ -217,6 +221,7 @@ impl RouterSocket for RouterSocketV3 {
                 self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
             }
         }
+        trace!("7");
 
         if opt_body.is_some() {
             let mut body = opt_body
@@ -309,6 +314,7 @@ impl RouterSocket for RouterSocketV3 {
             }
         }
 
+        trace!("8");
 
         // FIXME: The following lines should move to the `async on_cli_req()` method of
         //  `impl RouterSocket for RouterSocketV3` block
@@ -318,6 +324,8 @@ impl RouterSocket for RouterSocketV3 {
             ))
         });
         let mut opt_hdr_str = None;
+        trace!("9");
+
         match recv_hdr_res {
             Err(crex) => {
                 let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
@@ -335,6 +343,7 @@ impl RouterSocket for RouterSocketV3 {
                 }
             }
         }
+        trace!("10");
 
         let full_content = opt_hdr_str.unwrap();
         let cpr_res = CrankerProtocolResponse::try_from_string(full_content);
@@ -348,6 +357,7 @@ impl RouterSocket for RouterSocketV3 {
                 opt_cpr.replace(cpr);
             }
         }
+        trace!("11");
         let cpr = opt_cpr.unwrap();
         let status_code = cpr.status;
         let res_builder_res = cpr.build();
@@ -361,6 +371,7 @@ impl RouterSocket for RouterSocketV3 {
                 opt_res_builder.replace(res_builder);
             }
         }
+        trace!("12");
 
         let res_builder = opt_res_builder.unwrap();
         for i in self.proxy_listeners.iter() {
@@ -377,6 +388,7 @@ impl RouterSocket for RouterSocketV3 {
                 self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
             }
         }
+        trace!("13");
         // todo!();
         let wrapped_stream = ctx.tgt_res_bdy_rx.clone();
         let stream_body = Body::from_stream(wrapped_stream);
@@ -388,6 +400,7 @@ impl RouterSocket for RouterSocketV3 {
             .map_err(|ie| CrankerRouterException::new(
                 format!("failed to build body: {:?}", ie)
             ));
+        trace!("14");
         return match res {
             Ok(res) => {
                 Ok(res)
@@ -1250,6 +1263,8 @@ impl WebSocketListener for RouterSocketV3 {
     }
 
     async fn on_binary(&self, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
+        info!("on binary: {}", binary_msg.len());
+
         // WARNING: Here must return Ok(()).
         // We can not return Error here, otherwise the websocket listener `on_error`
         // will be trigger and error sent to err chan and all connection on the same
@@ -1427,7 +1442,7 @@ impl WebSocketListener for RouterSocketV3 {
 
 impl RouterSocketV3 {
     #[allow(unused_variables)]
-    pub fn new(
+    pub fn new_arc(
         route: String,
         // TODO: Reserved for future enhancement,
         //  currently domain is not in actual use even in mu-cranker-router
@@ -1445,10 +1460,10 @@ impl RouterSocketV3 {
         via_value: String,
         idle_read_timeout_ms: i64,
         ping_sent_after_no_write_for_ms: i64,
-    ) -> Self {
+    ) -> Arc<Self> {
         let (err_chan_tx, err_chan_rx) = async_channel::unbounded();
         let (wss_send_task_tx, wss_send_task_rx) = async_channel::unbounded();
-        Self {
+        let arc_rs = Arc::new(Self {
             route: route.clone(),
             component_name,
             router_socket_id: router_socket_id.clone(),
@@ -1472,16 +1487,31 @@ impl RouterSocketV3 {
             req_id_generator: AtomicI32::new(0),
 
             // START WSS EXCHANGE PART
-            underlying_wss_tx,
-            underlying_wss_rx,
+            // underlying_wss_tx,
+            // underlying_wss_rx,
 
             err_chan_tx,
-            err_chan_rx,
+            err_chan_rx: err_chan_rx.clone(),
 
             wss_send_task_tx,
-            wss_send_task_rx,
+            // wss_send_task_rx,
             // END WSS EXCHANGE PART
-        }
+        });
+        // Abort these two handles in Drop
+        let wss_recv_pipe_join_handle = tokio::spawn(
+            pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary(
+                arc_rs.clone(),
+                arc_rs.clone(),
+                underlying_wss_rx,
+            ));
+        let wss_send_task_join_handle = tokio::spawn(
+            pipe_and_queue_the_wss_send_task_and_handle_err_chan(
+                arc_rs.clone(),
+                arc_rs.clone(),
+                underlying_wss_tx, wss_send_task_rx, err_chan_rx,
+            ));
+
+        arc_rs
     }
 
     pub async fn reset_stream(&self, ctx: &RequestContext, err_code: i32, msg: String) {
