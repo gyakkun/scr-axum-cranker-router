@@ -194,8 +194,7 @@ impl RouterSocket for RouterSocketV3 {
         ctx.is_tgt_can_send_res_now_according_to_rfc2616.store(true, SeqCst);
         for hb in header_bytes {
             let payload_len = (hb.len() - HEADER_LEN_IN_BYTES) as i32;
-            ctx.wss_rtr_to_tgt_pending_ack_bytes
-                .fetch_add(payload_len, SeqCst);
+            ctx.inc_rtr_to_tgt_pending_ack_bytes(payload_len);
             if let Err(crex) = self.send_data(Message::Binary(hb.into())).await {
                 let _ = self
                     .notify_client_request_error(ctx.clone(), crex.clone())
@@ -239,8 +238,7 @@ impl RouterSocket for RouterSocketV3 {
                         opt_copy.replace(bytes.clone());
                     }
                     let data = data_messages(req_id, false, Some(bytes));
-                    ctx.wss_rtr_to_tgt_pending_ack_bytes
-                        .fetch_add((data.len() - HEADER_LEN_IN_BYTES) as i32, SeqCst);
+                    ctx.inc_rtr_to_tgt_pending_ack_bytes((data.len() - HEADER_LEN_IN_BYTES) as i32);
                     if let Err(crex) = self.send_data(Message::Binary(data.to_vec())).await {
                         let _ = self
                             .notify_client_request_error(ctx.clone(), crex.clone())
@@ -598,6 +596,18 @@ impl RequestContext {
         }
     }
 
+    // void sendingBytes
+    fn inc_rtr_to_tgt_pending_ack_bytes(self: &Self, pending: i32) {
+        self.wss_rtr_to_tgt_pending_ack_bytes.fetch_add(pending, SeqCst);
+        if self.wss_rtr_to_tgt_pending_ack_bytes.load(SeqCst) > WATER_MARK_HIGH {
+            if let Ok(_) = self.is_wss_writable
+                .compare_exchange(true, false, SeqCst, SeqCst) {
+                error!("Should block reading from client!");
+            }
+        }
+    }
+
+    // void ackedBytes
     fn target_connector_ack_bytes(self: &Self, ack: i32) {
         self.wss_tgt_connector_ack_bytes.fetch_add(ack, SeqCst);
         self.wss_rtr_to_tgt_pending_ack_bytes
@@ -607,6 +617,7 @@ impl RequestContext {
                 .is_wss_writable
                 .compare_exchange(false, true, SeqCst, SeqCst)
             {
+                error!("Now can unblock reading from client");
                 self.write_it_maybe();
             }
         }
@@ -812,8 +823,11 @@ impl RouterSocketV3 {
         return match send_tgt_bdy_to_chan_res {
             Ok(_) => {
                 if is_end_stream {
-                    let _ = self.notify_client_request_close(ctx, 1000, None).await;
+                    let _ = self.notify_client_request_close(ctx.clone(), 1000, None).await;
                 }
+                ctx.to_client_bytes.fetch_add(len as i64, SeqCst);
+                let win_update_msg = window_update_message(req_id, len as i32);
+                let _ = self.send_data(Message::Binary(win_update_msg.to_vec())).await;
                 Ok(())
             }
             Err(send_err) => {
@@ -1613,7 +1627,7 @@ mod tests {
     #[test]
     pub fn substring_test() {
         let ascii_string = "This is a normal sentence.";
-        let non_ascii_string = "Ｔｈｉｓ　ｉｓ　ｓｅｎｔｅｎｃｅ　ｗｉｔｈ　ｆｕｌｌ　ｗｉｄｔｈ　ｃｈａｒａｃｔｅｒｓ．";
+        let non_ascii_string = "Ｔｈｉｓ　ｉｓ　ａ　ｓｅｎｔｅｎｃｅ　ｗｉｔｈ　ｆｕｌｌ　ｗｉｄｔｈ　ｃｈａｒａｃｔｅｒｓ．";
         // char is 4 bytes long and can represent any utf8 character
         let char_vec = non_ascii_string.chars().collect::<Vec<char>>();
         let ascii_slice_ok = &ascii_string[0..4];
