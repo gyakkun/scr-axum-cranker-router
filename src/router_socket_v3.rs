@@ -30,11 +30,18 @@ use crate::router_socket_v3::StreamState::Open;
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
 
+// u8
 const _MSG_TYPE_LEN_IN_BYTES: usize = 1;
 // u8
 const _FLAGS_LEN_IN_BYTES: usize = 1;
-// u8
-const _REQ_ID_LEN_IN_BYTES: usize = 4; // i32
+// i32
+const _REQ_ID_LEN_IN_BYTES: usize = 4;
+
+const HEADER_LEN_IN_BYTES: usize = _MSG_TYPE_LEN_IN_BYTES + _FLAGS_LEN_IN_BYTES + _REQ_ID_LEN_IN_BYTES;
+
+const _END_STREAM_FLAG_MASK: u8 = 0b00000001;
+
+const _END_HEADER_FLAG_MASK: u8 = 0b00000100;
 
 const MESSAGE_TYPE_DATA: u8 = 0;
 const MESSAGE_TYPE_HEADER: u8 = 1;
@@ -167,12 +174,44 @@ impl RouterSocket for RouterSocketV3 {
 
         let header_text = create_request_line(method, original_uri);
 
-        if opt_body.is_none() {}
+        // WARNING: Start from this line, we are dealing with network I/O
+        // Be careful to handle errors. Notify client error ASAP.
 
         // 3. No text based end marker is needed
         // but we need to decide the frame type and flag
-        // FIXME: The flags should depend on flags
-        let header_bytes = header_messages(req_id, true, false, header_text);
+        if opt_body.is_none() {
+            // FIXME: The flags should depend on flags
+            let header_bytes = header_messages(req_id, true, false, header_text);
+            for hb in header_bytes {
+                let payload_len = (hb.len() - HEADER_LEN_IN_BYTES) as i32;
+                ctx.wss_rtr_to_tgt_pending_ack_bytes.fetch_add(
+                    payload_len, SeqCst,
+                );
+                if let Err(crex) = self.send_data(Message::Binary(hb.into())).await {
+                    self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+                }
+                ctx.from_client_bytes.fetch_add(
+                    payload_len as i64, SeqCst,
+                );
+            }
+
+            for i in self.proxy_listeners.iter() {
+                if let Err(crex) = i.on_after_proxy_to_target_headers_sent(
+                    ctx.as_ref(), Some(headers),
+                ) {
+                    self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+                }
+                if let Err(crex) = i.on_request_body_sent_to_target(
+                    ctx.as_ref()
+                ) {
+                    self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+                }
+            }
+        } else {
+
+        }
+
+
 
         // todo!();
         Err(CrankerRouterException::new("".to_string()))
@@ -193,6 +232,7 @@ impl RouterSocket for RouterSocketV3 {
         // }
         // ```
     }
+
 
     async fn send_ws_msg_to_uwss(self: Arc<Self>, message: Message) -> Result<(), CrankerRouterException> {
         self.send_data(message).await
@@ -512,6 +552,15 @@ impl RouterSocketV3 {
             })
     }
 
+    fn handle_on_cli_request_err(
+        &self,
+        ctx: &RequestContext,
+        crex: CrankerRouterException,
+    ) -> Result<(), CrankerRouterException> {
+        let _ = self.reset_stream(ctx, 1001, "Going away".to_string());
+        Err(crex)
+    }
+
     pub async fn handle_data(&self, ctx: Arc<RequestContext>, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
         let is_end_stream = judge_is_stream_end_from_flags(flags);
         let len = bin.remaining();
@@ -802,10 +851,6 @@ impl RouterSocketV3 {
     }
 }
 
-
-const _END_STREAM_FLAG_MASK: u8 = 0b00000001;
-const _END_HEADER_FLAG_MASK: u8 = 0b00000100;
-
 #[inline]
 fn judge_is_stream_end_from_flags(flags: u8) -> bool {
     flags & _END_STREAM_FLAG_MASK == _END_STREAM_FLAG_MASK
@@ -832,6 +877,8 @@ fn rst_message(req_id: i32, err_code: i32, msg: String) -> Bytes {
     bm.put_i32(req_id);
     bm.put_i32(err_code);
     bm.put(msg.as_str().as_bytes());
+    // FIXME: Use into() to convert Bytes to Vec<u8> for free. Currently Bytes.to_vec() are mostly
+    //  being used.
     bm.into()
 }
 
@@ -852,9 +899,18 @@ fn header_messages(req_id: i32, is_header_end: bool, is_stream_end: bool, full_h
     let char_vec = full_header_line.chars().collect::<Vec<char>>();
     let mut chunks = char_vec.chunks(chunk_size);
     let mut res = Vec::new();
-    while let Some(slice) = chunks.next() {
-        let part = slice.iter().collect::<String>();
-        res.push(header_message(req_id, is_header_end, is_stream_end, part));
+    let chunk_count = chunks.len();
+    let mut i = 0;
+    while i < chunk_count {
+        let slice = chunks.next().unwrap();
+        let part = slice.iter().collect();
+        let is_last = i == chunk_count - 1;
+        res.push(
+            header_message(
+                req_id, is_last, is_stream_end, part,
+            )
+        );
+        i += 1;
     }
     res
 }
