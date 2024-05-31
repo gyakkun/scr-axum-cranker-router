@@ -10,6 +10,7 @@ use axum::async_trait;
 use axum::extract::OriginalUri;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::http::{HeaderMap, Method, Request, Response, StatusCode, Version};
+use axum::http::response::Builder;
 use axum_core::body::{Body, BodyDataStream};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dashmap::DashMap;
@@ -169,6 +170,9 @@ impl RouterSocket for RouterSocketV3 {
 
         for i in self.proxy_listeners.iter() {
             if let Err(crex) = i.on_before_proxy_to_target(ctx.as_ref(), &mut hdr_to_tgt) {
+                let _ = self
+                    .notify_client_request_error(ctx.clone(), crex.clone())
+                    .await;
                 self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
             }
         }
@@ -190,6 +194,9 @@ impl RouterSocket for RouterSocketV3 {
             ctx.wss_rtr_to_tgt_pending_ack_bytes
                 .fetch_add(payload_len, SeqCst);
             if let Err(crex) = self.send_data(Message::Binary(hb.into())).await {
+                let _ = self
+                    .notify_client_request_error(ctx.clone(), crex.clone())
+                    .await;
                 self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
             }
             ctx.from_client_bytes.fetch_add(payload_len as i64, SeqCst);
@@ -198,9 +205,15 @@ impl RouterSocket for RouterSocketV3 {
         for i in self.proxy_listeners.iter() {
             if let Err(crex) = i.on_after_proxy_to_target_headers_sent(ctx.as_ref(), Some(headers))
             {
+                let _ = self
+                    .notify_client_request_error(ctx.clone(), crex.clone())
+                    .await;
                 self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
             }
             if let Err(crex) = i.on_request_body_sent_to_target(ctx.as_ref()) {
+                let _ = self
+                    .notify_client_request_error(ctx.clone(), crex.clone())
+                    .await;
                 self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
             }
         }
@@ -307,13 +320,13 @@ impl RouterSocket for RouterSocketV3 {
         let mut opt_hdr_str = None;
         match recv_hdr_res {
             Err(crex) => {
-                let _ = self.notify_client_request_error(ctx.clone(), crex.clone());
+                let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
                 self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
             }
             Ok(inner_res) => {
                 match inner_res {
                     Err(crex) => {
-                        let _ = self.notify_client_request_error(ctx.clone(), crex.clone());
+                        let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
                         self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
                     }
                     Ok(hdr_str) => {
@@ -324,26 +337,71 @@ impl RouterSocket for RouterSocketV3 {
         }
 
         let full_content = opt_hdr_str.unwrap();
-        let cpr = CrankerProtocolResponse::try_from_string(full_content)?;
+        let cpr_res = CrankerProtocolResponse::try_from_string(full_content);
+        let mut opt_cpr = None;
+        match cpr_res {
+            Err(crex) => {
+                let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
+                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+            }
+            Ok(cpr) => {
+                opt_cpr.replace(cpr);
+            }
+        }
+        let cpr = opt_cpr.unwrap();
         let status_code = cpr.status;
-        let res_builder = cpr.build()?;
+        let res_builder_res = cpr.build();
+        let mut opt_res_builder = None;
+        match res_builder_res {
+            Err(crex) => {
+                let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
+                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+            }
+            Ok(res_builder) => {
+                opt_res_builder.replace(res_builder);
+            }
+        }
 
+        let res_builder = opt_res_builder.unwrap();
         for i in self.proxy_listeners.iter() {
-            i.on_before_responding_to_client(ctx.as_ref())?;
-            i.on_after_target_to_proxy_headers_received(
+            if let Err(crex) = i.on_before_responding_to_client(ctx.as_ref()){
+                let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
+                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+            }
+            if let Err(crex) = i.on_after_target_to_proxy_headers_received(
                 ctx.as_ref(),
                 status_code,
                 res_builder.headers_ref(),
-            )?;
+            ) {
+                let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
+                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+            }
         }
         // todo!();
-        // let wrapped_stream = ctx.tgt_res_bdy_rx.clone();
-        // let stream_body = Body::from_stream(wrapped_stream);
-        Err(CrankerRouterException::new("".to_string()))
+        let wrapped_stream = ctx.tgt_res_bdy_rx.clone();
+        let stream_body = Body::from_stream(wrapped_stream);
+        let res = res_builder
+            .body(stream_body)
+            .map(|body| {
+                (body, cli_req_ident)
+            })
+            .map_err(|ie| CrankerRouterException::new(
+                format!("failed to build body: {:?}", ie)
+            ));
+        return match res {
+            Ok(res) => {
+                Ok(res)
+            }
+            Err(crex) => {
+                let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
+                let _ = self.handle_on_cli_request_err(ctx.as_ref(), crex.clone());
+                Err(crex)
+            }
+        }
 
         // For the response part
         // We need a latch / Notify here to let this function know if the corresponding request context
-        // has already received the response header from target
+        // has already received the response header from target - ctx.tgt_res_bdy_rx
 
         // For flow control, when reading chunks of opt_body, we need to check the req ctx is_wss_writable
         // everytime a chunk is received. And if it's not writable, wait on the Notify
@@ -990,7 +1048,7 @@ impl RouterSocketV3 {
         if crex.clone().opt_err_kind.is_some_and(|ck| {
             #[allow(unreachable_patterns)]
             match ck {
-                CREXKind::TIMEOUT => true,
+                CREXKind::TIMEOUT => true, // FIXME: Where this timeout exception is from in mu?
                 _ => false,
             }
         }) {
