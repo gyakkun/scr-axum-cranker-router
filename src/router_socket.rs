@@ -132,7 +132,6 @@ pub struct RouterSocketV1 {
     wss_send_task_tx: Sender<Message>,
     wss_send_task_join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 
-    should_have_response_notify: Arc<Notify>,
     really_need_on_response_body_chunk_received_from_target: bool,
 }
 
@@ -164,7 +163,6 @@ impl RouterSocketV1 {
         let should_have_response = Arc::new(AtomicBool::new(false));
 
         let router_socket_id_clone = router_socket_id.clone();
-        let should_have_response_notify = Arc::new(Notify::new());
         let really_need_on_response_body_chunk_received_from_target
             = proxy_listeners.iter().any(|i| i.really_need_on_response_body_chunk_received_from_target());
 
@@ -206,8 +204,6 @@ impl RouterSocketV1 {
 
             wss_send_task_tx,
             wss_send_task_join_handle: Arc::new(Mutex::new(None)),
-
-            should_have_response_notify,
 
             really_need_on_response_body_chunk_received_from_target,
         });
@@ -905,7 +901,6 @@ impl RouterSocket for RouterSocketV1 {
         //   RFC2616 - 8.2.2
         //   https://datatracker.ietf.org/doc/html/rfc2616#section-8.2.2
         self.should_have_response.store(true, SeqCst);
-        self.should_have_response_notify.notify_waiters();
         self.wss_send_task_tx.send(Message::Text(cranker_req)).await
             .map_err(|e| CrankerRouterException::new(format!(
                 "failed to send cli req hdr to tgt: {:?}", e

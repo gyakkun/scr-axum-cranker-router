@@ -13,10 +13,11 @@ use axum::http::{HeaderMap, Method, Request, Response, StatusCode, Version};
 use axum_core::body::{Body, BodyDataStream};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dashmap::DashMap;
-use futures::{SinkExt, TryFutureExt};
+use futures::{SinkExt, TryFutureExt, TryStreamExt};
 use futures::stream::{FusedStream, SplitSink, SplitStream};
 use log::{debug, error, warn};
 use tokio::sync::{Mutex, Notify, RwLock};
+use tokio_stream::StreamExt;
 
 use crate::{ACRState, CRANKER_V_3_0, DEF_IDLE_READ_TIMEOUT_MS, DEF_PING_SENT_AFTER_NO_WRITE_FOR_MS};
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
@@ -156,19 +157,8 @@ impl RouterSocket for RouterSocketV3 {
         // 2. No text based request line is needed, Skip
 
         for i in self.proxy_listeners.iter() {
-            let res = i.on_before_proxy_to_target(ctx.as_ref(), &mut hdr_to_tgt);
-            match res {
-                Ok(_) => {}
-                Err(err) => {
-                    let _ = self.reset_stream(
-                        ctx.as_ref(), ERROR_INTERNAL,
-                        format!(
-                            "Proxy listener error - on_before_proxy_to_target : {}",
-                            err.reason
-                        ),
-                    ).await;
-                    return Err(err);
-                }
+            if let Err(crex) = i.on_before_proxy_to_target(ctx.as_ref(), &mut hdr_to_tgt) {
+                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
             }
         }
 
@@ -179,6 +169,9 @@ impl RouterSocket for RouterSocketV3 {
 
         // 3. No text based end marker is needed
         // but we need to decide the frame type and flag
+        ctx.should_have_response.store(true, SeqCst);
+
+        // No req body
         if opt_body.is_none() {
             // FIXME: The flags should depend on flags
             let header_bytes = header_messages(req_id, true, false, header_text);
@@ -207,8 +200,82 @@ impl RouterSocket for RouterSocketV3 {
                     self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
                 }
             }
-        } else {
+        } else
+        // Some req body
+        {
+            let mut body = opt_body.unwrap()
+                .map_err(|e| {
+                    CrankerRouterException::new(
+                        format!("{:?}", e)
+                    )
+                });
+            while let Some(req_body_chunk) = body.next().await {
+                if req_body_chunk.is_err() {
+                    self.handle_on_cli_request_err(ctx.as_ref(), req_body_chunk.err().unwrap())?;
+                }
+                let bytes = req_body_chunk?;
+                let data = data_messages(req_id, false, Some(bytes));
+                ctx.wss_rtr_to_tgt_pending_ack_bytes.fetch_add(
+                    (data.len() - HEADER_LEN_IN_BYTES) as i32, SeqCst,
+                );
+                if let Err(crex) = self.send_data(Message::Binary(data.to_vec())).await {
+                    let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
+                    self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+                }
 
+                // Here need to deal with flow control
+                ctx.from_client_bytes.fetch_add(bytes.len() as i64, SeqCst);
+
+                for i in self.proxy_listeners.iter() {
+                    if let Err(crex) = i.on_request_body_chunk_sent_to_target(
+                        ctx.as_ref(), &bytes,
+                    ) {
+                        self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+                    }
+                }
+
+                // void flowControl
+
+                if ctx.is_wss_writable.load(SeqCst) && !ctx.is_wss_writing.load(SeqCst) {
+                    continue;
+                } else {
+                    let should_read_from_cli = Arc::new(AtomicBool::new(false));
+                    let should_read_from_cli_notify = Arc::new(Notify::new());
+                    if let Err(crex) = ctx.should_keep_read_from_cli_tx.send(Ok(
+                        ShouldKeepReadFromCli {
+                            should_read_from_cli: should_read_from_cli.clone(),
+                            should_read_from_cli_notify: should_read_from_cli_notify.clone()
+                        }
+                    )).await.map_err(|e| {
+                        CrankerRouterException::new(format!(
+                            "failed to send to should_keep_read_from_cli_tx: {:?}", e
+                        ))
+                    }) {
+                        let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
+                        self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+                    }
+                    // FIXME: Here will block, so I think the atomic bool in should read from cli
+                    //  is unnecessary
+
+                    // FIXME: Don't know A/B which one should go first
+                    // A)
+                    ctx.write_it_maybe().await;
+                    // B)
+                    should_read_from_cli_notify.notified().await;
+
+                    if !should_read_from_cli.load(SeqCst) {
+                        let failed_reason = format!(
+                            "very rare and weird that the should_read_from_cli_notify is notified but \
+                            should_read_from_cli is still false. route = {}, router socket id = {} , \
+                            req id = {}", self.route(), self.router_socket_id(), req_id
+                        );
+                        error!("{}", failed_reason);
+                        let crex = CrankerRouterException::new(failed_reason);
+                        let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
+                        self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+                    }
+                }
+            }
         }
 
 
@@ -333,12 +400,6 @@ struct RequestContext {
     pub state: RwLock<StreamState>,
     pub header_line_builder: RwLock<String>,
 
-    // use notify to flow control
-    // init true
-    pub can_write: AtomicBool,
-    pub can_write_notify: Notify,
-    pub pause_write_notify: Notify,
-
     // use to notify there's a target response available
     // init false
     pub should_have_response: AtomicBool,
@@ -393,27 +454,22 @@ impl RequestContext {
             state: RwLock::new(Open),
             header_line_builder: RwLock::new(String::new()),
 
-            // use notify to flow control???
-            can_write: AtomicBool::new(true),
-            can_write_notify: Notify::new(),
-            pause_write_notify: Notify::new(),
-
             // use to notify there's a target response available
             should_have_response: AtomicBool::new(false),
         }
     }
 
-    fn target_connector_ack_bytes(self: &Self, ack: i32) {
+    async fn target_connector_ack_bytes(self: &Self, ack: i32) {
         self.wss_tgt_connector_ack_bytes.fetch_add(ack, SeqCst);
         self.wss_rtr_to_tgt_pending_ack_bytes.fetch_add(-ack, SeqCst);
         if self.wss_rtr_to_tgt_pending_ack_bytes.load(SeqCst) < WATER_MARK_LOW {
             if let Ok(_) = self.is_wss_writable.compare_exchange(false, true, SeqCst, SeqCst) {
-                self.write_it_maybe();
+                self.write_it_maybe().await;
             }
         }
     }
 
-    fn write_it_maybe(self: &Self) {
+    async fn write_it_maybe(self: &Self) {
         // if self.is_wss_writable.load(SeqCst) && !
         if self.is_wss_writable.load(SeqCst) && (!self.should_keep_read_from_cli_rx.is_empty()
             && !self.should_keep_read_from_cli_rx.is_closed()
@@ -427,13 +483,22 @@ impl RequestContext {
                     && !self.should_keep_read_from_cli_rx.is_closed()
                     && !self.should_keep_read_from_cli_rx.is_terminated()
                 ) {
-                    // async or sync?
-                    // try sync first
-                    if let Ok(cbrs) = self.should_keep_read_from_cli_rx.try_recv() {
+                    if let Ok(cbrs) = self.should_keep_read_from_cli_rx.recv().await {
                         match cbrs {
                             Ok(cb) => {
-                                // let _ = cb.should_read_from_cli.compare_exchange(false, true, SeqCst, SeqCst);
                                 cb.should_read_from_cli.store(true, SeqCst);
+                                // FIXME: We do two notifications here.
+                                //  According to doc of Notify, `notify_one` will
+                                //  provide one permit, and if there's no one waiting
+                                //  the next waiter will be wakened immediately,
+                                //  where `notify_all` needs to be called after a waiter
+                                //  starts `notified().await`
+                                //  In our case, in `on_client_req` method, I'm currently
+                                //  not sure what's the best practice for the sequence
+                                //  whether to `notified().await` first or `write_it_maybe().await`
+                                //  first. One of the following should be removed once
+                                //  the behaviour is confirmed.
+                                cb.should_read_from_cli_notify.notify_one();
                                 cb.should_read_from_cli_notify.notify_waiters();
                             }
                             Err(err) => {
@@ -444,7 +509,7 @@ impl RequestContext {
                     }
                 }
                 self.is_wss_writing.store(false, SeqCst);
-                self.write_it_maybe();
+                self.write_it_maybe().await;
             }
         }
     }
@@ -670,7 +735,7 @@ impl RouterSocketV3 {
     pub async fn handle_window_update(&self, ctx_arc: Arc<RequestContext>, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
         let ctx = ctx_arc.as_ref();
         let window_update = bin.get_i32();
-        ctx.target_connector_ack_bytes(window_update);
+        ctx.target_connector_ack_bytes(window_update).await;
         Ok(())
     }
 
@@ -879,6 +944,23 @@ fn rst_message(req_id: i32, err_code: i32, msg: String) -> Bytes {
     bm.put(msg.as_str().as_bytes());
     // FIXME: Use into() to convert Bytes to Vec<u8> for free. Currently Bytes.to_vec() are mostly
     //  being used.
+    bm.into()
+}
+
+fn data_messages(req_id: i32, is_end: bool, opt_bin: Option<Bytes>) -> Bytes {
+    let mut bm = BytesMut::new();
+    bm.put_u8(MESSAGE_TYPE_DATA);
+    bm.put_u8({
+        if is_end {
+            1u8
+        } else {
+            0u8
+        }
+    });
+    bm.put_i32(req_id);
+    if let Some(bin) = opt_bin {
+        bm.put(bin);
+    }
     bm.into()
 }
 
@@ -1159,8 +1241,8 @@ impl RouterSocketV3 {
 }
 
 struct ShouldKeepReadFromCli {
-    pub should_read_from_cli: AtomicBool,
-    pub should_read_from_cli_notify: Notify,
+    pub should_read_from_cli: Arc<AtomicBool>,
+    pub should_read_from_cli_notify: Arc<Notify>,
 }
 
 #[cfg(test)]
