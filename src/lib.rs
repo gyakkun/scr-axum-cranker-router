@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::time::Duration;
 
-use axum::{BoxError, Extension, http, Json, Router, ServiceExt};
+use axum::{BoxError, Extension, http, Json, Router};
 use axum::body::{Body, HttpBody};
 use axum::extract::{ConnectInfo, OriginalUri, Query, State, WebSocketUpgrade};
 use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
@@ -17,19 +17,17 @@ use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
-use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
 use lazy_static::lazy_static;
 use log::{debug, error, warn};
 use tower_http::limit;
 use uuid::Uuid;
 
 use crate::dark_mode_manager::DarkModeManager;
-use crate::exceptions::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException, CrankerRouterException, CrexKind};
+use crate::exceptions::{CrankerRouterException, CrexKind};
 use crate::ip_validator::{AllowAll, IPValidator};
 use crate::proxy_listener::ProxyListener;
 use crate::route_resolver::{DefaultRouteResolver, RouteResolver};
 use crate::router_info::RouterInfo;
-use crate::router_socket::RouterSocket;
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 
 pub mod router_socket;
@@ -186,7 +184,7 @@ impl CrankerRouter {
     pub async fn health_root(
         State(app_state): State<ACRState>
     ) -> Response {
-        let i = app_state.clone()._counter.load(SeqCst);
+        let _i = app_state.clone()._counter.load(SeqCst);
         (StatusCode::OK, "{\"isAvailable\":true}").into_response()
     }
 

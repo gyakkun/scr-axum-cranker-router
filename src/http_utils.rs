@@ -15,7 +15,7 @@ use crate::exceptions::{CrankerRouterException, CrexKind};
 // Mostly port from ParseUtils, Headtils from mu-server
 pub(super) fn set_target_request_headers(
     cli_hdr: &HeaderMap,
-    mut hdr_to_tgt: &mut HeaderMap,
+    hdr_to_tgt: &mut HeaderMap,
     app_state: &ACRState,
     http_version: &Version,
     cli_remote_addr: &SocketAddr,
@@ -279,7 +279,7 @@ impl ForwardedHeader {
                         );
                     }
                 } else { // state == FHParseState::ParamValue
-                    let mut is_first = !is_quoted_string && buffer.len() == 0;
+                    let is_first = !is_quoted_string && buffer.len() == 0;
                     if is_first && is_ows(c) {
                         // ignore it
                     } else if is_first && c == '"' {

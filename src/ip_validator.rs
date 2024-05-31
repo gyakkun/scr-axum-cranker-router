@@ -12,6 +12,7 @@ impl AllowAll {
     }
 }
 
+#[allow(unused_variables)]
 impl IPValidator for AllowAll {
     fn allow(&self, ip: IpAddr) -> bool { true }
 }

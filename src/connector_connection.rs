@@ -1,5 +1,4 @@
 use serde::Serialize;
-use crate::CRANKER_V_3_0;
 
 #[derive(Serialize, Clone, Debug, Hash, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]

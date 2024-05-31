@@ -1,5 +1,3 @@
-use std::fmt::Debug;
-
 use crate::exceptions::CrankerRouterException;
 use crate::router_socket::RouteIdentify;
 

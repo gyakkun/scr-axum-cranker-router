@@ -22,8 +22,9 @@ use crate::router_socket::{RouteIdentify, RouterSocket};
 
 const MU_ID: &str = "muid";
 
+#[allow(unused_variables)]
 #[async_trait]
-pub trait WebSocketFarmInterface: Sync + Send {
+pub(crate) trait WebSocketFarmInterface: Sync + Send {
     async fn get_router_socket_by_target_path(self: &Arc<Self>, target_path: String) -> Result<Arc<dyn RouterSocket>, CrankerRouterException>;
 
     fn clean_routes_in_background(self: &Arc<Self>, routes_keep_time_millis: i64);
@@ -56,11 +57,11 @@ pub trait WebSocketFarmInterface: Sync + Send {
 
 #[derive(Serialize, Clone, Debug, Hash, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct WaitingSocketTask {
+pub(crate) struct WaitingSocketTask {
     target: String,
 }
 
-pub struct WebSocketFarm {
+pub(crate) struct WebSocketFarm {
     pub route_resolver: Arc<dyn RouteResolver>,
     pub route_to_socket_chan: DashMap<String, (
         Sender<Weak<dyn RouterSocket>>,
@@ -250,7 +251,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
                 .map(|some| {
                     // ( router socket id , router socket )
                     some.value()
-                        .retain(|k, v| {
+                        .retain(|_k, v| {
                             let should_remove = v.connector_id().eq(&connector_id);
                             if should_remove {
                                 warn!("De-registering router_socket_id={}", v.router_socket_id());

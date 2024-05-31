@@ -19,7 +19,7 @@ pub struct CrankerRouterException {
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub(crate) enum CrankerRouterExceptionErrorKind {
+pub enum CrankerRouterExceptionErrorKind {
     Timeout_0001,
 
     NoRouterSocketAvailable_0002,

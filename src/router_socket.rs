@@ -1,8 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::fmt::{Debug, Display};
-use std::future::Future;
-use std::net::{IpAddr, SocketAddr};
+use std::fmt::Debug;
+use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, SeqCst};
@@ -13,11 +12,10 @@ use axum::async_trait;
 use axum::body::Body;
 use axum::extract::OriginalUri;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use axum::handler::Handler;
 use axum::http::{HeaderMap, Method, Response, StatusCode, Version};
 use axum_core::body::BodyDataStream;
 use bytes::Bytes;
-use futures::{Sink, SinkExt, StreamExt, TryFutureExt, TryStreamExt};
+use futures::{SinkExt, StreamExt, TryStreamExt};
 use futures::stream::{SplitSink, SplitStream};
 use log::{debug, error, info, trace};
 use tokio::sync::{Mutex, Notify, RwLock};
@@ -40,7 +38,7 @@ pub const HEADER_MAX_SIZE: usize = 64 * 1024; // 64KBytes
 
 
 // We define these common methods for selecting route in websocket farm
-pub(crate) trait RouteIdentify {
+pub trait RouteIdentify {
     fn router_socket_id(&self) -> String;
     fn route(&self) -> String;
     fn service_address(&self) -> SocketAddr;
@@ -59,11 +57,11 @@ pub(crate) trait RouterSocket: Send + Sync + RouteIdentify {
 
     fn cranker_version(&self) -> &'static str;
 
-    fn raise_completion_event(&self, opt_cli_req_id: Option<ClientRequestIdentifier>) -> Result<(), CrankerRouterException> {
+    fn raise_completion_event(&self, _: Option<ClientRequestIdentifier>) -> Result<(), CrankerRouterException> {
         Ok(())
     }
 
-    fn is_dark_mode_on(&self, dark_hosts: &HashSet<DarkHost>) -> bool {
+    fn is_dark_mode_on(&self, _: &HashSet<DarkHost>) -> bool {
         false
     }
 
@@ -296,48 +294,41 @@ pub(crate) async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessa
         }
     });
     // @outer
-    while let opt_res_msg = underlying_wss_rx.next().await {
-        match opt_res_msg {
-            None => {
+    while let Some(res_msg) = underlying_wss_rx.next().await {
+        match res_msg {
+            Err(wss_recv_err) => {
+                may_ex = Some(CrankerRouterException::new(format!(
+                    "underlying wss recv err: {:?}.", wss_recv_err
+                )));
                 break; // @outer
             }
-            Some(res_msg) => {
-                match res_msg {
-                    Err(wss_recv_err) => {
-                        may_ex = Some(CrankerRouterException::new(format!(
-                            "underlying wss recv err: {:?}.", wss_recv_err
-                        )));
-                        break; // @outer
+            Ok(msg) => {
+                // mimic mu base websocket on anything so that the timeout on read
+                // will be reset
+                read_notifier.notify_waiters();
+                match msg {
+                    Message::Text(txt) => {
+                        trace!("31");
+                        may_ex = wss_listener.on_text(txt).await.err();
+                        trace!("32")
                     }
-                    Ok(msg) => {
-                        // mimic mu base websocket on anything so that the timeout on read
-                        // will be reset
-                        read_notifier.notify_waiters();
-                        match msg {
-                            Message::Text(txt) => {
-                                trace!("31");
-                                may_ex = wss_listener.on_text(txt).await.err();
-                                trace!("32")
-                            }
-                            Message::Binary(bin) => {
-                                may_ex = wss_listener.on_binary(bin).await.err();
-                            }
-                            Message::Ping(ping_hello) => {
-                                may_ex = wss_listener.on_ping(ping_hello).await.err();
-                            }
-                            Message::Pong(pong_msg) => {
-                                may_ex = wss_listener.on_pong(pong_msg).await.err();
-                            }
-                            Message::Close(opt_clo_fra) => {
-                                may_ex = wss_listener.on_close(opt_clo_fra).await.err();
-                                // break; // @outer
-                            }
-                        }
-                        if let Some(ex) = may_ex {
-                            may_ex = None;
-                            let _ = wss_listener.on_error(ex);
-                        }
+                    Message::Binary(bin) => {
+                        may_ex = wss_listener.on_binary(bin).await.err();
                     }
+                    Message::Ping(ping_hello) => {
+                        may_ex = wss_listener.on_ping(ping_hello).await.err();
+                    }
+                    Message::Pong(pong_msg) => {
+                        may_ex = wss_listener.on_pong(pong_msg).await.err();
+                    }
+                    Message::Close(opt_clo_fra) => {
+                        may_ex = wss_listener.on_close(opt_clo_fra).await.err();
+                        // break; // @outer
+                    }
+                }
+                if let Some(ex) = may_ex {
+                    may_ex = None;
+                    let _ = wss_listener.on_error(ex);
                 }
             }
         }
@@ -346,7 +337,7 @@ pub(crate) async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessa
     read_timeout_handle.abort();
 
     if let Some(ex) = may_ex {
-        may_ex = None;
+        // may_ex = None;
         let _ = wss_listener.on_error(ex);
     }
 
@@ -464,7 +455,7 @@ pub(crate) async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
                             }
                         }
                     }
-                    Err(recv_err) => { // Indicates the wss_send_task_rx is EMPTY AND CLOSED
+                    Err(_recv_err) => { // Indicates the wss_send_task_rx is EMPTY AND CLOSED
                         debug!("the wss_send_task_rx is EMPTY AND CLOSED. router_socket_id={}", rs.router_socket_id());
                         break;
                     }
@@ -926,7 +917,7 @@ impl RouterSocket for RouterSocketV1 {
         //  issue. Need to make this pipe part separated.
         // 5. Pipe cli req body to underlying wss (slow, blocking)
         trace!("5");
-        if let Some(mut body) = opt_body {
+        if let Some(body) = opt_body {
             let mut body = body.map_err(|e| CrankerRouterException::new(format!("{:?}", e)));
             trace!("5.5");
             while let Some(req_body_chunk) = body.next().await {
@@ -959,30 +950,19 @@ impl RouterSocket for RouterSocketV1 {
         }
         trace!("21");
 
-        let mut cranker_res: Option<CrankerProtocolResponse> = None;
         // if the wss_recv_pipe chan is EMPTY AND CLOSED then err will come from this recv()
         trace!("22");
         // FIXME: Seems if recv Err here, the client browser will hang?
-        if let hdr_res = self.tgt_res_hdr_rx.recv().await
+        let hdr_res = self.tgt_res_hdr_rx.recv().await
             .map_err(|recv_err|
                 CrankerRouterException::new(format!(
                     "rare ex seems nothing received from tgt res hdr chan and it closed: {:?}. router_socket_id={}",
                     recv_err, self.router_socket_id
                 ))
-            )??  // fast fail
-        {
-            let message_to_apply = hdr_res;
-            cranker_res = Some(CrankerProtocolResponse::try_from_string(message_to_apply)?); // fast fail
-        }
+            )??;  // fast fail
+        let message_to_apply = hdr_res;
+        let cranker_res = CrankerProtocolResponse::try_from_string(message_to_apply)?; // fast fail
 
-        if cranker_res.is_none() {
-            // Should never run into this line
-            return Err(CrankerRouterException::new(
-                "rare ex failed to build response from protocol response".to_string()
-            ));
-        }
-
-        let cranker_res = cranker_res.unwrap();
         let status_code = cranker_res.status;
         let res_builder = cranker_res.build()?; // fast fail
 

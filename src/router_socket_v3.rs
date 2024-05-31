@@ -1,37 +1,31 @@
-use std::fmt::{format, Write};
-use std::future::Future;
-use std::net::{IpAddr, SocketAddr};
-use std::string::FromUtf8Error;
+use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
-use std::sync::atomic::Ordering::{Acquire, Release, SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64};
+use std::sync::atomic::Ordering::{Release, SeqCst};
 
-use async_channel::{Receiver, Sender, SendError};
+use async_channel::{Receiver, Sender};
 use axum::async_trait;
 use axum::extract::OriginalUri;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use axum::http::{HeaderMap, Method, Request, Response, StatusCode, Version};
-use axum::http::response::Builder;
+use axum::http::{HeaderMap, Method, Response, StatusCode, Version};
 use axum_core::body::{Body, BodyDataStream};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dashmap::DashMap;
-use futures::{FutureExt, SinkExt, TryFutureExt, TryStreamExt};
-use futures::future::BoxFuture;
+use futures::{TryStreamExt};
 use futures::stream::{FusedStream, SplitSink, SplitStream};
 use log::{debug, error, info, trace, warn};
-use tokio::sync::{Mutex, Notify, RwLock, RwLockWriteGuard};
+use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
-use crate::{ACRState, CRANKER_V_3_0, DEF_IDLE_READ_TIMEOUT_MS, DEF_PING_SENT_AFTER_NO_WRITE_FOR_MS, time_utils};
-use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
+use crate::{ACRState, CRANKER_V_3_0, time_utils};
 use crate::cranker_protocol_response::CrankerProtocolResponse;
 use crate::exceptions::{CrankerRouterException, CrexKind};
 use crate::http_utils::set_target_request_headers;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
-use crate::router_socket::{ClientRequestIdentifier, create_request_line, pipe_and_queue_the_wss_send_task_and_handle_err_chan, pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary, RouteIdentify, RouterSocket, RouterSocketV1};
-use crate::router_socket_v3::StreamState::{Error, Open};
+use crate::router_socket::{ClientRequestIdentifier, create_request_line, pipe_and_queue_the_wss_send_task_and_handle_err_chan, pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary, RouteIdentify, RouterSocket};
+use crate::router_socket_v3::StreamState::Open;
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
 
@@ -750,7 +744,7 @@ impl RouterSocketV3 {
         ctx: Arc<RequestContext>,
         flags: u8,
         req_id: i32,
-        mut bin: Bytes,
+        bin: Bytes,
     ) -> Result<(), CrankerRouterException> {
         self.check_if_tgt_can_send_res_first(&ctx, req_id).await?;
         let is_end_stream = judge_is_stream_end_from_flags(flags);
@@ -758,7 +752,7 @@ impl RouterSocketV3 {
         let mut opt_copy = None;
         let really_need_on_response_body_chunk_received_from_target
             = self.proxy_listeners.iter().all(|i| { i.really_need_on_request_body_chunk_sent_to_target() });
-        if(really_need_on_response_body_chunk_received_from_target) {
+        if really_need_on_response_body_chunk_received_from_target {
             opt_copy.replace(bin.clone());
         }
         if len == 0 {
@@ -852,45 +846,28 @@ impl RouterSocketV3 {
         ctx: Arc<RequestContext>,
         flags: u8,
         req_id: i32,
-        mut bin: Bytes,
+        bin: Bytes,
     ) -> Result<(), CrankerRouterException> {
         self.check_if_tgt_can_send_res_first(&ctx, req_id).await?;
         let is_stream_end = judge_is_stream_end_from_flags(flags);
         let is_header_end = judge_is_header_end_from_flags(flags);
         let byte_len: i32 = bin.remaining().try_into().map_err(|e| {
             CrankerRouterException::new(format!(
-                "failed to handle remaining bin msg len, it's even larger than i32::MAX, req id = {} , router socket id = {} , route = {}",
-                req_id, ctx.router_socket_id(), ctx.route())
+                "failed to handle remaining bin msg len, it's even larger than i32::MAX ? \
+                ex : {:?} , req id = {} , router socket id = {} , route = {}",
+                e, req_id, ctx.router_socket_id(), ctx.route())
             )
         })?;
         // FIXME: bin.to_vec() is underlying copying the bin
         //  try to do zero-copy here!
-        let mut opt_content: Option<String> = None;
-        let content_conv_res = String::from_utf8(bin.to_vec());
-        match content_conv_res {
-            Ok(str) => {
-                opt_content = Some(str);
-            }
-            Err(fu8e) => {
-                return Err(CrankerRouterException::new(format!(
+        let content = String::from_utf8(bin.to_vec())
+            .map_err(|fu8e| {
+                CrankerRouterException::new(format!(
                     "failed to convert binary to header text in utf8 : {:?}, req id = {} , router socket id = {} , route = {}",
                     fu8e, req_id, ctx.router_socket_id(), ctx.route()
-                )));
-            }
-        }
-        let content = opt_content.unwrap();
+                ))
+            })?;
 
-        // FIXME: This try method returns error if can't release write lock immediately
-        // ctx.header_line_builder.try_write()
-        //     .map(|mut hlb| {
-        //         hlb.push_str(content.as_str())
-        //     })
-        //     .map_err(|e| {
-        //         CrankerRouterException::new(format!(
-        //             "failed to write lock header line builder, req id = {} , router socket id = {} , route = {}",
-        //             req_id, ctx.router_socket_id(), ctx.route()
-        //         ))
-        //     })?;
         {
             let mut hlb = ctx.header_line_builder.write().await;
             hlb.push_str(content.as_str());
@@ -900,7 +877,7 @@ impl RouterSocketV3 {
             ctx.tgt_res_hdr_tx.send(
                 Ok(full_content)
             ).await.map_err(|e| {
-                CrankerRouterException::new("".to_string())
+                CrankerRouterException::new(format!("failed to send header text : {:?}", e))
             })?;
         }
         if is_stream_end {
@@ -915,7 +892,7 @@ impl RouterSocketV3 {
     pub async fn handle_rst_stream(
         &self,
         ctx_arc: Arc<RequestContext>,
-        flags: u8,
+        _: u8,
         req_id: i32,
         mut bin: Bytes,
     ) -> Result<(), CrankerRouterException> {
@@ -931,8 +908,8 @@ impl RouterSocketV3 {
     pub async fn handle_window_update(
         &self,
         ctx_arc: Arc<RequestContext>,
-        flags: u8,
-        req_id: i32,
+        _: u8,
+        _: i32,
         mut bin: Bytes,
     ) -> Result<(), CrankerRouterException> {
         let ctx = ctx_arc.as_ref();

@@ -34,7 +34,7 @@ pub fn get_connector_service_list(
                     if let Some(router_socket) = ws.upgrade() {
                         component_name = Some(router_socket.component_name());
                         let connector_id = router_socket.connector_id();
-                        let mut connector_instance =
+                        let connector_instance =
                             match instance_map.get_mut(&connector_id) {
                                 None => {
                                     let _res = ConnectorInstance {
@@ -72,7 +72,7 @@ pub fn get_connector_service_list(
             connector_services.push(ConnectorService {
                 route: route.clone(),
                 component_name: component_name.unwrap_or("[UNKNOWN]".to_string()),
-                connectors: instance_map.iter().map(|(k, v)| v.clone()).collect(),
+                connectors: instance_map.iter().map(|(_k, v)| v.clone()).collect(),
                 is_catch_all: route == "*",
             })
         });

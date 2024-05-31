@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+
 use serde::Serialize;
 
 #[derive(Serialize, Clone, Debug, Hash, Eq, PartialEq)]

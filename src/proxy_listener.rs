@@ -1,4 +1,3 @@
-use std::fmt::Debug;
 use axum::http::HeaderMap;
 use bytes::Bytes;
 use log::error;
@@ -6,6 +5,7 @@ use log::error;
 use crate::exceptions::CrankerRouterException;
 use crate::proxy_info::ProxyInfo;
 
+#[allow(unused_variables)]
 pub trait ProxyListener: Sync + Send {
     fn on_before_proxy_to_target(&self, info: &dyn ProxyInfo, request_headers_to_target: &mut HeaderMap) -> Result<(), CrankerRouterException> { Ok(()) }
     fn on_before_responding_to_client(&self, info: &dyn ProxyInfo) -> Result<(), CrankerRouterException> { Ok(()) }
