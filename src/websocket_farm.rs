@@ -20,8 +20,6 @@ use crate::proxy_listener::ProxyListener;
 use crate::route_resolver::RouteResolver;
 use crate::router_socket::{RouteIdentify, RouterSocket};
 
-const MU_ID: &str = "muid";
-
 #[allow(unused_variables)]
 #[async_trait]
 pub(crate) trait WebSocketFarmInterface: Sync + Send {
@@ -57,11 +55,11 @@ pub(crate) trait WebSocketFarmInterface: Sync + Send {
 
 #[derive(Serialize, Clone, Debug, Hash, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct WaitingSocketTask {
+pub struct WaitingSocketTask {
     target: String,
 }
 
-pub(crate) struct WebSocketFarm {
+pub struct WebSocketFarm {
     pub route_resolver: Arc<dyn RouteResolver>,
     pub route_to_socket_chan: DashMap<String, (
         Sender<Weak<dyn RouterSocket>>,

@@ -51,7 +51,7 @@ const ERROR_INTERNAL: i32 = 1;
 
 const REQ_CTX_INVALID_OUTER_RS3_MSG: &str = "(invalid router socket v3)";
 
-pub struct RouterSocketV3 {
+pub(crate) struct RouterSocketV3 {
     pub weak_self: RwLock<Option<Weak<RouterSocketV3>>>,
     pub route: String,
     // pub domain:String,
@@ -447,7 +447,7 @@ impl RouterSocket for RouterSocketV3 {
 const WATER_MARK_HIGH: i32 = 64 * 1024;
 const WATER_MARK_LOW: i32 = 16 * 1024;
 
-struct RequestContext {
+pub(crate) struct RequestContext {
     // To mimic RouterSocketV3 in Java, we need a weak reference to
     //  the outer class
     pub weak_outer_router_socket_v3: Weak<RouterSocketV3>,
@@ -1543,7 +1543,7 @@ impl Drop for RouterSocketV3 {
     }
 }
 
-struct ShouldKeepReadFromCli {
+pub(crate) struct ShouldKeepReadFromCli {
     pub should_read_from_cli: Arc<AtomicBool>,
     pub should_read_from_cli_notify: Arc<Notify>,
 }

@@ -37,7 +37,7 @@ pub static DEFAULT_ROUTE_RESOLVER: DefaultRouteResolver = DefaultRouteResolver::
 
 #[test]
 fn test() {
-    let mut s = DashSet::new();
+    let s = DashSet::new();
     let resolver = DefaultRouteResolver::new();
     s.insert("route".to_string());
     s.insert("router/v1/api".to_string());

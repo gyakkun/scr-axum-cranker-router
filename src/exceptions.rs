@@ -148,46 +148,6 @@ impl IntoResponse for CrankerRouterException {
     }
 }
 
-
-#[derive(Debug, Clone)]
-// FIXME: Make these seperated exception error kind of CREX
-pub(crate) struct CrankerProtocolVersionNotSupportedException {
-    version: String,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CrankerProtocolVersionNotFoundException;
-
-impl CrankerProtocolVersionNotSupportedException {
-    pub(crate) fn new(version: String) -> CrankerProtocolVersionNotSupportedException {
-        CrankerProtocolVersionNotSupportedException {
-            version
-        }
-    }
-}
-
-impl CrankerProtocolVersionNotFoundException {
-    pub(crate) fn new() -> CrankerProtocolVersionNotFoundException {
-        CrankerProtocolVersionNotFoundException {}
-    }
-}
-
-impl Display for CrankerProtocolVersionNotFoundException {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Version is null. Please set header Sec-WebSocket-Protocol for cranker protocol negotiation")
-    }
-}
-
-impl Error for CrankerProtocolVersionNotFoundException {}
-
-impl Display for CrankerProtocolVersionNotSupportedException {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Cranker version {} not supported!", &self.version)
-    }
-}
-
-impl Error for CrankerProtocolVersionNotSupportedException {}
-
 #[inline]
 pub fn compose_ex<ANY>(
     opt_total_err: Option<CrankerRouterException>,
@@ -197,11 +157,4 @@ pub fn compose_ex<ANY>(
         return Some(opt_total_err.map_or(ex.clone(), |some| some.plus(ex)));
     }
     return opt_total_err;
-}
-
-#[test]
-fn test_error() {
-    let ex = CrankerProtocolVersionNotSupportedException::new(String::from("v1.0"));
-    println!("{}", ex);
-    assert_eq!(format!("{}", ex), "Cranker version v1.0 not supported!")
 }

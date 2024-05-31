@@ -46,7 +46,7 @@ pub trait RouteIdentify {
 
 
 #[async_trait]
-pub(crate) trait RouterSocket: Send + Sync + RouteIdentify {
+pub trait RouterSocket: Send + Sync + RouteIdentify {
     fn component_name(&self) -> String;
     // TODO: Should make this opt to keep in line with mu
     fn connector_id(&self) -> String;
@@ -92,7 +92,7 @@ pub struct ClientRequestIdentifier {
     pub request_id: i32,
 }
 
-pub struct RouterSocketV1 {
+pub(crate) struct RouterSocketV1 {
     pub route: String,
     pub component_name: String,
     pub router_socket_id: String,
@@ -469,7 +469,7 @@ pub(crate) async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
 }
 
 #[derive(Debug)]
-pub struct RSv1ClientSideResponseSender {
+pub(crate) struct RSv1ClientSideResponseSender {
     pub router_socket_id: String,
     pub bytes_sent: Arc<AtomicI64>,
     pub is_removed: Arc<AtomicBool>,
@@ -1024,7 +1024,7 @@ impl RouterSocket for RouterSocketV1 {
     }
 }
 
-pub(super) fn create_request_line(method: &Method, orig_uri: &OriginalUri) -> String {
+pub(crate) fn create_request_line(method: &Method, orig_uri: &OriginalUri) -> String {
     // Example: GET /example/hello?nonce=1023 HTTP/1.1
     let mut res = String::new();
     res.push_str(method.as_str());
@@ -1040,7 +1040,7 @@ pub(super) fn create_request_line(method: &Method, orig_uri: &OriginalUri) -> St
 // This function deals with a single websocket connection, i.e., a single
 // connected client / user, for which we will spawn two independent tasks (for
 // receiving / sending chat messages).
-pub async fn harvest_router_socket(
+pub(crate) async fn harvest_router_socket(
     wss: WebSocket,
     app_state: ACRState,
     connector_id: String,

@@ -4,7 +4,7 @@ use log::error;
 use crate::cranker_protocol_request_builder::EndMarker::{RequestBodyEnded, RequestBodyPending, RequestHasNoBody};
 use crate::exceptions::{CrankerRouterException, CrexKind};
 
-pub struct CrankerProtocolRequestBuilder {
+pub(crate) struct CrankerProtocolRequestBuilder {
     pub request_line: Option<String>,
     pub header_map_str: Option<String>,
     pub end_marker: Option<EndMarker>,

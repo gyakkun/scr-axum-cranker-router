@@ -8,7 +8,7 @@ use crate::{HOP_BY_HOP_HEADERS, RESPONSE_HEADERS_TO_NOT_SEND_BACK};
 use crate::exceptions::{CrankerRouterException, CrexKind};
 use crate::http_utils::get_custom_hop_by_hop_headers;
 
-pub struct CrankerProtocolResponse {
+pub(crate) struct CrankerProtocolResponse {
     pub headers: Vec<String>,
     pub status: u16,
 }

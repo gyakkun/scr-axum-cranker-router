@@ -153,7 +153,7 @@ impl CrankerRouter {
         }
     }
 
-    pub fn state(&self) -> ACRState { self.state.clone() }
+    pub(crate) fn state(&self) -> ACRState { self.state.clone() }
 
     pub fn registration_axum_router(&self) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
         let res = Router::new()
@@ -481,7 +481,7 @@ impl CrankerRouter {
 }
 
 #[derive(Clone)]
-struct CrankerConnectorInfo {
+pub struct CrankerConnectorInfo {
     connector_id: String,
     route: String,
     component_name: String,
@@ -537,6 +537,7 @@ fn check_via_name(via_name: &String) {
     })
 }
 
+// FIXME: Use it to check
 fn check_proxy_listeners(proxy_listeners: &Vec<Arc<dyn ProxyListener>>) {
     for i in proxy_listeners {
         if i.really_need_on_response_body_chunk_received_from_target() {

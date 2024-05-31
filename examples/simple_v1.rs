@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use axum::http::HeaderMap;
 use log::{info, LevelFilter};
-use log::LevelFilter::{Info, Trace};
+use log::LevelFilter::{Info};
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
 use tokio::try_join;

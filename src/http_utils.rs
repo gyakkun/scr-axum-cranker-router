@@ -13,7 +13,7 @@ use crate::{ACRState, LOCAL_IP};
 use crate::exceptions::{CrankerRouterException, CrexKind};
 
 // Mostly port from ParseUtils, Headtils from mu-server
-pub(super) fn set_target_request_headers(
+pub(crate) fn set_target_request_headers(
     cli_hdr: &HeaderMap,
     hdr_to_tgt: &mut HeaderMap,
     app_state: &ACRState,
@@ -75,7 +75,7 @@ pub(crate) fn get_custom_hop_by_hop_headers(opt_conn_hdr: Option<&HeaderValue>) 
     return res;
 }
 
-pub(super) fn set_forwarded_headers(
+pub(crate) fn set_forwarded_headers(
     cli_hdr: &HeaderMap,
     hdr_to_tgt: &mut HeaderMap,
     discard_client_forwarded_headers: bool,
@@ -105,7 +105,7 @@ pub(super) fn set_forwarded_headers(
     Ok(())
 }
 
-pub(super) fn set_x_forwarded_headers(hdr_to_hdr: &mut HeaderMap, fh: &ForwardedHeader) {
+pub(crate) fn set_x_forwarded_headers(hdr_to_hdr: &mut HeaderMap, fh: &ForwardedHeader) {
     let l = [fh.proto.as_ref(), fh.host.as_ref(), fh.for_value.as_ref()];
     for v in l {
         if let Some(Some(p)) = v.map(|s| s.parse().ok()) {
@@ -114,7 +114,7 @@ pub(super) fn set_x_forwarded_headers(hdr_to_hdr: &mut HeaderMap, fh: &Forwarded
     }
 }
 
-pub(super) fn create_forwarded_header_to_tgt(
+pub(crate) fn create_forwarded_header_to_tgt(
     cli_hdr: &HeaderMap,
     cli_remote_addr: &SocketAddr,
     cli_req_uri: &OriginalUri,
@@ -131,7 +131,7 @@ pub(super) fn create_forwarded_header_to_tgt(
     }
 }
 
-pub(super) fn get_existing_forwarded_headers(hdr: &HeaderMap) -> Result<Vec<ForwardedHeader>, CrankerRouterException> {
+pub(crate) fn get_existing_forwarded_headers(hdr: &HeaderMap) -> Result<Vec<ForwardedHeader>, CrankerRouterException> {
     let all: Vec<String> = header_map_get_all_ok_to_string(hdr, http::header::FORWARDED);
     let mut res = Vec::new();
     if all.is_empty() {
@@ -175,7 +175,7 @@ pub(super) fn get_existing_forwarded_headers(hdr: &HeaderMap) -> Result<Vec<Forw
                 // replace the ":12345" to default port
                 // without regex!
                 let host_clone = host_to_use.clone().unwrap().chars().collect::<Vec<char>>();
-                let mut idx = host_clone.len() - 1;
+                let mut idx = (host_clone.len() - 1) as i32;
                 while idx >= 0 {
                     let c = host_clone.get(idx).unwrap();
                     if !c.is_ascii_digit() {
@@ -213,7 +213,7 @@ pub(super) fn get_existing_forwarded_headers(hdr: &HeaderMap) -> Result<Vec<Forw
 }
 
 #[derive(Default)]
-struct ForwardedHeader {
+pub(crate) struct ForwardedHeader {
     by: Option<String>,
     for_value: Option<String>,
     host: Option<String>,
