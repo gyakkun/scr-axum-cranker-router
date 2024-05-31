@@ -1,4 +1,5 @@
 use std::fmt::{format, Write};
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::string::FromUtf8Error;
 use std::sync::{Arc, Weak};
@@ -112,6 +113,178 @@ impl RouteIdentify for RouterSocketV3 {
     }
 }
 
+
+impl RouterSocketV3 {
+    // A wrapper for consolidating error handling
+    async fn send_request_over_websocket_v3(
+        self: Arc<Self>,
+        app_state: ACRState,
+        http_version: &Version,
+        method: &Method,
+        original_uri: &OriginalUri,
+        headers: &HeaderMap,
+        addr: &SocketAddr,
+        opt_body: Option<BodyDataStream>,
+        req_id: i32,
+        cli_req_ident: Option<ClientRequestIdentifier>,
+        ctx: Arc<RequestContext>,
+    ) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException> {
+        // 1. Cli header processing (fast)
+        let mut hdr_to_tgt = HeaderMap::new();
+        set_target_request_headers(
+            headers,
+            &mut hdr_to_tgt,
+            &app_state,
+            http_version,
+            addr,
+            original_uri,
+        );
+        trace!("4");
+
+        // 2. No text based request line is needed, Skip
+
+        for i in self.proxy_listeners.iter() {
+            i.on_before_proxy_to_target(ctx.as_ref(), &mut hdr_to_tgt)?;
+        }
+
+        let header_text = create_request_line(method, original_uri);
+        trace!("5");
+
+        // WARNING: Start from this line, we are dealing with network I/O
+        // Be careful to handle errors. Notify client error ASAP.
+
+        // 3. No text based end marker is needed,
+        // but we need to decide the frame type and flag.
+        // As always, header first, later body
+
+        let is_stream_end = opt_body.is_none(); // if no body, stream should end right now
+        let header_bytes = header_messages(req_id, true, is_stream_end, header_text);
+        ctx.is_tgt_can_send_res_now_according_to_rfc2616.store(true, SeqCst);
+        for hb in header_bytes {
+            let payload_len = (hb.len() - HEADER_LEN_IN_BYTES) as i32;
+            ctx.inc_rtr_to_tgt_pending_ack_bytes(payload_len);
+            self.send_data(Message::Binary(hb.into())).await?;
+            ctx.from_client_bytes.fetch_add(payload_len as i64, SeqCst);
+        }
+        trace!("6");
+
+        for i in self.proxy_listeners.iter() {
+            i.on_after_proxy_to_target_headers_sent(ctx.as_ref(), Some(headers))?;
+            i.on_request_body_sent_to_target(ctx.as_ref())?;
+        }
+        trace!("7");
+
+        if opt_body.is_some() {
+            let mut body = opt_body
+                .unwrap()
+                .map_err(|e| CrankerRouterException::new(format!("{:?}", e)));
+            while let Some(req_body_chunk) = body.next().await {
+                let bytes = req_body_chunk?;
+                let byte_len = bytes.len();
+                let mut opt_copy = None;
+                let need_to_copy_byte =
+                    self.proxy_listeners.iter().all(|i| i.really_need_on_request_body_chunk_sent_to_target());
+                if need_to_copy_byte {
+                    opt_copy.replace(bytes.clone());
+                }
+                let data = data_messages(req_id, false, Some(bytes));
+                ctx.inc_rtr_to_tgt_pending_ack_bytes((data.len() - HEADER_LEN_IN_BYTES) as i32);
+                self.send_data(Message::Binary(data.to_vec())).await?;
+
+                // Here need to deal with flow control
+                ctx.from_client_bytes.fetch_add(byte_len as i64, SeqCst);
+
+                if let Some(bytes_copy) = opt_copy {
+                    for i in self.proxy_listeners.iter() {
+                        i.on_request_body_chunk_sent_to_target(ctx.as_ref(), &bytes_copy)?;
+                    }
+                }
+
+                // void flowControl
+                if ctx.is_wss_writable.load(SeqCst) && !ctx.is_wss_writing.load(SeqCst) {
+                    continue;
+                } else {
+                    let should_read_from_cli = Arc::new(AtomicBool::new(false));
+                    let should_read_from_cli_notify = Arc::new(Notify::new());
+                    ctx.should_keep_read_from_cli_tx
+                        .send(Ok(ShouldKeepReadFromCli {
+                            should_read_from_cli: should_read_from_cli.clone(),
+                            should_read_from_cli_notify: should_read_from_cli_notify.clone(),
+                        }))
+                        .await
+                        .map_err(|e| {
+                            CrankerRouterException::new(format!(
+                                "failed to send to should_keep_read_from_cli_tx: {:?}",
+                                e
+                            ))
+                        })?;
+                    // FIXME: Here will block, so I think the atomic bool in should read from cli
+                    //  is unnecessary
+
+                    // FIXME: Don't know A/B which one should go first
+                    // A)
+                    ctx.write_it_maybe();
+                    // B)
+                    should_read_from_cli_notify.notified().await;
+
+                    if !should_read_from_cli.load(SeqCst) {
+                        let failed_reason = format!(
+                            "very rare and weird that the should_read_from_cli_notify is notified but \
+                            should_read_from_cli is still false. route = {}, router socket id = {} , \
+                            req id = {}",
+                            self.route(), self.router_socket_id(), req_id
+                        );
+                        error!("{}", failed_reason);
+                        let crex = CrankerRouterException::new(failed_reason);
+                        return Err(crex);
+                    }
+                }
+            }
+        }
+
+        trace!("8");
+
+        // FIXME: The following lines should move to the `async on_cli_req()` method of
+        //  `impl RouterSocket for RouterSocketV3` block
+        let full_content = ctx.tgt_res_hdr_rx.recv().await.map_err(|e| {
+            CrankerRouterException::new(format!(
+                "failed to receive header from ctx: {:?}", e
+            ))
+        })??;
+        trace!("9");
+
+        trace!("10");
+
+        let cpr = CrankerProtocolResponse::try_from_string(full_content)?;
+        trace!("11");
+        let status_code = cpr.status;
+        let res_builder = cpr.build()?;
+        trace!("12");
+
+        for i in self.proxy_listeners.iter() {
+            i.on_before_responding_to_client(ctx.as_ref())?;
+            i.on_after_target_to_proxy_headers_received(
+                ctx.as_ref(),
+                status_code,
+                res_builder.headers_ref(),
+            )?;
+        }
+        trace!("13");
+        // todo!();
+        let wrapped_stream = ctx.tgt_res_bdy_rx.clone();
+        let stream_body = Body::from_stream(wrapped_stream);
+        trace!("14");
+        res_builder
+            .body(stream_body)
+            .map(|body| {
+                (body, cli_req_ident)
+            })
+            .map_err(|ie| CrankerRouterException::new(
+                format!("failed to build body: {:?}", ie)
+            ))
+    }
+}
+
 #[async_trait]
 impl RouterSocket for RouterSocketV3 {
     fn component_name(&self) -> String {
@@ -149,7 +322,7 @@ impl RouterSocket for RouterSocketV3 {
             )));
         }
         trace!("2");
-        let req_id = self.req_id_generator.fetch_add(1, SeqCst);
+        let req_id = self.req_id_generator.fetch_add(1, SeqCst) + 1;
         let cli_req_ident = Some(ClientRequestIdentifier { request_id: req_id });
         let ctx = Arc::new(RequestContext::new(
             Arc::downgrade(&self),
@@ -161,276 +334,33 @@ impl RouterSocket for RouterSocketV3 {
         assert!(old_v.is_none());
         trace!("3");
 
-        // 1. Cli header processing (fast)
-        let mut hdr_to_tgt = HeaderMap::new();
-        set_target_request_headers(
-            headers,
-            &mut hdr_to_tgt,
-            &app_state,
+        return match self.clone().send_request_over_websocket_v3(
+            app_state,
             http_version,
-            addr,
+            method,
             original_uri,
-        );
-        trace!("4");
-
-        // 2. No text based request line is needed, Skip
-
-        for i in self.proxy_listeners.iter() {
-            if let Err(crex) = i.on_before_proxy_to_target(ctx.as_ref(), &mut hdr_to_tgt) {
-                let _ = self
-                    .notify_client_request_error(ctx.clone(), crex.clone())
-                    .await;
-                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-            }
-        }
-
-        let header_text = create_request_line(method, original_uri);
-        trace!("5");
-
-        // WARNING: Start from this line, we are dealing with network I/O
-        // Be careful to handle errors. Notify client error ASAP.
-
-        // 3. No text based end marker is needed,
-        // but we need to decide the frame type and flag.
-        // As always, header first, later body
-
-        let is_stream_end = opt_body.is_none(); // if no body, stream should end right now
-        let header_bytes = header_messages(req_id, true, is_stream_end, header_text);
-        ctx.is_tgt_can_send_res_now_according_to_rfc2616.store(true, SeqCst);
-        for hb in header_bytes {
-            let payload_len = (hb.len() - HEADER_LEN_IN_BYTES) as i32;
-            ctx.inc_rtr_to_tgt_pending_ack_bytes(payload_len);
-            if let Err(crex) = self.send_data(Message::Binary(hb.into())).await {
-                let _ = self
-                    .notify_client_request_error(ctx.clone(), crex.clone())
-                    .await;
-                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-            }
-            ctx.from_client_bytes.fetch_add(payload_len as i64, SeqCst);
-        }
-        trace!("6");
-
-        for i in self.proxy_listeners.iter() {
-            if let Err(crex) = i.on_after_proxy_to_target_headers_sent(ctx.as_ref(), Some(headers))
-            {
-                let _ = self
-                    .notify_client_request_error(ctx.clone(), crex.clone())
-                    .await;
-                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-            }
-            if let Err(crex) = i.on_request_body_sent_to_target(ctx.as_ref()) {
-                let _ = self
-                    .notify_client_request_error(ctx.clone(), crex.clone())
-                    .await;
-                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-            }
-        }
-        trace!("7");
-
-        if opt_body.is_some() {
-            let mut body = opt_body
-                .unwrap()
-                .map_err(|e| CrankerRouterException::new(format!("{:?}", e)));
-            while let Some(req_body_chunk) = body.next().await {
-                if let Err(crex) = req_body_chunk {
-                    self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-                } else if let Ok(bytes) = req_body_chunk {
-                    let byte_len = bytes.len();
-                    let mut opt_copy = None;
-                    let need_to_copy_byte =
-                        self.proxy_listeners.iter().all(|i| i.really_need_on_request_body_chunk_sent_to_target());
-                    if need_to_copy_byte {
-                        opt_copy.replace(bytes.clone());
-                    }
-                    let data = data_messages(req_id, false, Some(bytes));
-                    ctx.inc_rtr_to_tgt_pending_ack_bytes((data.len() - HEADER_LEN_IN_BYTES) as i32);
-                    if let Err(crex) = self.send_data(Message::Binary(data.to_vec())).await {
-                        let _ = self
-                            .notify_client_request_error(ctx.clone(), crex.clone())
-                            .await;
-                        self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-                    }
-
-                    // Here need to deal with flow control
-                    ctx.from_client_bytes.fetch_add(byte_len as i64, SeqCst);
-
-                    if let Some(bytes_copy) = opt_copy {
-                        for i in self.proxy_listeners.iter() {
-                            if let Err(crex) =
-                                i.on_request_body_chunk_sent_to_target(ctx.as_ref(), &bytes_copy)
-                            {
-                                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-                            }
-                        }
-                    }
-
-                    // void flowControl
-
-                    if ctx.is_wss_writable.load(SeqCst) && !ctx.is_wss_writing.load(SeqCst) {
-                        continue;
-                    } else {
-                        let should_read_from_cli = Arc::new(AtomicBool::new(false));
-                        let should_read_from_cli_notify = Arc::new(Notify::new());
-                        if let Err(crex) = ctx
-                            .should_keep_read_from_cli_tx
-                            .send(Ok(ShouldKeepReadFromCli {
-                                should_read_from_cli: should_read_from_cli.clone(),
-                                should_read_from_cli_notify: should_read_from_cli_notify.clone(),
-                            }))
-                            .await
-                            .map_err(|e| {
-                                CrankerRouterException::new(format!(
-                                    "failed to send to should_keep_read_from_cli_tx: {:?}",
-                                    e
-                                ))
-                            })
-                        {
-                            let _ = self
-                                .notify_client_request_error(ctx.clone(), crex.clone())
-                                .await;
-                            self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-                        }
-                        // FIXME: Here will block, so I think the atomic bool in should read from cli
-                        //  is unnecessary
-
-                        // FIXME: Don't know A/B which one should go first
-                        // A)
-                        ctx.write_it_maybe();
-                        // B)
-                        should_read_from_cli_notify.notified().await;
-
-                        if !should_read_from_cli.load(SeqCst) {
-                            let failed_reason = format!(
-                            "very rare and weird that the should_read_from_cli_notify is notified but \
-                            should_read_from_cli is still false. route = {}, router socket id = {} , \
-                            req id = {}", self.route(), self.router_socket_id(), req_id
-                        );
-                            error!("{}", failed_reason);
-                            let crex = CrankerRouterException::new(failed_reason);
-                            let _ = self
-                                .notify_client_request_error(ctx.clone(), crex.clone())
-                                .await;
-                            self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-                        }
-                    }
-                }
-            }
-        }
-
-        trace!("8");
-
-        // FIXME: The following lines should move to the `async on_cli_req()` method of
-        //  `impl RouterSocket for RouterSocketV3` block
-        let recv_hdr_res = ctx.tgt_res_hdr_rx.recv().await.map_err(|e|{
-            CrankerRouterException::new(format!(
-                "failed to receive header from ctx: {:?}", e
-            ))
-        });
-        let mut opt_hdr_str = None;
-        trace!("9");
-
-        match recv_hdr_res {
-            Err(crex) => {
-                let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
-                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-            }
-            Ok(inner_res) => {
-                match inner_res {
-                    Err(crex) => {
-                        let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
-                        self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-                    }
-                    Ok(hdr_str) => {
-                        opt_hdr_str.replace(hdr_str);
-                    }
-                }
-            }
-        }
-        trace!("10");
-
-        let full_content = opt_hdr_str.unwrap();
-        let cpr_res = CrankerProtocolResponse::try_from_string(full_content);
-        let mut opt_cpr = None;
-        match cpr_res {
-            Err(crex) => {
-                let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
-                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-            }
-            Ok(cpr) => {
-                opt_cpr.replace(cpr);
-            }
-        }
-        trace!("11");
-        let cpr = opt_cpr.unwrap();
-        let status_code = cpr.status;
-        let res_builder_res = cpr.build();
-        let mut opt_res_builder = None;
-        match res_builder_res {
-            Err(crex) => {
-                let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
-                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-            }
-            Ok(res_builder) => {
-                opt_res_builder.replace(res_builder);
-            }
-        }
-        trace!("12");
-
-        let res_builder = opt_res_builder.unwrap();
-        for i in self.proxy_listeners.iter() {
-            if let Err(crex) = i.on_before_responding_to_client(ctx.as_ref()){
-                let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
-                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-            }
-            if let Err(crex) = i.on_after_target_to_proxy_headers_received(
-                ctx.as_ref(),
-                status_code,
-                res_builder.headers_ref(),
-            ) {
-                let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
-                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-            }
-        }
-        trace!("13");
-        // todo!();
-        let wrapped_stream = ctx.tgt_res_bdy_rx.clone();
-        let stream_body = Body::from_stream(wrapped_stream);
-        let res = res_builder
-            .body(stream_body)
-            .map(|body| {
-                (body, cli_req_ident)
-            })
-            .map_err(|ie| CrankerRouterException::new(
-                format!("failed to build body: {:?}", ie)
-            ));
-        trace!("14");
-        return match res {
+            headers,
+            addr,
+            opt_body,
+            req_id,
+            cli_req_ident,
+            ctx.clone()
+        ).await {
             Ok(res) => {
                 Ok(res)
             }
             Err(crex) => {
-                let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
+                let _ = self
+                    .notify_client_request_error(ctx.clone(), crex.clone())
+                    .await;
+                // TODO: Unwrap this `handle_on_cli_request_err`
                 let _ = self.handle_on_cli_request_err(ctx.as_ref(), crex.clone());
                 Err(crex)
             }
         }
 
-        // For the response part
-        // We need a latch / Notify here to let this function know if the corresponding request context
-        // has already received the response header from target - ctx.tgt_res_bdy_rx
-
-        // For flow control, when reading chunks of opt_body, we need to check the req ctx is_wss_writable
-        // everytime a chunk is received. And if it's not writable, wait on the Notify
-        // (typical wait on condition (Notify) with endless loop
-        // ```rust
-        // use std::sync::atomic::Ordering::SeqCst;
-        // use super::router_socket_v3::RequestContext;
-        // let ctx = RequestContext::new();
-        // while !ctx.is_wss_writable.load(SeqCst) {
-        //     ctx.is_wss_writable_notify.notified().await;
-        // }
-        // ```
     }
+
 
     async fn send_ws_msg_to_uwss(
         self: Arc<Self>,
