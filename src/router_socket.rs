@@ -1031,7 +1031,7 @@ impl RouterSocket for RouterSocketV1 {
     }
 }
 
-fn create_request_line(method: &Method, orig_uri: &OriginalUri) -> String {
+pub(super) fn create_request_line(method: &Method, orig_uri: &OriginalUri) -> String {
     // Example: GET /example/hello?nonce=1023 HTTP/1.1
     let mut res = String::new();
     res.push_str(method.as_str());

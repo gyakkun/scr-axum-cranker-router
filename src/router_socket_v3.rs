@@ -25,7 +25,7 @@ use crate::exceptions::{CrankerRouterException, CREXKind};
 use crate::http_utils::set_target_request_headers;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
-use crate::router_socket::{ClientRequestIdentifier, RouteIdentify, RouterSocket};
+use crate::router_socket::{ClientRequestIdentifier, create_request_line, RouteIdentify, RouterSocket};
 use crate::router_socket_v3::StreamState::Open;
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
@@ -40,7 +40,7 @@ const MESSAGE_TYPE_DATA: u8 = 0;
 const MESSAGE_TYPE_HEADER: u8 = 1;
 const MESSAGE_TYPE_RST_STREAM: u8 = 3;
 const MESSAGE_TYPE_WINDOW_UPDATE: u8 = 8;
-const ERROR_INTERNAL: u8 = 1;
+const ERROR_INTERNAL: i32 = 1;
 
 const REQ_CTX_INVALID_OUTER_RS3_MSG: &str = "(invalid router socket v3)";
 
@@ -149,12 +149,30 @@ impl RouterSocket for RouterSocketV3 {
         // 2. No text based request line is needed, Skip
 
         for i in self.proxy_listeners.iter() {
-            i.on_before_proxy_to_target(ctx.as_ref(), &mut hdr_to_tgt)?;
+            let res = i.on_before_proxy_to_target(ctx.as_ref(), &mut hdr_to_tgt);
+            match res {
+                Ok(_) => {}
+                Err(err) => {
+                    let _ = self.reset_stream(
+                        ctx.as_ref(), ERROR_INTERNAL,
+                        format!(
+                            "Proxy listener error - on_before_proxy_to_target : {}",
+                            err.reason
+                        ),
+                    ).await;
+                    return Err(err);
+                }
+            }
         }
+
+        let header_text = create_request_line(method, original_uri);
+
+        if opt_body.is_none() {}
 
         // 3. No text based end marker is needed
         // but we need to decide the frame type and flag
-
+        // FIXME: The flags should depend on flags
+        let header_bytes = header_messages(req_id, true, false, header_text);
 
         // todo!();
         Err(CrankerRouterException::new("".to_string()))
@@ -187,7 +205,6 @@ impl RouterSocket for RouterSocketV3 {
 
         let _ = futures::future::join_all(
             self.context_map.iter()
-                // now it's out of iter scope
                 .map(|i| { (self.clone(), i.value().clone(), crex.clone()) })
                 .map(|(self_arc, ctx_arc, crex_clone)| async move {
                     let _ = self_arc.notify_client_request_error(ctx_arc, crex_clone).await;
@@ -586,8 +603,8 @@ impl RouterSocketV3 {
         if is_stream_end {
             let _ = self.notify_client_request_close(ctx, 1000, None).await; // TODO: What does 1000 mean?
         }
-        let window_update_message = window_update_message(req_id, byte_len);
-        self.send_data(Message::Binary(window_update_message.to_vec())).await
+        let win_update_msg = window_update_message(req_id, byte_len);
+        self.send_data(Message::Binary(win_update_msg.to_vec())).await
         // no mu callbacks needed here ? (doneAndPullData, SeqCstBuffer)
     }
 
@@ -815,6 +832,48 @@ fn rst_message(req_id: i32, err_code: i32, msg: String) -> Bytes {
     bm.put_i32(req_id);
     bm.put_i32(err_code);
     bm.put(msg.as_str().as_bytes());
+    bm.into()
+}
+
+fn header_messages(req_id: i32, is_header_end: bool, is_stream_end: bool, full_header_line: String) -> Vec<Bytes>
+{
+    // TODO: Make it configurable?
+    // FIXME: Is this a String char length or byte length?
+    let chunk_size = 16000;
+    let fhl_u8 = full_header_line.as_bytes();
+    if fhl_u8.len() < chunk_size {
+        return vec![header_message(req_id, is_header_end, is_stream_end, full_header_line)]
+    }
+
+    // FIXME: In mu, it operates in String level, that each character won't be divided into
+    //  multiple bytes (in case non-ASCII chars in header, which according to RFC will not
+    //  happen)
+    //  Here we simulate the mu approach. Getting and splitting String is expensive in Rust.
+    let char_vec = full_header_line.chars().collect::<Vec<char>>();
+    let mut chunks = char_vec.chunks(chunk_size);
+    let mut res = Vec::new();
+    while let Some(slice) = chunks.next() {
+        let part = slice.iter().collect::<String>();
+        res.push(header_message(req_id, is_header_end, is_stream_end, part));
+    }
+    res
+}
+
+fn header_message(req_id: i32, is_header_end: bool, is_stream_end: bool,
+                  may_partial_header_line: String) -> Bytes {
+    let mut flags: u8 = 0;
+    if is_stream_end {
+        flags |= _END_STREAM_FLAG_MASK;
+    }
+    if is_header_end {
+        flags |= _END_HEADER_FLAG_MASK;
+    }
+    let bytes = may_partial_header_line.as_bytes();
+    let mut bm = BytesMut::new();
+    bm.put_u8(MESSAGE_TYPE_HEADER);
+    bm.put_u8(flags);
+    bm.put_i32(req_id);
+    bm.put(bytes);
     bm.into()
 }
 
@@ -1119,5 +1178,21 @@ mod tests {
         }
         let _ = join.unwrap().await;
         assert!(dm.is_empty())
+    }
+
+    #[test]
+    pub fn substring_test() {
+        let ascii_string = "This is a normal sentence.";
+        let non_ascii_string = "Ｔｈｉｓ　ｉｓ　ｓｅｎｔｅｎｃｅ　ｗｉｔｈ　ｆｕｌｌ　ｗｉｄｔｈ　ｃｈａｒａｃｔｅｒｓ．";
+        // char is 4 bytes long and can represent any utf8 character
+        let char_vec = non_ascii_string.chars().collect::<Vec<char>>();
+        let ascii_slice_ok = &ascii_string[0..4];
+        for i in char_vec.iter() {
+            eprintln!("{}", i)
+        }
+        eprintln!("{:?}", &char_vec[0..8]);
+        // In this way, we can change from String->Vec<Char>->slice of char (not byte/u8)->back to String
+        eprintln!("{}", &char_vec[0..8].iter().collect::<String>());
+        eprintln!("{}", ascii_slice_ok)
     }
 }
