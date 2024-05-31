@@ -107,7 +107,7 @@ impl RouteIdentify for RouterSocketV3 {
     }
 
     fn service_address(&self) -> SocketAddr {
-        return self.service_address().clone();
+        return self.remote_address.clone();
     }
 }
 
