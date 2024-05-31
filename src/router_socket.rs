@@ -101,7 +101,7 @@ pub struct RouterSocketV1 {
     pub remote_address: SocketAddr,
     pub is_removed: Arc<AtomicBool>,
     // To indicate potential out of order (e.g. binary (body) comes prior to text (header) , rarely possible)
-    pub should_have_response: Arc<AtomicBool>,
+    pub is_tgt_can_send_res_now_according_to_rfc2616: Arc<AtomicBool>,
     // from cli
     pub bytes_received: Arc<AtomicI64>,
     // to cli
@@ -176,7 +176,7 @@ impl RouterSocketV1 {
             remote_address,
 
             is_removed: is_removed.clone(),
-            should_have_response: should_have_response.clone(),
+            is_tgt_can_send_res_now_according_to_rfc2616: should_have_response.clone(),
             bytes_received: bytes_received.clone(),
             bytes_sent: bytes_sent.clone(),
             binary_frame_received: AtomicI64::new(0),
@@ -589,7 +589,7 @@ impl RSv1ClientSideResponseSender {
 #[async_trait]
 impl WebSocketListener for RouterSocketV1 {
     async fn on_text(&self, txt: String) -> Result<(), CrankerRouterException> {
-        if !self.should_have_response.load(SeqCst) {
+        if !self.is_tgt_can_send_res_now_according_to_rfc2616.load(SeqCst) {
             let failed_reason = "recv txt before handle cli req.".to_string();
             return Err(CrankerRouterException::new(failed_reason));
         }
@@ -597,7 +597,7 @@ impl WebSocketListener for RouterSocketV1 {
     }
 
     async fn on_binary(&self, bin: Vec<u8>) -> Result<(), CrankerRouterException> {
-        if !self.should_have_response.load(SeqCst) {
+        if !self.is_tgt_can_send_res_now_according_to_rfc2616.load(SeqCst) {
             let failed_reason = "recv bin before handle cli req.".to_string();
             return Err(CrankerRouterException::new(failed_reason));
         }
@@ -659,7 +659,7 @@ impl WebSocketListener for RouterSocketV1 {
         }
         trace!("42");
         // TODO: Handle the reason carefully like mu cranker router
-        if self.should_have_response.load(SeqCst)
+        if self.is_tgt_can_send_res_now_according_to_rfc2616.load(SeqCst)
             && self.bytes_received.load(Acquire) == 0
         {
             trace!("43");
@@ -900,7 +900,7 @@ impl RouterSocket for RouterSocketV1 {
         //
         //   RFC2616 - 8.2.2
         //   https://datatracker.ietf.org/doc/html/rfc2616#section-8.2.2
-        self.should_have_response.store(true, SeqCst);
+        self.is_tgt_can_send_res_now_according_to_rfc2616.store(true, SeqCst);
         self.wss_send_task_tx.send(Message::Text(cranker_req)).await
             .map_err(|e| CrankerRouterException::new(format!(
                 "failed to send cli req hdr to tgt: {:?}", e

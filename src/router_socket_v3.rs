@@ -184,7 +184,7 @@ impl RouterSocket for RouterSocketV3 {
 
         let is_stream_end = opt_body.is_none(); // if no body, stream should end right now
         let header_bytes = header_messages(req_id, true, is_stream_end, header_text);
-        ctx.should_have_response.store(true, SeqCst);
+        ctx.is_tgt_can_send_res_now_according_to_rfc2616.store(true, SeqCst);
         for hb in header_bytes {
             let payload_len = (hb.len() - HEADER_LEN_IN_BYTES) as i32;
             ctx.wss_rtr_to_tgt_pending_ack_bytes
@@ -296,7 +296,49 @@ impl RouterSocket for RouterSocketV3 {
             }
         }
 
+
+        // FIXME: The following lines should move to the `async on_cli_req()` method of
+        //  `impl RouterSocket for RouterSocketV3` block
+        let recv_hdr_res = ctx.tgt_res_hdr_rx.recv().await.map_err(|e|{
+            CrankerRouterException::new(format!(
+                "failed to receive header from ctx: {:?}", e
+            ))
+        });
+        let mut opt_hdr_str = None;
+        match recv_hdr_res {
+            Err(crex) => {
+                let _ = self.notify_client_request_error(ctx.clone(), crex.clone());
+                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+            }
+            Ok(inner_res) => {
+                match inner_res {
+                    Err(crex) => {
+                        let _ = self.notify_client_request_error(ctx.clone(), crex.clone());
+                        self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+                    }
+                    Ok(hdr_str) => {
+                        opt_hdr_str.replace(hdr_str);
+                    }
+                }
+            }
+        }
+
+        let full_content = opt_hdr_str.unwrap();
+        let cpr = CrankerProtocolResponse::try_from_string(full_content)?;
+        let status_code = cpr.status;
+        let res_builder = cpr.build()?;
+
+        for i in self.proxy_listeners.iter() {
+            i.on_before_responding_to_client(ctx.as_ref())?;
+            i.on_after_target_to_proxy_headers_received(
+                ctx.as_ref(),
+                status_code,
+                res_builder.headers_ref(),
+            )?;
+        }
         // todo!();
+        // let wrapped_stream = ctx.tgt_res_bdy_rx.clone();
+        // let stream_body = Body::from_stream(wrapped_stream);
         Err(CrankerRouterException::new("".to_string()))
 
         // For the response part
@@ -427,7 +469,7 @@ struct RequestContext {
 
     // use to notify there's a target response available
     // init false
-    pub should_have_response: AtomicBool,
+    pub is_tgt_can_send_res_now_according_to_rfc2616: AtomicBool,
 }
 
 impl RequestContext {
@@ -481,7 +523,7 @@ impl RequestContext {
             header_line_builder: RwLock::new(String::new()),
 
             // use to notify there's a target response available
-            should_have_response: AtomicBool::new(false),
+            is_tgt_can_send_res_now_according_to_rfc2616: AtomicBool::new(false),
         }
     }
 
@@ -664,7 +706,7 @@ impl RouterSocketV3 {
         req_id: i32,
         mut bin: Bytes,
     ) -> Result<(), CrankerRouterException> {
-        self.check_should_have_response_first(&ctx, req_id).await?;
+        self.check_if_tgt_can_send_res_first(&ctx, req_id).await?;
         let is_end_stream = judge_is_stream_end_from_flags(flags);
         let len = bin.remaining();
         if len == 0 {
@@ -714,12 +756,12 @@ impl RouterSocketV3 {
         };
     }
 
-    async fn check_should_have_response_first(
+    async fn check_if_tgt_can_send_res_first(
         &self,
         ctx: &Arc<RequestContext>,
         req_id: i32,
     ) -> Result<(), CrankerRouterException> {
-        if !ctx.should_have_response.load(SeqCst) {
+        if !ctx.is_tgt_can_send_res_now_according_to_rfc2616.load(SeqCst) {
             let failed_reason = format!(
                 "recv data/bin before handle cli req. route = {} , router socket id = {} , req id = {}",
                 self.route(), self.router_socket_id(), req_id
@@ -738,7 +780,7 @@ impl RouterSocketV3 {
         req_id: i32,
         mut bin: Bytes,
     ) -> Result<(), CrankerRouterException> {
-        self.check_should_have_response_first(&ctx, req_id).await?;
+        self.check_if_tgt_can_send_res_first(&ctx, req_id).await?;
         let is_stream_end = judge_is_stream_end_from_flags(flags);
         let is_header_end = judge_is_header_end_from_flags(flags);
         let byte_len: i32 = bin.remaining().try_into().map_err(|e| {
@@ -781,7 +823,11 @@ impl RouterSocketV3 {
         }
         if is_header_end {
             let full_content = ctx.header_line_builder.read().await.clone();
-            self.do_send_header_to_cli(ctx.as_ref(), full_content)?;
+            ctx.tgt_res_hdr_tx.send(
+                Ok(full_content)
+            ).await.map_err(|e| {
+                CrankerRouterException::new("".to_string())
+            })?;
         }
         if is_stream_end {
             let _ = self.notify_client_request_close(ctx, 1000, None).await; // TODO: What does 1000 mean?
@@ -821,35 +867,6 @@ impl RouterSocketV3 {
         Ok(())
     }
 
-    fn do_send_header_to_cli(
-        &self,
-        ctx: &RequestContext,
-        full_content: String,
-    ) -> Result<(), CrankerRouterException> {
-        ctx.should_have_response.store(true, SeqCst);
-        if true {
-            return Ok(());
-        }
-
-        // FIXME: The following lines should move to the `async on_cli_req()` method of
-        //  `impl RouterSocket for RouterSocketV3` block
-        let cpr = CrankerProtocolResponse::try_from_string(full_content)?;
-        let status_code = cpr.status;
-        let res_builder = cpr.build()?;
-
-        for i in self.proxy_listeners.iter() {
-            i.on_before_responding_to_client(ctx)?;
-            i.on_after_target_to_proxy_headers_received(
-                ctx,
-                status_code,
-                res_builder.headers_ref(),
-            )?;
-        }
-        // let wrapped_stream = ctx.tgt_res_bdy_rx.clone();
-        // let stream_body = Body::from_stream(wrapped_stream);
-
-        Ok(())
-    }
 
     fn check_if_context_exists(
         &self,
@@ -882,7 +899,7 @@ impl RouterSocketV3 {
         let code = ws_status_code;
         let reason = opt_reason.unwrap_or("closed by router".to_string());
 
-        if Self::cli_req_not_start_to_send_to_tgt_yet(ctx) {
+        if Self::is_cli_req_not_start_to_send_to_tgt_yet(ctx) {
             // since here nothing has been sent to cli yet
             // we can send a crex to the ctx.tgt_res_hdr_tx
             // and in case at this moment it's going to response,
@@ -937,8 +954,13 @@ impl RouterSocketV3 {
     }
 
     // Including cli req header
-    fn cli_req_not_start_to_send_to_tgt_yet(ctx: &RequestContext) -> bool {
-        ctx.should_have_response.load(SeqCst) && ctx.bytes_received() == 0
+    fn is_cli_req_not_start_to_send_to_tgt_yet(ctx: &RequestContext) -> bool {
+        // NOTE:
+        // is_tgt_can_send_res_now_according_to_rfc2616 is set true before
+        // the actual first byte of req header being sent to target, but
+        // it's almost at the same time, so it's being used for the this
+        // function
+        ctx.is_tgt_can_send_res_now_according_to_rfc2616.load(SeqCst) && ctx.bytes_received() == 0
     }
 
     async fn cli_fail_prior_to_tgt_res(
@@ -972,7 +994,7 @@ impl RouterSocketV3 {
                 _ => false,
             }
         }) {
-            if Self::cli_req_not_start_to_send_to_tgt_yet(ctx) {
+            if Self::is_cli_req_not_start_to_send_to_tgt_yet(ctx) {
                 let _ = ctx.tgt_res_hdr_tx.send(Err(crex.clone())).await;
                 let _ = ctx.tgt_res_bdy_tx.send(Err(crex.clone())).await;
             } else {
@@ -993,7 +1015,7 @@ impl RouterSocketV3 {
                 let _ = ctx.tgt_res_bdy_tx.send(Err(crex.clone())).await;
             }
         } else {
-            if Self::cli_req_not_start_to_send_to_tgt_yet(ctx) {
+            if Self::is_cli_req_not_start_to_send_to_tgt_yet(ctx) {
                 let crex = crex
                     .clone()
                     .with_status_code(StatusCode::BAD_GATEWAY.as_u16())
