@@ -75,6 +75,10 @@ impl ProxyListener for DemoProxyListener {
     fn really_need_on_response_body_chunk_received_from_target(&self) -> bool {
         false
     }
+
+    fn really_need_on_request_body_chunk_sent_to_target(&self) -> bool {
+        false
+    }
 }
 
 fn get_test_env() -> TestEnv {

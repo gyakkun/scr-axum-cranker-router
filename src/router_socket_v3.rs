@@ -13,20 +13,25 @@ use axum::http::{HeaderMap, Method, Request, Response, StatusCode, Version};
 use axum_core::body::{Body, BodyDataStream};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dashmap::DashMap;
-use futures::{SinkExt, TryFutureExt, TryStreamExt};
+use futures::{FutureExt, SinkExt, TryFutureExt, TryStreamExt};
+use futures::future::BoxFuture;
 use futures::stream::{FusedStream, SplitSink, SplitStream};
 use log::{debug, error, warn};
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio_stream::StreamExt;
 
-use crate::{ACRState, CRANKER_V_3_0, DEF_IDLE_READ_TIMEOUT_MS, DEF_PING_SENT_AFTER_NO_WRITE_FOR_MS};
+use crate::{
+    ACRState, CRANKER_V_3_0, DEF_IDLE_READ_TIMEOUT_MS, DEF_PING_SENT_AFTER_NO_WRITE_FOR_MS,
+};
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::cranker_protocol_response::CrankerProtocolResponse;
 use crate::exceptions::{CrankerRouterException, CREXKind};
 use crate::http_utils::set_target_request_headers;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
-use crate::router_socket::{ClientRequestIdentifier, create_request_line, RouteIdentify, RouterSocket};
+use crate::router_socket::{
+    ClientRequestIdentifier, create_request_line, RouteIdentify, RouterSocket,
+};
 use crate::router_socket_v3::StreamState::{Error, Open};
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
@@ -38,7 +43,8 @@ const _FLAGS_LEN_IN_BYTES: usize = 1;
 // i32
 const _REQ_ID_LEN_IN_BYTES: usize = 4;
 
-const HEADER_LEN_IN_BYTES: usize = _MSG_TYPE_LEN_IN_BYTES + _FLAGS_LEN_IN_BYTES + _REQ_ID_LEN_IN_BYTES;
+const HEADER_LEN_IN_BYTES: usize =
+    _MSG_TYPE_LEN_IN_BYTES + _FLAGS_LEN_IN_BYTES + _REQ_ID_LEN_IN_BYTES;
 
 const _END_STREAM_FLAG_MASK: u8 = 0b00000001;
 
@@ -51,7 +57,6 @@ const MESSAGE_TYPE_WINDOW_UPDATE: u8 = 8;
 const ERROR_INTERNAL: i32 = 1;
 
 const REQ_CTX_INVALID_OUTER_RS3_MSG: &str = "(invalid router socket v3)";
-
 
 pub struct RouterSocketV3 {
     pub route: String,
@@ -89,7 +94,6 @@ pub struct RouterSocketV3 {
     // END OF WSS EXCHANGE PART
 }
 
-
 impl RouteIdentify for RouterSocketV3 {
     fn router_socket_id(&self) -> String {
         return self.router_socket_id.clone();
@@ -122,19 +126,21 @@ impl RouterSocket for RouterSocketV3 {
         return CRANKER_V_3_0;
     }
 
-    async fn on_client_req(self: Arc<Self>,
-                           app_state: ACRState,
-                           http_version: &Version,
-                           method: &Method,
-                           original_uri: &OriginalUri,
-                           headers: &HeaderMap,
-                           addr: &SocketAddr,
-                           opt_body: Option<BodyDataStream>,
+    async fn on_client_req(
+        self: Arc<Self>,
+        app_state: ACRState,
+        http_version: &Version,
+        method: &Method,
+        original_uri: &OriginalUri,
+        headers: &HeaderMap,
+        addr: &SocketAddr,
+        opt_body: Option<BodyDataStream>,
     ) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException> {
         // 0. if is removed then should not run into this method (fast)
         if self.is_removed() {
             return Err(CrankerRouterException::new(format!(
-                "try to handle cli req in a is_removed router socket. router_socket_id={}", &self.router_socket_id
+                "try to handle cli req in a is_removed router socket. router_socket_id={}",
+                &self.router_socket_id
             )));
         }
         let req_id = self.req_id_generator.fetch_add(1, SeqCst);
@@ -151,7 +157,12 @@ impl RouterSocket for RouterSocketV3 {
         // 1. Cli header processing (fast)
         let mut hdr_to_tgt = HeaderMap::new();
         set_target_request_headers(
-            headers, &mut hdr_to_tgt, &app_state, http_version, addr, original_uri,
+            headers,
+            &mut hdr_to_tgt,
+            &app_state,
+            http_version,
+            addr,
+            original_uri,
         );
 
         // 2. No text based request line is needed, Skip
@@ -176,107 +187,114 @@ impl RouterSocket for RouterSocketV3 {
         ctx.should_have_response.store(true, SeqCst);
         for hb in header_bytes {
             let payload_len = (hb.len() - HEADER_LEN_IN_BYTES) as i32;
-            ctx.wss_rtr_to_tgt_pending_ack_bytes.fetch_add(
-                payload_len, SeqCst,
-            );
+            ctx.wss_rtr_to_tgt_pending_ack_bytes
+                .fetch_add(payload_len, SeqCst);
             if let Err(crex) = self.send_data(Message::Binary(hb.into())).await {
                 self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
             }
-            ctx.from_client_bytes.fetch_add(
-                payload_len as i64, SeqCst,
-            );
+            ctx.from_client_bytes.fetch_add(payload_len as i64, SeqCst);
         }
 
         for i in self.proxy_listeners.iter() {
-            if let Err(crex) = i.on_after_proxy_to_target_headers_sent(
-                ctx.as_ref(), Some(headers),
-            ) {
+            if let Err(crex) = i.on_after_proxy_to_target_headers_sent(ctx.as_ref(), Some(headers))
+            {
                 self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
             }
-            if let Err(crex) = i.on_request_body_sent_to_target(
-                ctx.as_ref()
-            ) {
+            if let Err(crex) = i.on_request_body_sent_to_target(ctx.as_ref()) {
                 self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
             }
         }
 
         if opt_body.is_some() {
-            let mut body = opt_body.unwrap()
-                .map_err(|e| {
-                    CrankerRouterException::new(
-                        format!("{:?}", e)
-                    )
-                });
+            let mut body = opt_body
+                .unwrap()
+                .map_err(|e| CrankerRouterException::new(format!("{:?}", e)));
             while let Some(req_body_chunk) = body.next().await {
-                if req_body_chunk.is_err() {
-                    self.handle_on_cli_request_err(ctx.as_ref(), req_body_chunk.err().unwrap())?;
-                }
-                let bytes = req_body_chunk?;
-                let data = data_messages(req_id, false, Some(bytes));
-                ctx.wss_rtr_to_tgt_pending_ack_bytes.fetch_add(
-                    (data.len() - HEADER_LEN_IN_BYTES) as i32, SeqCst,
-                );
-                if let Err(crex) = self.send_data(Message::Binary(data.to_vec())).await {
-                    let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
+                if let Err(crex) = req_body_chunk {
                     self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
-                }
-
-                // Here need to deal with flow control
-                ctx.from_client_bytes.fetch_add(bytes.len() as i64, SeqCst);
-
-                for i in self.proxy_listeners.iter() {
-                    if let Err(crex) = i.on_request_body_chunk_sent_to_target(
-                        ctx.as_ref(), &bytes,
-                    ) {
+                } else if let Ok(bytes) = req_body_chunk {
+                    let byte_len = bytes.len();
+                    let mut opt_copy = None;
+                    let need_to_copy_byte =
+                        self.proxy_listeners.iter().all(|i| i.really_need_on_request_body_chunk_sent_to_target());
+                    if need_to_copy_byte {
+                        opt_copy.replace(bytes.clone());
+                    }
+                    let data = data_messages(req_id, false, Some(bytes));
+                    ctx.wss_rtr_to_tgt_pending_ack_bytes
+                        .fetch_add((data.len() - HEADER_LEN_IN_BYTES) as i32, SeqCst);
+                    if let Err(crex) = self.send_data(Message::Binary(data.to_vec())).await {
+                        let _ = self
+                            .notify_client_request_error(ctx.clone(), crex.clone())
+                            .await;
                         self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
                     }
-                }
 
-                // void flowControl
+                    // Here need to deal with flow control
+                    ctx.from_client_bytes.fetch_add(byte_len as i64, SeqCst);
 
-                if ctx.is_wss_writable.load(SeqCst) && !ctx.is_wss_writing.load(SeqCst) {
-                    continue;
-                } else {
-                    let should_read_from_cli = Arc::new(AtomicBool::new(false));
-                    let should_read_from_cli_notify = Arc::new(Notify::new());
-                    if let Err(crex) = ctx.should_keep_read_from_cli_tx.send(Ok(
-                        ShouldKeepReadFromCli {
-                            should_read_from_cli: should_read_from_cli.clone(),
-                            should_read_from_cli_notify: should_read_from_cli_notify.clone()
+                    if let Some(bytes_copy) = opt_copy {
+                        for i in self.proxy_listeners.iter() {
+                            if let Err(crex) =
+                                i.on_request_body_chunk_sent_to_target(ctx.as_ref(), &bytes_copy)
+                            {
+                                self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+                            }
                         }
-                    )).await.map_err(|e| {
-                        CrankerRouterException::new(format!(
-                            "failed to send to should_keep_read_from_cli_tx: {:?}", e
-                        ))
-                    }) {
-                        let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
-                        self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
                     }
-                    // FIXME: Here will block, so I think the atomic bool in should read from cli
-                    //  is unnecessary
 
-                    // FIXME: Don't know A/B which one should go first
-                    // A)
-                    ctx.write_it_maybe().await;
-                    // B)
-                    should_read_from_cli_notify.notified().await;
+                    // void flowControl
 
-                    if !should_read_from_cli.load(SeqCst) {
-                        let failed_reason = format!(
+                    if ctx.is_wss_writable.load(SeqCst) && !ctx.is_wss_writing.load(SeqCst) {
+                        continue;
+                    } else {
+                        let should_read_from_cli = Arc::new(AtomicBool::new(false));
+                        let should_read_from_cli_notify = Arc::new(Notify::new());
+                        if let Err(crex) = ctx
+                            .should_keep_read_from_cli_tx
+                            .send(Ok(ShouldKeepReadFromCli {
+                                should_read_from_cli: should_read_from_cli.clone(),
+                                should_read_from_cli_notify: should_read_from_cli_notify.clone(),
+                            }))
+                            .await
+                            .map_err(|e| {
+                                CrankerRouterException::new(format!(
+                                    "failed to send to should_keep_read_from_cli_tx: {:?}",
+                                    e
+                                ))
+                            })
+                        {
+                            let _ = self
+                                .notify_client_request_error(ctx.clone(), crex.clone())
+                                .await;
+                            self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+                        }
+                        // FIXME: Here will block, so I think the atomic bool in should read from cli
+                        //  is unnecessary
+
+                        // FIXME: Don't know A/B which one should go first
+                        // A)
+                        ctx.write_it_maybe();
+                        // B)
+                        should_read_from_cli_notify.notified().await;
+
+                        if !should_read_from_cli.load(SeqCst) {
+                            let failed_reason = format!(
                             "very rare and weird that the should_read_from_cli_notify is notified but \
                             should_read_from_cli is still false. route = {}, router socket id = {} , \
                             req id = {}", self.route(), self.router_socket_id(), req_id
                         );
-                        error!("{}", failed_reason);
-                        let crex = CrankerRouterException::new(failed_reason);
-                        let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
-                        self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+                            error!("{}", failed_reason);
+                            let crex = CrankerRouterException::new(failed_reason);
+                            let _ = self
+                                .notify_client_request_error(ctx.clone(), crex.clone())
+                                .await;
+                            self.handle_on_cli_request_err(ctx.as_ref(), crex)?;
+                        }
                     }
                 }
             }
         }
-
-
 
         // todo!();
         Err(CrankerRouterException::new("".to_string()))
@@ -298,30 +316,39 @@ impl RouterSocket for RouterSocketV3 {
         // ```
     }
 
-
-    async fn send_ws_msg_to_uwss(self: Arc<Self>, message: Message) -> Result<(), CrankerRouterException> {
+    async fn send_ws_msg_to_uwss(
+        self: Arc<Self>,
+        message: Message,
+    ) -> Result<(), CrankerRouterException> {
         self.send_data(message).await
     }
 
-    async fn terminate_all_conn(self: Arc<Self>, opt_crex: Option<CrankerRouterException>) -> Result<(), CrankerRouterException> {
+    async fn terminate_all_conn(
+        self: Arc<Self>,
+        opt_crex: Option<CrankerRouterException>,
+    ) -> Result<(), CrankerRouterException> {
         let crex = opt_crex.unwrap_or(CrankerRouterException::new(
-            "terminating all connections on cranker router v3 for unknown reason".to_string()
+            "terminating all connections on cranker router v3 for unknown reason".to_string(),
         ));
 
         let _ = futures::future::join_all(
-            self.context_map.iter()
-                .map(|i| { (self.clone(), i.value().clone(), crex.clone()) })
+            self.context_map
+                .iter()
+                .map(|i| (self.clone(), i.value().clone(), crex.clone()))
                 .map(|(self_arc, ctx_arc, crex_clone)| async move {
-                    let _ = self_arc.notify_client_request_error(ctx_arc, crex_clone).await;
-                })
-        ).await;
+                    let _ = self_arc
+                        .notify_client_request_error(ctx_arc, crex_clone)
+                        .await;
+                }),
+        )
+            .await;
 
         assert!(self.context_map.is_empty());
 
         if !self.context_map.is_empty() {
             error!("seems our dirty deadlock experiment failed! Manually retain all false");
             // TODO: Better method to remove all ?
-            self.context_map.retain(|_, _| { return false });
+            self.context_map.retain(|_, _| return false);
         }
 
         Ok(())
@@ -332,13 +359,15 @@ impl RouterSocket for RouterSocketV3 {
         // Need to do nothing
     }
 
-    fn try_provide_general_error(&self, opt_crex: Option<CrankerRouterException>) -> Result<(), CrankerRouterException> {
+    fn try_provide_general_error(
+        &self,
+        opt_crex: Option<CrankerRouterException>,
+    ) -> Result<(), CrankerRouterException> {
         if let Some(crex) = opt_crex {
             self.context_map.iter().for_each(|i| {
                 let ctx = i.value();
-                let _ = ctx.error.try_write().map(|mut s| {
-                    s.replace(crex.clone())
-                }); // ignore failure
+                let _ = ctx.error.try_write().map(|mut s| s.replace(crex.clone()));
+                // ignore failure
             })
         };
         Ok(())
@@ -349,7 +378,6 @@ impl RouterSocket for RouterSocketV3 {
     }
 }
 
-
 const WATER_MARK_HIGH: i32 = 64 * 1024;
 const WATER_MARK_LOW: i32 = 16 * 1024;
 
@@ -359,7 +387,6 @@ struct RequestContext {
     pub weak_outer_router_socket_v3: Weak<RouterSocketV3>,
 
     /* wss tunnel related */
-
     // wssReceivedAckBytes
     pub wss_tgt_connector_ack_bytes: AtomicI32,
     // isWssSending
@@ -370,14 +397,14 @@ struct RequestContext {
     pub is_wss_writing: AtomicBool,
     // wssWriteCallbacks : ConcurrentLinkedQueue< > (), ???
     pub should_keep_read_from_cli_tx: Sender<Result<ShouldKeepReadFromCli, CrankerRouterException>>,
-    pub should_keep_read_from_cli_rx: Receiver<Result<ShouldKeepReadFromCli, CrankerRouterException>>,
+    pub should_keep_read_from_cli_rx:
+    Receiver<Result<ShouldKeepReadFromCli, CrankerRouterException>>,
     pub wss_on_binary_call_count: AtomicI64,
 
     pub request_id: i32,
     // MuRequest request,
     // MuResponse response,
     // AsyncHandle asyncHandle,
-
     pub req_method: Method,
     pub req_uri: OriginalUri,
 
@@ -410,7 +437,8 @@ impl RequestContext {
         req_method: Method,
         req_uri: OriginalUri,
     ) -> Self {
-        let (should_keep_read_from_cli_tx, should_keep_read_from_cli_rx) = async_channel::unbounded();
+        let (should_keep_read_from_cli_tx, should_keep_read_from_cli_rx) =
+            async_channel::unbounded();
         let (tgt_res_hdr_tx, tgt_res_hdr_rx) = async_channel::unbounded();
         let (tgt_res_bdy_tx, tgt_res_bdy_rx) = async_channel::unbounded();
         RequestContext {
@@ -457,31 +485,37 @@ impl RequestContext {
         }
     }
 
-    async fn target_connector_ack_bytes(self: &Self, ack: i32) {
+    fn target_connector_ack_bytes(self: &Self, ack: i32) {
         self.wss_tgt_connector_ack_bytes.fetch_add(ack, SeqCst);
-        self.wss_rtr_to_tgt_pending_ack_bytes.fetch_add(-ack, SeqCst);
+        self.wss_rtr_to_tgt_pending_ack_bytes
+            .fetch_add(-ack, SeqCst);
         if self.wss_rtr_to_tgt_pending_ack_bytes.load(SeqCst) < WATER_MARK_LOW {
-            if let Ok(_) = self.is_wss_writable.compare_exchange(false, true, SeqCst, SeqCst) {
-                self.write_it_maybe().await;
+            if let Ok(_) = self
+                .is_wss_writable
+                .compare_exchange(false, true, SeqCst, SeqCst)
+            {
+                self.write_it_maybe();
             }
         }
     }
 
-    async fn write_it_maybe(self: &Self) {
+    fn write_it_maybe(self: &Self) {
         // if self.is_wss_writable.load(SeqCst) && !
-        if self.is_wss_writable.load(SeqCst) && (!self.should_keep_read_from_cli_rx.is_empty()
+        if self.is_wss_writable.load(SeqCst)
+            && (!self.should_keep_read_from_cli_rx.is_empty()
             && !self.should_keep_read_from_cli_rx.is_closed()
-            && !self.should_keep_read_from_cli_rx.is_terminated()
-        ) {
-            if let Ok(_) = self.is_wss_writing.compare_exchange(
-                false, true, SeqCst, SeqCst,
-            ) {
+            && !self.should_keep_read_from_cli_rx.is_terminated())
+        {
+            if let Ok(_) = self
+                .is_wss_writing
+                .compare_exchange(false, true, SeqCst, SeqCst)
+            {
                 while self.is_wss_writable.load(SeqCst)
                     && (!self.should_keep_read_from_cli_rx.is_empty()
                     && !self.should_keep_read_from_cli_rx.is_closed()
-                    && !self.should_keep_read_from_cli_rx.is_terminated()
-                ) {
-                    if let Ok(cbrs) = self.should_keep_read_from_cli_rx.recv().await {
+                    && !self.should_keep_read_from_cli_rx.is_terminated())
+                {
+                    if let Ok(cbrs) = self.should_keep_read_from_cli_rx.try_recv() {
                         match cbrs {
                             Ok(cb) => {
                                 cb.should_read_from_cli.store(true, SeqCst);
@@ -507,7 +541,7 @@ impl RequestContext {
                     }
                 }
                 self.is_wss_writing.store(false, SeqCst);
-                self.write_it_maybe().await;
+                self.write_it_maybe();
             }
         }
     }
@@ -572,11 +606,11 @@ impl ProxyInfo for RequestContext {
     }
 
     fn error_if_any(&self) -> Option<CrankerRouterException> {
-        return self.error.try_read()
+        return self
+            .error
+            .try_read()
             .ok()
-            .and_then(|ok|
-                ok.clone().map(|some| some.clone())
-            );
+            .and_then(|ok| ok.clone().map(|some| some.clone()));
     }
 
     fn socket_wait_in_millis(&self) -> i64 {
@@ -596,7 +630,7 @@ impl StreamState {
     fn is_completed(&self) -> bool {
         match self {
             StreamState::Open | StreamState::HalfClose => false,
-            StreamState::Closed | StreamState::Error => true
+            StreamState::Closed | StreamState::Error => true,
         }
     }
 }
@@ -604,15 +638,14 @@ impl StreamState {
 // WSS EXCHANGE PART
 impl RouterSocketV3 {
     pub async fn send_data(&self, wss_msg: Message) -> Result<(), CrankerRouterException> {
-        self.wss_send_task_tx.send(wss_msg).await
-            .map_err(|e| {
-                let failed_reason = format!(
-                    "failed to send_data: {:?}. route = {} , router socket id = {}",
-                    e, self.route, self.router_socket_id
-                );
-                error!("{}", failed_reason);
-                CrankerRouterException::new(failed_reason)
-            })
+        self.wss_send_task_tx.send(wss_msg).await.map_err(|e| {
+            let failed_reason = format!(
+                "failed to send_data: {:?}. route = {} , router socket id = {}",
+                e, self.route, self.router_socket_id
+            );
+            error!("{}", failed_reason);
+            CrankerRouterException::new(failed_reason)
+        })
     }
 
     fn handle_on_cli_request_err(
@@ -624,13 +657,21 @@ impl RouterSocketV3 {
         Err(crex)
     }
 
-    pub async fn handle_data(&self, ctx: Arc<RequestContext>, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
+    pub async fn handle_data(
+        &self,
+        ctx: Arc<RequestContext>,
+        flags: u8,
+        req_id: i32,
+        mut bin: Bytes,
+    ) -> Result<(), CrankerRouterException> {
         self.check_should_have_response_first(&ctx, req_id).await?;
         let is_end_stream = judge_is_stream_end_from_flags(flags);
         let len = bin.remaining();
         if len == 0 {
             if is_end_stream {
-                let _ = self.notify_client_request_close(ctx, 1000/*ws status code*/, None).await;
+                let _ = self
+                    .notify_client_request_close(ctx, 1000 /*ws status code*/, None)
+                    .await;
             }
             return Ok(());
         }
@@ -638,14 +679,19 @@ impl RouterSocketV3 {
         ctx.wss_on_binary_call_count.fetch_add(1, SeqCst);
         if self.is_removed() {
             if is_end_stream {
-                let _ = self.notify_client_request_close(ctx, 1000/*ws status code*/, None).await;
+                let _ = self
+                    .notify_client_request_close(ctx, 1000 /*ws status code*/, None)
+                    .await;
             }
             return Err(CrankerRouterException::new(format!(
                 "recv bin msg from connector but router socket already removed. req_id={}, flags={}", req_id, flags
             )));
         }
 
-        debug!("route={}, router_socket_id={}, sending {} bytes to client", self.route, self.router_socket_id, len);
+        debug!(
+            "route={}, router_socket_id={}, sending {} bytes to client",
+            self.route, self.router_socket_id, len
+        );
         // FIXME: bin.to_vec() is underlying copying the bin
         //  try to do zero-copy here!
         //  We should probably use `bin.into_vec()` here that seems cost-free
@@ -661,14 +707,17 @@ impl RouterSocketV3 {
                 // TODO: in mu they handle error in the asyncHandle.write callback
                 // where should we deal with this?
                 Err(CrankerRouterException::new(format!(
-                    "rare ex failed to send bin to tgt_res_bdy chan: {:?}", send_err
+                    "rare ex failed to send bin to tgt_res_bdy chan: {:?}",
+                    send_err
                 )))
             }
         };
     }
 
     async fn check_should_have_response_first(
-        &self, ctx: &Arc<RequestContext>, req_id: i32,
+        &self,
+        ctx: &Arc<RequestContext>,
+        req_id: i32,
     ) -> Result<(), CrankerRouterException> {
         if !ctx.should_have_response.load(SeqCst) {
             let failed_reason = format!(
@@ -682,8 +731,13 @@ impl RouterSocketV3 {
         Ok(())
     }
 
-
-    pub async fn handle_header(&self, ctx: Arc<RequestContext>, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
+    pub async fn handle_header(
+        &self,
+        ctx: Arc<RequestContext>,
+        flags: u8,
+        req_id: i32,
+        mut bin: Bytes,
+    ) -> Result<(), CrankerRouterException> {
         self.check_should_have_response_first(&ctx, req_id).await?;
         let is_stream_end = judge_is_stream_end_from_flags(flags);
         let is_header_end = judge_is_header_end_from_flags(flags);
@@ -733,11 +787,18 @@ impl RouterSocketV3 {
             let _ = self.notify_client_request_close(ctx, 1000, None).await; // TODO: What does 1000 mean?
         }
         let win_update_msg = window_update_message(req_id, byte_len);
-        self.send_data(Message::Binary(win_update_msg.to_vec())).await
+        self.send_data(Message::Binary(win_update_msg.to_vec()))
+            .await
         // no mu callbacks needed here ? (doneAndPullData, SeqCstBuffer)
     }
 
-    pub async fn handle_rst_stream(&self, ctx_arc: Arc<RequestContext>, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
+    pub async fn handle_rst_stream(
+        &self,
+        ctx_arc: Arc<RequestContext>,
+        flags: u8,
+        req_id: i32,
+        mut bin: Bytes,
+    ) -> Result<(), CrankerRouterException> {
         let error_code = get_error_code(&mut bin);
         let error_message = get_error_message(&mut bin);
         self.notify_client_request_error(ctx_arc.clone(), CrankerRouterException::new(format!(
@@ -747,17 +808,28 @@ impl RouterSocketV3 {
         Ok(())
     }
 
-    pub async fn handle_window_update(&self, ctx_arc: Arc<RequestContext>, flags: u8, req_id: i32, mut bin: Bytes) -> Result<(), CrankerRouterException> {
+    pub async fn handle_window_update(
+        &self,
+        ctx_arc: Arc<RequestContext>,
+        flags: u8,
+        req_id: i32,
+        mut bin: Bytes,
+    ) -> Result<(), CrankerRouterException> {
         let ctx = ctx_arc.as_ref();
         let window_update = bin.get_i32();
-        ctx.target_connector_ack_bytes(window_update).await;
+        ctx.target_connector_ack_bytes(window_update);
         Ok(())
     }
 
-
-    fn do_send_header_to_cli(&self, ctx: &RequestContext, full_content: String) -> Result<(), CrankerRouterException> {
+    fn do_send_header_to_cli(
+        &self,
+        ctx: &RequestContext,
+        full_content: String,
+    ) -> Result<(), CrankerRouterException> {
         ctx.should_have_response.store(true, SeqCst);
-        if true { return Ok(()); }
+        if true {
+            return Ok(());
+        }
 
         // FIXME: The following lines should move to the `async on_cli_req()` method of
         //  `impl RouterSocket for RouterSocketV3` block
@@ -768,7 +840,9 @@ impl RouterSocketV3 {
         for i in self.proxy_listeners.iter() {
             i.on_before_responding_to_client(ctx)?;
             i.on_after_target_to_proxy_headers_received(
-                ctx, status_code, res_builder.headers_ref(),
+                ctx,
+                status_code,
+                res_builder.headers_ref(),
             )?;
         }
         // let wrapped_stream = ctx.tgt_res_bdy_rx.clone();
@@ -777,13 +851,17 @@ impl RouterSocketV3 {
         Ok(())
     }
 
-
-    fn check_if_context_exists(&self, req_id: &i32) -> Result<Arc<RequestContext>, CrankerRouterException> {
+    fn check_if_context_exists(
+        &self,
+        req_id: &i32,
+    ) -> Result<Arc<RequestContext>, CrankerRouterException> {
         let opt_ctx = self.context_map.get(&req_id);
         if opt_ctx.is_none() {
             return Err(CrankerRouterException::new(format!(
                 "can not found ctx for req id={} in router_socket_id={}. route = {}",
-                req_id, self.router_socket_id(), self.route()
+                req_id,
+                self.router_socket_id(),
+                self.route()
             )));
         }
         let ctx = opt_ctx.unwrap().value().clone();
@@ -791,7 +869,12 @@ impl RouterSocketV3 {
     }
 
     // pretty like on_close in RouterSocketV1
-    async fn notify_client_request_close(&self, ctx_arc: Arc<RequestContext>, ws_status_code: u16, opt_reason: Option<String>) -> Result<(), CrankerRouterException> {
+    async fn notify_client_request_close(
+        &self,
+        ctx_arc: Arc<RequestContext>,
+        ws_status_code: u16,
+        opt_reason: Option<String>,
+    ) -> Result<(), CrankerRouterException> {
         let ctx = ctx_arc.as_ref();
         self.proxy_listeners.iter().for_each(|pl| {
             let _ = pl.on_response_body_chunk_received(ctx);
@@ -806,17 +889,11 @@ impl RouterSocketV3 {
             // also send a crex to ctx.tgt_res_bdy_tx (will be wrapped
             // into stream body)
             if code == 1011 {
-                self.cli_fail_prior_to_tgt_res(
-                    ctx,
-                    Some("ws code 1011".to_string()),
-                    Some(502),
-                ).await;
+                self.cli_fail_prior_to_tgt_res(ctx, Some("ws code 1011".to_string()), Some(502))
+                    .await;
             } else if code == 1008 {
-                self.cli_fail_prior_to_tgt_res(
-                    ctx,
-                    Some("ws code 1008".to_string()),
-                    Some(400),
-                ).await;
+                self.cli_fail_prior_to_tgt_res(ctx, Some("ws code 1008".to_string()), Some(400))
+                    .await;
             }
         }
 
@@ -826,14 +903,19 @@ impl RouterSocketV3 {
             } else {
                 error!("closing client request early due to cranker wss connection close with status code={}, reason={}", code, reason);
                 let ex = CrankerRouterException::new(format!(
-                    "upstream server error: ws code={}, reason={}", code, reason
+                    "upstream server error: ws code={}, reason={}",
+                    code, reason
                 ));
                 // I think here same as asyncHandle.complete(exception) in mu cranker router
                 // FIXME: It occurs that the client browser will hang if ex sent here
                 // FIXME: 240528 what the heck is this in v1, it doesn't do anything
                 //  but defines an not invoked future!!!1
-                let _ = async { let _ = ctx.tgt_res_hdr_tx.send(Err(ex.clone())).await; };
-                let _ = async { let _ = ctx.tgt_res_bdy_tx.send(Err(ex.clone())).await; };
+                let _ = async {
+                    let _ = ctx.tgt_res_hdr_tx.send(Err(ex.clone())).await;
+                };
+                let _ = async {
+                    let _ = ctx.tgt_res_bdy_tx.send(Err(ex.clone())).await;
+                };
             }
             ctx.tgt_res_hdr_rx.close();
             ctx.tgt_res_bdy_rx.close();
@@ -844,20 +926,19 @@ impl RouterSocketV3 {
         }));
         self.context_map.remove(&ctx.request_id());
         return match may_ex {
-            Ok(_) => { Ok(()) }
+            Ok(_) => Ok(()),
             Err(crex) => {
                 let _ = ctx.error.try_write().map(|mut g| {
                     g.replace(crex.clone());
                 });
                 Err(crex)
             }
-        }
+        };
     }
 
     // Including cli req header
     fn cli_req_not_start_to_send_to_tgt_yet(ctx: &RequestContext) -> bool {
-        ctx.should_have_response.load(SeqCst)
-            && ctx.bytes_received() == 0
+        ctx.should_have_response.load(SeqCst) && ctx.bytes_received() == 0
     }
 
     async fn cli_fail_prior_to_tgt_res(
@@ -869,25 +950,26 @@ impl RouterSocketV3 {
         let failed_reason = opt_reason.unwrap_or("unknown early failed reason".to_string());
         let failed_code = opt_status_code_to_cli.unwrap_or(500);
         // TODO: Make crex support define status code
-        let ex = CrankerRouterException::new(
-            failed_reason.to_string()
-        ).with_status_code(failed_code);
+        let ex =
+            CrankerRouterException::new(failed_reason.to_string()).with_status_code(failed_code);
         let _ = ctx.tgt_res_hdr_tx.send(Err(ex.clone())).await;
         let _ = ctx.tgt_res_bdy_tx.send(Err(ex)).await;
     }
 
-    async fn notify_client_request_error(&self, ctx_arc: Arc<RequestContext>, crex: CrankerRouterException) {
+    async fn notify_client_request_error(
+        &self,
+        ctx_arc: Arc<RequestContext>,
+        crex: CrankerRouterException,
+    ) {
         let ctx = ctx_arc.as_ref();
         // TODO: Here need to judge if the crex is Timeout Exception or not
         //  It would be good to define our own ErrorKind with `thiserror` crate ASAP!!!
-        let _ = ctx.error.try_write().map(|mut g| {
-            g.replace(crex.clone())
-        });
+        let _ = ctx.error.try_write().map(|mut g| g.replace(crex.clone()));
         if crex.clone().opt_err_kind.is_some_and(|ck| {
             #[allow(unreachable_patterns)]
             match ck {
-                CREXKind::TIMEOUT => { true }
-                _ => { false }
+                CREXKind::TIMEOUT => true,
+                _ => false,
             }
         }) {
             if Self::cli_req_not_start_to_send_to_tgt_yet(ctx) {
@@ -895,9 +977,15 @@ impl RouterSocketV3 {
                 let _ = ctx.tgt_res_bdy_tx.send(Err(crex.clone())).await;
             } else {
                 let failed_reason = "closing cli req early due to timeout";
-                error!("{} , req id = {} , router socket id = {} , route = {}",
-                 failed_reason, ctx.request_id(), ctx.router_socket_id(), ctx.route());
-                let crex = crex.clone()
+                error!(
+                    "{} , req id = {} , router socket id = {} , route = {}",
+                    failed_reason,
+                    ctx.request_id(),
+                    ctx.router_socket_id(),
+                    ctx.route()
+                );
+                let crex = crex
+                    .clone()
                     .with_status_code(StatusCode::GATEWAY_TIMEOUT.as_u16())
                     .append_str(failed_reason)
                     .prepend_str("504 Gateway Timeout");
@@ -906,7 +994,8 @@ impl RouterSocketV3 {
             }
         } else {
             if Self::cli_req_not_start_to_send_to_tgt_yet(ctx) {
-                let crex = crex.clone()
+                let crex = crex
+                    .clone()
                     .with_status_code(StatusCode::BAD_GATEWAY.as_u16())
                     .prepend_str("502 Bad Gateway");
                 let _ = ctx.tgt_res_hdr_tx.send(Err(crex.clone())).await;
@@ -914,15 +1003,20 @@ impl RouterSocketV3 {
             } else {
                 let res_str = "closing cli req early due to cranker wss conn err";
                 let failed_reason = format!("{} {}", res_str, crex.reason);
-                error!("{} , req id = {} , router socket id = {} , route = {}",
-                 failed_reason, ctx.request_id(), ctx.router_socket_id(), ctx.route());
+                error!(
+                    "{} , req id = {} , router socket id = {} , route = {}",
+                    failed_reason,
+                    ctx.request_id(),
+                    ctx.router_socket_id(),
+                    ctx.route()
+                );
                 let crex = crex.clone().append_str(res_str);
                 let _ = ctx.tgt_res_hdr_tx.send(Err(crex.clone())).await;
                 let _ = ctx.tgt_res_bdy_tx.send(Err(crex.clone())).await;
             }
         }
         let _ = self.raise_completion_event(Some(ClientRequestIdentifier {
-            request_id: ctx.request_id()
+            request_id: ctx.request_id(),
         }));
         self.context_map.remove(&ctx.request_id());
         warn!(
@@ -980,14 +1074,23 @@ fn data_messages(req_id: i32, is_end: bool, opt_bin: Option<Bytes>) -> Bytes {
     bm.into()
 }
 
-fn header_messages(req_id: i32, is_header_end: bool, is_stream_end: bool, full_header_line: String) -> Vec<Bytes>
-{
+fn header_messages(
+    req_id: i32,
+    is_header_end: bool,
+    is_stream_end: bool,
+    full_header_line: String,
+) -> Vec<Bytes> {
     // TODO: Make it configurable?
     // FIXME: Is this a String char length or byte length?
     let chunk_size = 16000;
     let fhl_u8 = full_header_line.as_bytes();
     if fhl_u8.len() < chunk_size {
-        return vec![header_message(req_id, is_header_end, is_stream_end, full_header_line)]
+        return vec![header_message(
+            req_id,
+            is_header_end,
+            is_stream_end,
+            full_header_line,
+        )];
     }
 
     // FIXME: In mu, it operates in String level, that each character won't be divided into
@@ -1003,18 +1106,18 @@ fn header_messages(req_id: i32, is_header_end: bool, is_stream_end: bool, full_h
         let slice = chunks.next().unwrap();
         let part = slice.iter().collect();
         let is_last = i == chunk_count - 1;
-        res.push(
-            header_message(
-                req_id, is_last, is_stream_end, part,
-            )
-        );
+        res.push(header_message(req_id, is_last, is_stream_end, part));
         i += 1;
     }
     res
 }
 
-fn header_message(req_id: i32, is_header_end: bool, is_stream_end: bool,
-                  may_partial_header_line: String) -> Bytes {
+fn header_message(
+    req_id: i32,
+    is_header_end: bool,
+    is_stream_end: bool,
+    may_partial_header_line: String,
+) -> Bytes {
     let mut flags: u8 = 0;
     if is_stream_end {
         flags |= _END_STREAM_FLAG_MASK;
@@ -1032,7 +1135,9 @@ fn header_message(req_id: i32, is_header_end: bool, is_stream_end: bool,
 }
 
 fn get_error_code(bin: &mut Bytes) -> i32 {
-    if bin.remaining() >= 4 { return bin.get_i32(); }
+    if bin.remaining() >= 4 {
+        return bin.get_i32();
+    }
     return -1;
 }
 
@@ -1047,7 +1152,6 @@ fn get_error_message(bin: &mut Bytes) -> String {
     return String::new();
 }
 
-
 #[async_trait]
 impl WebSocketListener for RouterSocketV3 {
     async fn on_text(&self, text_msg: String) -> Result<(), CrankerRouterException> {
@@ -1057,7 +1161,9 @@ impl WebSocketListener for RouterSocketV3 {
         // websocket will all be terminated
         let failed_reason = format!(
             "v3 should not send txt msg bug got: {:?}. route = {} , router socket id = {}",
-            text_msg, self.route(), self.router_socket_id()
+            text_msg,
+            self.route(),
+            self.router_socket_id()
         );
         error!("{}", failed_reason);
         Ok(())
@@ -1081,23 +1187,32 @@ impl WebSocketListener for RouterSocketV3 {
         // TODO Add remaining length check here otherwise it will panic
         let mut bin = Bytes::from(binary_msg); // This Bytes::from is likely to be cost-free
         if bin.remaining() < _MSG_TYPE_LEN_IN_BYTES {
-            error!("{:?}", Err(CrankerRouterException::new(
-                "recv bin msg len less than 1 to read msg type byte".to_string()
-            )));
+            error!(
+                "{:?}",
+                CrankerRouterException::new(
+                    "recv bin msg len less than 1 to read msg type byte".to_string()
+                )
+            );
             return Ok(());
         }
         let msg_type_byte = bin.get_u8();
         if bin.remaining() < _FLAGS_LEN_IN_BYTES {
-            error!("{:?}",CrankerRouterException::new(
-                "recv bin msg len less than 2 to read flags byte".to_string()
-            ));
+            error!(
+                "{:?}",
+                CrankerRouterException::new(
+                    "recv bin msg len less than 2 to read flags byte".to_string()
+                )
+            );
             return Ok(());
         }
         let flags_byte = bin.get_u8();
         if bin.remaining() < _REQ_ID_LEN_IN_BYTES {
-            error!("{:?}",CrankerRouterException::new(
-                "recv bin msg len less than 6 to read request id".to_string()
-            ));
+            error!(
+                "{:?}",
+                CrankerRouterException::new(
+                    "recv bin msg len less than 6 to read request id".to_string()
+                )
+            );
             return Ok(());
         }
         let req_id_int = bin.get_i32(); // big endian
@@ -1107,10 +1222,11 @@ impl WebSocketListener for RouterSocketV3 {
             Err(err) => {
                 error!("{:?}", err);
                 return Ok(());
-            },
+            }
         };
 
         let mut res = Ok(());
+        let ctx_for_err = ctx.clone();
         match msg_type_byte {
             MESSAGE_TYPE_DATA => {
                 res = self.handle_data(ctx, flags_byte, req_id_int, bin).await;
@@ -1119,14 +1235,21 @@ impl WebSocketListener for RouterSocketV3 {
                 res = self.handle_header(ctx, flags_byte, req_id_int, bin).await;
             }
             MESSAGE_TYPE_RST_STREAM => {
-                res = self.handle_rst_stream(ctx, flags_byte /*can be ignored*/, req_id_int, bin).await;
+                res = self
+                    .handle_rst_stream(ctx, flags_byte /*can be ignored*/, req_id_int, bin)
+                    .await;
             }
             MESSAGE_TYPE_WINDOW_UPDATE => {
-                res = self.handle_window_update(ctx, flags_byte, req_id_int, bin).await;
+                res = self
+                    .handle_window_update(ctx, flags_byte, req_id_int, bin)
+                    .await;
             }
             _ => {
                 // TODO: Should we on_error here?
-                let failed_reason = format!("Received unknown type: {}. router_socket_id={}", msg_type_byte, self.router_socket_id);
+                let failed_reason = format!(
+                    "Received unknown type: {}. router_socket_id={}",
+                    msg_type_byte, self.router_socket_id
+                );
                 // return Err(CrankerRouterException::new(failed_reason.clone()));
                 error!("{}", failed_reason);
             }
@@ -1134,8 +1257,10 @@ impl WebSocketListener for RouterSocketV3 {
         if res.is_err() {
             let crex = res.err().unwrap();
             error!("err when handling binary: {:?}", crex);
-            let _ = self.notify_client_request_error(ctx.clone(), crex.clone()).await;
-            let _ = self.handle_on_cli_request_err(ctx.as_ref(), crex.clone()).await;
+            let _ = self
+                .notify_client_request_error(ctx_for_err.clone(), crex.clone())
+                .await;
+            let _ = self.handle_on_cli_request_err(ctx_for_err.as_ref(), crex.clone());
         }
 
         Ok(())
@@ -1147,19 +1272,30 @@ impl WebSocketListener for RouterSocketV3 {
         //  cannot even be put into the wss send task channel / queue
         if let Err(e) = self.send_data(Message::Pong(ping_msg)).await {
             return self.on_error(CrankerRouterException::new(format!(
-                "failed to pong back {:?}", e
+                "failed to pong back {:?}",
+                e
             )));
         }
         Ok(())
     }
 
-    async fn on_close(&self, close_msg: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException> {
-        warn!("uwss get close frame: {:?}. router socket id = {}", close_msg, self.router_socket_id);
+    async fn on_close(
+        &self,
+        close_msg: Option<CloseFrame<'static>>,
+    ) -> Result<(), CrankerRouterException> {
+        warn!(
+            "uwss get close frame: {:?}. router socket id = {}",
+            close_msg, self.router_socket_id
+        );
         let mut code: u16 = 4000; // reserved
         let mut reason: Option<String> = None;
         if !self.is_removed() {
             self.web_socket_farm.upgrade().map(|wsf| {
-                wsf.remove_router_socket_in_background(self.route(), self.router_socket_id(), self.get_is_removed_arc_atomic_bool());
+                wsf.remove_router_socket_in_background(
+                    self.route(),
+                    self.router_socket_id(),
+                    self.get_is_removed_arc_atomic_bool(),
+                );
             });
             self.is_removed.store(true, SeqCst);
         }
@@ -1185,15 +1321,19 @@ impl WebSocketListener for RouterSocketV3 {
     fn on_error(&self, err: CrankerRouterException) -> Result<(), CrankerRouterException> {
         // [s]Same as RouterSocketV1[/s]
         // see todo below
-        self.err_chan_tx.send_blocking(err)
+        self.err_chan_tx
+            .send_blocking(err)
             .map(|ok| {
                 // TODO: reset close self here or in rs.ws_ex.reset_all or?
                 // let _ = self.raise_completion_event();
                 ok
             })
-            .map_err(|se| CrankerRouterException::new(format!(
-                "rare ex that failed to send error to err chan: {:?}", se
-            )))
+            .map_err(|se| {
+                CrankerRouterException::new(format!(
+                    "rare ex that failed to send error to err chan: {:?}",
+                    se
+                ))
+            })
     }
 
     fn get_idle_read_timeout_ms(&self) -> i64 {
@@ -1207,23 +1347,24 @@ impl WebSocketListener for RouterSocketV3 {
 
 impl RouterSocketV3 {
     #[allow(unused_variables)]
-    pub fn new(route: String,
-               // TODO: Reserved for future enhancement,
-               //  currently domain is not in actual use even in mu-cranker-router
-               domain: String,
-               component_name: String,
-               router_socket_id: String,
-               web_socket_farm: Weak<WebSocketFarm>,
-               connector_id: String,
-               remote_address: SocketAddr,
-               underlying_wss_tx: SplitSink<WebSocket, Message>,
-               underlying_wss_rx: SplitStream<WebSocket>,
-               proxy_listeners: Vec<Arc<dyn ProxyListener>>,
-               discard_client_forwarded_headers: bool,
-               send_legacy_forwarded_headers: bool,
-               via_value: String,
-               idle_read_timeout_ms: i64,
-               ping_sent_after_no_write_for_ms: i64,
+    pub fn new(
+        route: String,
+        // TODO: Reserved for future enhancement,
+        //  currently domain is not in actual use even in mu-cranker-router
+        domain: String,
+        component_name: String,
+        router_socket_id: String,
+        web_socket_farm: Weak<WebSocketFarm>,
+        connector_id: String,
+        remote_address: SocketAddr,
+        underlying_wss_tx: SplitSink<WebSocket, Message>,
+        underlying_wss_rx: SplitStream<WebSocket>,
+        proxy_listeners: Vec<Arc<dyn ProxyListener>>,
+        discard_client_forwarded_headers: bool,
+        send_legacy_forwarded_headers: bool,
+        via_value: String,
+        idle_read_timeout_ms: i64,
+        ping_sent_after_no_write_for_ms: i64,
     ) -> Self {
         let (err_chan_tx, err_chan_rx) = async_channel::unbounded();
         let (wss_send_task_tx, wss_send_task_rx) = async_channel::unbounded();
@@ -1272,7 +1413,6 @@ impl RouterSocketV3 {
 
         self.context_map.remove(&ctx.request_id);
     }
-
 }
 
 struct ShouldKeepReadFromCli {
@@ -1304,7 +1444,10 @@ mod tests {
     #[test]
     pub fn test_from_u8_slice_to_socket_addr() {
         let into = SocketAddr::new([u8::MAX, u8::MAX, u8::MAX, u8::MAX].into(), u16::MAX);
-        let direct = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(u8::MAX, u8::MAX, u8::MAX, u8::MAX)), u16::MAX);
+        let direct = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(u8::MAX, u8::MAX, u8::MAX, u8::MAX)),
+            u16::MAX,
+        );
         assert_eq!(into, direct)
     }
 
@@ -1314,20 +1457,21 @@ mod tests {
             notify: Notify,
         }
         let dm: Arc<DashMap<i32, Arc<ForTest>>> = Arc::new(DashMap::new());
-        dm.insert(1024, Arc::new(ForTest {
-            notify: Notify::new()
-        }));
+        dm.insert(
+            1024,
+            Arc::new(ForTest {
+                notify: Notify::new(),
+            }),
+        );
 
-        let _ = futures::future::join_all(
-            dm.iter()
-                .map(|i| { (dm.clone(), i.key().clone()) })
-                .map(|(dmc, k)| async move {
-                    dmc.remove(&k);
-                })
-        ).await;
+        let _ = futures::future::join_all(dm.iter().map(|i| (dm.clone(), i.key().clone())).map(
+            |(dmc, k)| async move {
+                dmc.remove(&k);
+            },
+        ))
+            .await;
         assert!(dm.is_empty())
     }
-
 
     #[tokio::test]
     pub async fn test_dashmap_dead_lock_will_pass() {
@@ -1335,9 +1479,12 @@ mod tests {
             notify: Notify,
         }
         let dm: Arc<DashMap<i32, Arc<ForTest>>> = Arc::new(DashMap::new());
-        dm.insert(1024, Arc::new(ForTest {
-            notify: Notify::new()
-        }));
+        dm.insert(
+            1024,
+            Arc::new(ForTest {
+                notify: Notify::new(),
+            }),
+        );
         let mut join: Option<JoinHandle<()>> = None;
         for i in dm.iter() {
             let k = i.key().clone();
