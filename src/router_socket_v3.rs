@@ -23,12 +23,10 @@ use tokio::sync::{Mutex, Notify, RwLock, RwLockWriteGuard};
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
-use crate::{
-    ACRState, CRANKER_V_3_0, DEF_IDLE_READ_TIMEOUT_MS, DEF_PING_SENT_AFTER_NO_WRITE_FOR_MS,
-};
+use crate::{ACRState, CRANKER_V_3_0, DEF_IDLE_READ_TIMEOUT_MS, DEF_PING_SENT_AFTER_NO_WRITE_FOR_MS, time_utils};
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::cranker_protocol_response::CrankerProtocolResponse;
-use crate::exceptions::{CrankerRouterException, CREXKind};
+use crate::exceptions::{CrankerRouterException, CrexKind};
 use crate::http_utils::set_target_request_headers;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
@@ -303,6 +301,33 @@ impl RouterSocket for RouterSocketV3 {
         return CRANKER_V_3_0;
     }
 
+    fn raise_completion_event(&self, opt_cli_req_id: Option<ClientRequestIdentifier>) -> Result<(), CrankerRouterException> {
+        if let Some(cli_req_ident) = opt_cli_req_id {
+            let req_id = cli_req_ident.request_id;
+            let mut opt_ctx_arc = None;
+            if let Some(kv) = self.context_map.get(&req_id) {
+                let ctx_arc = kv.value().clone();
+                opt_ctx_arc.replace(ctx_arc);
+            }
+            if let Some(ctx_arc) = opt_ctx_arc {
+                ctx_arc.duration_millis.store(
+                    time_utils::current_time_millis() - ctx_arc.req_start_time,
+                    Release,
+                );
+                for i in self.proxy_listeners.iter() {
+                    if let Err(crex) = i.on_complete(ctx_arc.as_ref()) {
+                        warn!("Error thrown by on_complete() : {:?}", crex);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn inflight_count(&self) -> i32 {
+        self.context_map.len() as i32
+    }
+
     async fn on_client_req(
         self: Arc<Self>,
         app_state: ACRState,
@@ -312,7 +337,8 @@ impl RouterSocket for RouterSocketV3 {
         headers: &HeaderMap,
         addr: &SocketAddr,
         opt_body: Option<BodyDataStream>,
-    ) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException> {
+    ) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException>
+    {
         trace!("1");
         // 0. if is removed then should not run into this method (fast)
         if self.is_removed() {
@@ -361,7 +387,6 @@ impl RouterSocket for RouterSocketV3 {
 
     }
 
-
     async fn send_ws_msg_to_uwss(
         self: Arc<Self>,
         message: Message,
@@ -369,10 +394,12 @@ impl RouterSocket for RouterSocketV3 {
         self.send_data(message).await
     }
 
+    // onError
     async fn terminate_all_conn(
         self: Arc<Self>,
         opt_crex: Option<CrankerRouterException>,
-    ) -> Result<(), CrankerRouterException> {
+    ) -> Result<(), CrankerRouterException>
+    {
         let crex = opt_crex.unwrap_or(CrankerRouterException::new(
             "terminating all connections on cranker router v3 for unknown reason".to_string(),
         ));
@@ -386,8 +413,7 @@ impl RouterSocket for RouterSocketV3 {
                         .notify_client_request_error(ctx_arc, crex_clone)
                         .await;
                 }),
-        )
-            .await;
+        ).await;
 
         assert!(self.context_map.is_empty());
 
@@ -399,7 +425,7 @@ impl RouterSocket for RouterSocketV3 {
 
         Ok(())
     }
-
+    
     fn inc_bytes_received_from_cli(&self, _: i32) {
         // In V3 it offloads to RequestContext
         // Need to do nothing
@@ -453,6 +479,7 @@ struct RequestContext {
     // AsyncHandle asyncHandle,
     pub req_method: Method,
     pub req_uri: OriginalUri,
+    pub req_start_time: i64,
 
     pub tgt_res_hdr_tx: Sender<Result<String, CrankerRouterException>>,
     pub tgt_res_hdr_rx: Receiver<Result<String, CrankerRouterException>>,
@@ -509,6 +536,8 @@ impl RequestContext {
             // AsyncHandle asyncHandle,
             req_method,
             req_uri,
+            req_start_time: time_utils::current_time_millis(),
+
             tgt_res_hdr_tx,
             tgt_res_hdr_rx,
             tgt_res_bdy_tx,
@@ -951,11 +980,13 @@ impl RouterSocketV3 {
             // also send a crex to ctx.tgt_res_bdy_tx (will be wrapped
             // into stream body)
             if code == 1011 {
-                self.cli_fail_prior_to_tgt_res(ctx, Some("ws code 1011".to_string()), Some(502))
-                    .await;
+                self.cli_fail_prior_to_tgt_res(
+                    ctx, Some("ws code 1011".to_string()), Some(StatusCode::BAD_GATEWAY.as_u16())
+                ).await;
             } else if code == 1008 {
-                self.cli_fail_prior_to_tgt_res(ctx, Some("ws code 1008".to_string()), Some(400))
-                    .await;
+                self.cli_fail_prior_to_tgt_res(
+                    ctx, Some("ws code 1008".to_string()), Some(StatusCode::BAD_REQUEST.as_u16())
+                ).await;
             }
         }
 
@@ -1015,7 +1046,7 @@ impl RouterSocketV3 {
         opt_status_code_to_cli: Option<u16>,
     ) {
         let failed_reason = opt_reason.unwrap_or("unknown early failed reason".to_string());
-        let failed_code = opt_status_code_to_cli.unwrap_or(500);
+        let failed_code = opt_status_code_to_cli.unwrap_or(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
         // TODO: Make crex support define status code
         let ex =
             CrankerRouterException::new(failed_reason.to_string()).with_status_code(failed_code);
@@ -1029,13 +1060,11 @@ impl RouterSocketV3 {
         crex: CrankerRouterException,
     ) {
         let ctx = ctx_arc.as_ref();
-        // TODO: Here need to judge if the crex is Timeout Exception or not
-        //  It would be good to define our own ErrorKind with `thiserror` crate ASAP!!!
         let _ = ctx.error.try_write().map(|mut g| g.replace(crex.clone()));
         if crex.clone().opt_err_kind.is_some_and(|ck| {
             #[allow(unreachable_patterns)]
             match ck {
-                CREXKind::TIMEOUT => true, // FIXME: Where this timeout exception is from in mu?
+                CrexKind::Timeout_0001 => true, // FIXME: Where this timeout exception is from in mu?
                 _ => false,
             }
         }) {
@@ -1237,7 +1266,7 @@ impl WebSocketListener for RouterSocketV3 {
     }
 
     async fn on_binary(&self, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
-        info!("on binary: {}", binary_msg.len());
+        debug!("v3 on binary: {}", binary_msg.len());
 
         // WARNING: Here must return Ok(()).
         // We can not return Error here, otherwise the websocket listener `on_error`
@@ -1387,13 +1416,9 @@ impl WebSocketListener for RouterSocketV3 {
     }
 
     fn on_error(&self, err: CrankerRouterException) -> Result<(), CrankerRouterException> {
-        // [s]Same as RouterSocketV1[/s]
-        // see todo below
         self.err_chan_tx
             .send_blocking(err)
             .map(|ok| {
-                // TODO: reset close self here or in rs.ws_ex.reset_all or?
-                // let _ = self.raise_completion_event();
                 ok
             })
             .map_err(|se| {
@@ -1473,7 +1498,6 @@ impl RouterSocketV3 {
 
             wss_recv_pipe_join_handle: Arc::new(Mutex::new(None)),
             wss_send_task_join_handle: Arc::new(Mutex::new(None)),
-
         });
         let weak_self = Arc::downgrade(&arc_rs);
         let _ = arc_rs.weak_self.try_write().map(|mut g|{

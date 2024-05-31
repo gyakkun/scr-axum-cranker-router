@@ -2,7 +2,7 @@ use axum::http::HeaderMap;
 use log::error;
 
 use crate::cranker_protocol_request_builder::EndMarker::{RequestBodyEnded, RequestBodyPending, RequestHasNoBody};
-use crate::exceptions::CrankerRouterException;
+use crate::exceptions::{CrankerRouterException, CrexKind};
 
 pub struct CrankerProtocolRequestBuilder {
     pub request_line: Option<String>,
@@ -38,9 +38,11 @@ impl CrankerProtocolRequestBuilder {
 
     pub fn build(self) -> Result<String, CrankerRouterException> {
         if self.end_marker.is_none() {
-            return Err(CrankerRouterException::new(
-                "failed to build cranker protocol request. end marker missing".to_string()
-            ));
+            return Err(
+                CrankerRouterException::new(
+                    "failed to build cranker protocol request. end marker missing".to_string()
+                ).with_err_kind(CrexKind::CrankerProtocolEndMarkerMissing_0005)
+            );
         }
         return if self.request_line.is_some() && self.header_map_str.is_some() {
             Ok(Self::build_req_and_hdr(self))

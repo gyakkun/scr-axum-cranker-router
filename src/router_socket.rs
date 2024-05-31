@@ -14,7 +14,7 @@ use axum::body::Body;
 use axum::extract::OriginalUri;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::handler::Handler;
-use axum::http::{HeaderMap, Method, Response, Version};
+use axum::http::{HeaderMap, Method, Response, StatusCode, Version};
 use axum_core::body::BodyDataStream;
 use bytes::Bytes;
 use futures::{Sink, SinkExt, StreamExt, TryFutureExt, TryStreamExt};
@@ -28,7 +28,7 @@ use crate::{ACRState, CRANKER_V_1_0, CRANKER_V_3_0, exceptions, time_utils};
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::cranker_protocol_response::CrankerProtocolResponse;
 use crate::dark_host::DarkHost;
-use crate::exceptions::CrankerRouterException;
+use crate::exceptions::{CrankerRouterException, CrexKind};
 use crate::http_utils::set_target_request_headers;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
@@ -66,6 +66,9 @@ pub(crate) trait RouterSocket: Send + Sync + RouteIdentify {
     fn is_dark_mode_on(&self, dark_hosts: &HashSet<DarkHost>) -> bool {
         false
     }
+
+    // For V3
+    fn inflight_count(&self) ->i32 { -1 }
 
     async fn on_client_req(self: Arc<Self>,
                            app_state: ACRState,
@@ -280,7 +283,11 @@ pub(crate) async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessa
                             code: 1001,
                             reason: Cow::from("timeout"),
                         }))).await;
-                        let _ = wss_listener_clone.on_error(CrankerRouterException::new("uwss read idle timeout".to_string()));
+                        let _ = wss_listener_clone.on_error(
+                            CrankerRouterException::new(
+                                "uwss read idle timeout".to_string()
+                            ).with_err_kind(CrexKind::Timeout_0001)
+                        );
                     }
                     break; // @outer
                 }
@@ -348,7 +355,7 @@ pub(crate) async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessa
     if !rs.is_removed() {
         // means the is_removed is still false, which is not expected
         let _ = wss_listener.on_error(CrankerRouterException::new(
-            "underlying wss already closed but is_removed=false after 50ms.".to_string()
+            "underlying wss already closed but still is_removed = false".to_string()
         ));
     }
 }
@@ -668,7 +675,9 @@ impl WebSocketListener for RouterSocketV1 {
                 // 1011 indicates that a server is terminating the connection because
                 // it encountered an unexpected condition that prevented it from
                 // fulfilling the request.
-                let ex = CrankerRouterException::new("ws code 1011. should res to cli 502".to_string());
+                let ex = CrankerRouterException::new(
+                    "ws code 1011".to_string()
+                ).with_status_code(StatusCode::BAD_GATEWAY.as_u16());
                 // TODO: Handle carefully in on_error
                 let may_ex = self.on_error(ex);
                 total_err = exceptions::compose_ex(total_err, may_ex);
@@ -679,7 +688,9 @@ impl WebSocketListener for RouterSocketV1 {
                 // is a generic status code that can be returned when there is no
                 // other more suitable status code (e.g., 1003 or 1009) or if there
                 // is a need to hide specific details about the policy.
-                let ex = CrankerRouterException::new("ws code 1008. should res to cli 400".to_string());
+                let ex = CrankerRouterException::new(
+                    "ws code 1008".to_string()
+                ).with_status_code(StatusCode::BAD_REQUEST.as_u16());
                 let may_ex = self.on_error(ex);
                 total_err = exceptions::compose_ex(total_err, may_ex);
             }
@@ -701,6 +712,8 @@ impl WebSocketListener for RouterSocketV1 {
 
                 // I think here same as asyncHandle.complete(exception) in mu cranker router
                 // FIXME: It occurs that the client browser will hang if ex sent here
+                //  240601: This change seems from the debug branch in stash???
+                //  may be due to kvm proxy issue
                 let _ = async { let _ = self.tgt_res_hdr_tx.send(Err(ex.clone())).await; };
                 let _ = async { let _ = self.tgt_res_bdy_tx.send(Err(ex.clone())).await; };
                 let may_ex = self.on_error(ex); // ?Necessary
@@ -816,7 +829,7 @@ impl RouterSocket for RouterSocketV1 {
         return CRANKER_V_1_0;
     }
 
-    fn raise_completion_event(&self, opt_cli_req_id: Option<ClientRequestIdentifier>) -> Result<(), CrankerRouterException> {
+    fn raise_completion_event(&self, _: Option<ClientRequestIdentifier>) -> Result<(), CrankerRouterException> {
         if let Some(wsf) = self.websocket_farm.upgrade() {
             wsf.remove_router_socket_in_background(
                 self.route.clone(), self.router_socket_id.clone(), self.is_removed.clone(),

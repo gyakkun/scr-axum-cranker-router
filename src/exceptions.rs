@@ -4,18 +4,33 @@ use std::fmt::{Display, Formatter};
 use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use log::error;
+use uuid::Uuid;
+
+pub(crate) type CrexKind = CrankerRouterExceptionErrorKind;
 
 #[derive(Debug, Clone)]
 pub struct CrankerRouterException {
     pub reason: String,
     pub opt_status_code: Option<u16>,
-    pub(crate) opt_err_kind: Option<CREXKind>
+    pub(crate) opt_err_kind: Option<CrexKind>
 }
 
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub(crate) enum CREXKind {
-    TIMEOUT
+pub(crate) enum CrankerRouterExceptionErrorKind {
+    Timeout_0001,
+
+    NoRouterSocketAvailable_0002,
+
+    CrankerProtocolVersionNotFound_0003,
+    CrankerProtocolVersionNotSupported_0004,
+    CrankerProtocolEndMarkerMissing_0005,
+    CrankerProtocolZeroLengthHeaderLine_0006,
+    CrankerProtocolHttpStatusCodeMissing_0007,
+
+    ForwardedHeaderParserError_0008,
 }
 
 impl CrankerRouterException {
@@ -35,7 +50,7 @@ impl CrankerRouterException {
         }
     }
 
-    pub fn with_err_kind(self, err_kind: CREXKind) -> Self {
+    pub fn with_err_kind(self, err_kind: CrexKind) -> Self {
         Self {
             reason: self.reason,
             opt_status_code: self.opt_status_code,
@@ -114,15 +129,28 @@ impl Error for CrankerRouterException {}
 
 impl IntoResponse for CrankerRouterException {
     fn into_response(self) -> Response {
+        let mut body_str = self.reason.clone();
+        if let Some(err_kind) = self.opt_err_kind {
+            body_str.push_str(
+                format!(" (error kind = {:?})", err_kind).as_str()
+            )
+        }
+        let err_id = Uuid::new_v4().to_string();
+        body_str.push_str(format!(
+            " (error id = {})", err_id
+        ).as_str());
+        let status_code = self.opt_status_code.unwrap_or(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
+        error!("Response with CrankerRouterException: code = {} , body = {}", status_code, body_str);
         Response::builder()
-            .status(self.opt_status_code.unwrap_or(StatusCode::INTERNAL_SERVER_ERROR.as_u16()))
-            .body(Body::new(self.reason))
+            .status(status_code)
+            .body(Body::new(body_str))
             .unwrap()
     }
 }
 
 
 #[derive(Debug, Clone)]
+// FIXME: Make these seperated exception error kind of CREX
 pub(crate) struct CrankerProtocolVersionNotSupportedException {
     version: String,
 }

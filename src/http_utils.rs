@@ -10,7 +10,7 @@ use axum::http::header::AsHeaderName;
 use log::error;
 
 use crate::{ACRState, LOCAL_IP};
-use crate::exceptions::CrankerRouterException;
+use crate::exceptions::{CrankerRouterException, CrexKind};
 
 // Mostly port from ParseUtils, Headtils from mu-server
 pub(super) fn set_target_request_headers(
@@ -180,7 +180,11 @@ pub(super) fn get_existing_forwarded_headers(hdr: &HeaderMap) -> Result<Vec<Forw
                     let c = host_clone.get(idx).unwrap();
                     if !c.is_ascii_digit() {
                         if *c != ':' {
-                            return Err(CrankerRouterException::new("Failed to parse port".to_string()));
+                            return Err(
+                                CrankerRouterException::new(
+                                    "Failed to parse port".to_string()
+                                ).with_err_kind(CrexKind::ForwardedHeaderParserError_0008)
+                            );
                         } else {
                             break;
                         }
@@ -260,15 +264,19 @@ impl ForwardedHeader {
                         buffer.push(c);
                     } else if is_ows(c) {
                         if buffer.len() > 0 {
-                            return Err(CrankerRouterException::new(format!(
-                                "Got whitespace in parameter name while in {:?} - header was {}",
-                                state, String::from_iter(buffer.iter())
-                            )));
+                            return Err(
+                                CrankerRouterException::new(format!(
+                                    "Got whitespace in parameter name while in {:?} - header was {}",
+                                    state, String::from_iter(buffer.iter())
+                                )).with_err_kind(CrexKind::ForwardedHeaderParserError_0008)
+                            );
                         }
                     } else {
-                        return Err(CrankerRouterException::new(format!(
-                            "Got ascii {} while in {:?}", (c as i32), state
-                        )));
+                        return Err(
+                            CrankerRouterException::new(format!(
+                                "Got ascii {} while in {:?}", (c as i32), state
+                            )).with_err_kind(CrexKind::ForwardedHeaderParserError_0008)
+                        );
                     }
                 } else { // state == FHParseState::ParamValue
                     let mut is_first = !is_quoted_string && buffer.len() == 0;
@@ -294,7 +302,13 @@ impl ForwardedHeader {
                                 let val = String::from_iter(buffer.iter());
                                 let opt_param_name = param_name.clone();
                                 match opt_param_name {
-                                    None => return Err(CrankerRouterException::new("Illegal state: should already parsing forwarded header value but param name still None".to_string())),
+                                    None => {
+                                        return Err(
+                                            CrankerRouterException::new(
+                                                "Illegal state: should already parsing forwarded header value but param name still None".to_string()
+                                            ).with_err_kind(CrexKind::ForwardedHeaderParserError_0008)
+                                        );
+                                    },
                                     Some(pn) => {
                                         let pn = pn.to_lowercase();
                                         if pn == "by" {
@@ -321,9 +335,11 @@ impl ForwardedHeader {
                             } else if is_ows(c) {
                                 // ignore it
                             } else {
-                                return Err(CrankerRouterException::new(format!(
-                                    "Got character code {} ({}) while parsing param value", (c as i32), c
-                                )));
+                                return Err(
+                                    CrankerRouterException::new(format!(
+                                        "Got character code {} ({}) while parsing param value", (c as i32), c
+                                    )).with_err_kind(CrexKind::ForwardedHeaderParserError_0008)
+                                );
                             }
                         }
                     }
@@ -336,7 +352,13 @@ impl ForwardedHeader {
                     let val = String::from_iter(buffer.iter());
                     let opt_param_name = param_name.clone();
                     match opt_param_name {
-                        None => return Err(CrankerRouterException::new("Illegal state: should already parsing forwarded header value but param name still None".to_string())),
+                        None => {
+                            return Err(
+                                CrankerRouterException::new(
+                                    "Illegal state: should already parsing forwarded header value but param name still None".to_string()
+                                ).with_err_kind(CrexKind::ForwardedHeaderParserError_0008)
+                            );
+                        }
                         Some(pn) => {
                             let pn = pn.to_lowercase();
                             if pn == "by" {
@@ -357,9 +379,11 @@ impl ForwardedHeader {
                 }
                 _ => {
                     if buffer.len() > 0 {
-                        return Err(CrankerRouterException::new(format!(
-                            "Unexpected ending point at state {:?} for {}", state, input
-                        )));
+                        return Err(
+                            CrankerRouterException::new(format!(
+                                "Unexpected ending point at state {:?} for {}", state, input
+                            )).with_err_kind(CrexKind::ForwardedHeaderParserError_0008)
+                        );
                     }
                 }
             }

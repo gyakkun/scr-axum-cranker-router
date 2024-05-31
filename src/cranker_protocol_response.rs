@@ -1,10 +1,11 @@
 use std::str::FromStr;
 
 use axum::http;
+use axum::http::StatusCode;
 use axum::response::Response;
 
 use crate::{HOP_BY_HOP_HEADERS, RESPONSE_HEADERS_TO_NOT_SEND_BACK};
-use crate::exceptions::CrankerRouterException;
+use crate::exceptions::{CrankerRouterException, CrexKind};
 use crate::http_utils::get_custom_hop_by_hop_headers;
 
 pub struct CrankerProtocolResponse {
@@ -29,16 +30,20 @@ impl CrankerProtocolResponse {
         let lines: Vec<&str> = message_to_apply.split('\n').collect();
         let lines_len = lines.len();
         if lines_len <= 0 {
-            return Err(CrankerRouterException::new(
-                format!("failed to parse header from target response ({})", message_to_apply).to_string()
-            ));
+            return Err(
+                CrankerRouterException::new(format!(
+                    "failed to parse header from target response ({})", message_to_apply
+                )).with_err_kind(CrexKind::CrankerProtocolZeroLengthHeaderLine_0006)
+            );
         }
         let bits: Vec<&str> = lines[0].split(' ').collect();
         if bits.len() < 2 {
-            return Err(CrankerRouterException::new(
-                format!("failed to parse status code from target response ({}): no status code found",
-                        message_to_apply).to_string()
-            ));
+            return Err(
+                CrankerRouterException::new(format!(
+                    "failed to parse status code from target response ({}): no status code found",
+                        message_to_apply
+                )).with_err_kind(CrexKind::CrankerProtocolHttpStatusCodeMissing_0007)
+            );
         }
         let status = u16::from_str(bits[1]).map_err(|pie| {
             CrankerRouterException::new(
@@ -59,7 +64,7 @@ impl CrankerProtocolResponse {
     pub fn default_failed() -> Self {
         Self {
             headers: Vec::new(),
-            status: 500,
+            status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
         }
     }
 

@@ -59,7 +59,7 @@ pub fn get_connector_service_list(
                             protocol: router_socket.cranker_version().to_string(),
                             // to skip serialize , need to make this field negative
                             // this field is useful in v3
-                            inflight: -1,
+                            inflight: router_socket.inflight_count(),
                         });
                         connector_instance.connection_count += 1;
                     }
@@ -68,9 +68,6 @@ pub fn get_connector_service_list(
 
             // TODO: v3 support
             // for String domain in domain to socket v3 : key set
-
-            // TODO: Given one v3 router socket can serve multiple connector_connection s,
-            // should change some methods in RouterSocket trait to return a vec of connector info
 
             connector_services.push(ConnectorService {
                 route: route.clone(),

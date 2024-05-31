@@ -24,7 +24,7 @@ use tower_http::limit;
 use uuid::Uuid;
 
 use crate::dark_mode_manager::DarkModeManager;
-use crate::exceptions::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException};
+use crate::exceptions::{CrankerProtocolVersionNotFoundException, CrankerProtocolVersionNotSupportedException, CrankerRouterException, CrexKind};
 use crate::ip_validator::{AllowAll, IPValidator};
 use crate::proxy_listener::ProxyListener;
 use crate::route_resolver::{DefaultRouteResolver, RouteResolver};
@@ -237,7 +237,7 @@ impl CrankerRouter {
 
         let path = original_uri.path().to_string();
         let socket_fut = app_state.websocket_farm.clone().get_router_socket_by_target_path(path.clone()).await;
-        match socket_fut {
+        return match socket_fut {
             Ok(rs) => {
                 debug!("Get a socket router_socket_id={}, cranker_ver={}", rs.router_socket_id(), rs.cranker_version());
 
@@ -263,25 +263,28 @@ impl CrankerRouter {
                     &addr,
                     opt_body,
                 ).await {
-                    Ok((res, opt_cli_req_id)) => {
+                    Ok((res, _)) => {
                         debug!("recv tgt res bdy from rs!");
-                        if !res.status().is_success() && !rs_clone.is_removed() {
-                            let _ = rs_clone.raise_completion_event(opt_cli_req_id);
-                        }
-                        return res;
+                        // FIXME : This part of mu can't be simulated
+                        //  No "response complete listener" can be set in axum
+                        //  if !res.status().is_success() && !rs_clone.is_removed() {
+                        //    let _ = rs_clone.raise_completion_event(opt_cli_req_id);
+                        //  }
+                        //  Check https://github.com/tokio-rs/axum/discussions/2490
+                        res
                     }
                     Err(e) => {
                         debug!("recv err from rs, expect tgt res bdy: {:?}", e);
                         if !rs_clone.is_removed() {
                             let _ = rs_clone.raise_completion_event(None);
                         }
-                        return e.into_response();
+                        e.into_response()
                     }
                 }
             }
             Err(e) => {
                 debug!("No socket available!");
-                return e.clone().into_response();
+                e.clone().into_response()
             }
         };
     }
@@ -576,15 +579,17 @@ fn extract_cranker_version(
     let legacy_protocol_header = headers.get(CRANKER_PROTOCOL_HEADER_KEY);
     if sub_protocols.is_none() && legacy_protocol_header.is_none() {
         error!("No cranker version specified in headers: {:?}", headers);
-        return Err(CrankerProtocolVersionNotFoundException::new().into());
+        return Err(CrankerRouterException::new(
+            "Version is null. Please set header Sec-WebSocket-Protocol for cranker protocol negotiation".to_string()
+        ).with_err_kind(CrexKind::CrankerProtocolVersionNotFound_0003).into());
     }
 
     match sub_protocols {
         Some(sp) => {
-            // error!("sp len {}",sp.len());
-            let spunw = sp.to_str().ok().unwrap();
-            // error!("spunw: {}", spunw);
-            let split = spunw.split(",");
+            debug!("sub_protocols len {}",sp.len());
+            let sp_str = sp.to_str().ok().unwrap();
+            debug!("sub_protocols = {}", sp_str);
+            let split = sp_str.split(",");
             for v in split.into_iter() {
                 let trimmed = v.trim().replace("cranker_", "");
                 let trimmed = trimmed.as_str();
@@ -607,13 +612,14 @@ fn extract_cranker_version(
         }
         None => {}
     }
-    error!("{:?}",CrankerProtocolVersionNotSupportedException::new(
-        format!("(sub protocols: {:?}, legacy protocols: {:?}", sub_protocols, legacy_protocol_header)
-    ));
 
-    return Err(CrankerProtocolVersionNotSupportedException::new(
-        format!("(sub protocols: {:?}, legacy protocols: {:?}", sub_protocols, legacy_protocol_header)
-    ).into());
+    let crex = CrankerRouterException::new(format!(
+        "Cranker version not supported! sub protocols = {:?}, legacy protocols = {:?}",
+        sub_protocols, legacy_protocol_header
+    )).with_err_kind(CrexKind::CrankerProtocolVersionNotSupported_0004);
+
+    error!("{:?}",crex);
+    return Err(crex.into());
 }
 
 pub type CrankerRouterBuilder = CrankerRouterConfig;

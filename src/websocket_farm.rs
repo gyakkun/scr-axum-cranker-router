@@ -7,13 +7,14 @@ use std::time::Duration;
 
 use async_channel::{Receiver, Sender, unbounded};
 use axum::async_trait;
+use axum::http::StatusCode;
 use dashmap::{DashMap, DashSet};
 use log::{error, info, trace, warn};
 use serde::Serialize;
 
 use crate::{LOCAL_IP, time_utils};
 use crate::dark_host::DarkHost;
-use crate::exceptions::CrankerRouterException;
+use crate::exceptions::{CrankerRouterException, CrexKind};
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
 use crate::route_resolver::RouteResolver;
@@ -112,9 +113,13 @@ impl WebSocketFarmInterface for WebSocketFarm {
         let resolved_route = self.route_resolver.resolve(&current_routes, &target_path);
         let opt_chan = self.route_to_socket_chan.get(&resolved_route);
         if opt_chan.is_none() {
-            return Err(CrankerRouterException::new(format!(
-                "no socket registered for this path yet (404): {}", target_path
-            ))); // 404 immediately
+            return Err(
+                CrankerRouterException::new(format!(
+                    "no router socket registered for this path yet: {}", target_path
+                )).with_status_code(
+                    StatusCode::NOT_FOUND.as_u16()
+                ).with_err_kind(CrexKind::NoRouterSocketAvailable_0002)
+            );
         }
         let router_socket_receiver = opt_chan.unwrap().clone().1;
         let start_ts = time_utils::current_time_millis();
@@ -145,9 +150,13 @@ impl WebSocketFarmInterface for WebSocketFarm {
                 for i in self.proxy_listeners.iter() {
                     let _ = i.on_failure_to_acquire_proxy_socket(&epif);
                 }
-                Err(CrankerRouterException::new(format!(
-                    "No cranker connector available in {}ms", self.max_wait_in_millis
-                )))
+                Err(
+                    CrankerRouterException::new(format!(
+                        "No cranker connectors available within {} ms", self.max_wait_in_millis
+                    )).with_status_code(
+                        StatusCode::SERVICE_UNAVAILABLE.as_u16()
+                    ).with_err_kind(CrexKind::NoRouterSocketAvailable_0002)
+                )
             }
         }
     }
