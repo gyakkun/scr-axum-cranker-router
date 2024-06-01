@@ -1,34 +1,38 @@
 [package]
 name = "scr-axum-cranker-router"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
+rust-version = "1.78.0"
+description = "A Rust port of [mu-cranker-router](https://github.com/hsbc/mu-cranker-router)"
+repository = "https://github.com/gyakkun/scr-axum-cranker-router"
+keywords = ["cranker", "reverse-proxy", "http", "websocket", "router"]
+categories = ["network-programming"]
 license = "Apache-2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+async-channel = "2"
 axum = { version = "0.7", features = ["default", "ws", "original-uri", "http2"] }
 axum-core = "0.4"
+bytes = "1"
+dashmap = "5"
 futures = "0.3"
-tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
-tokio-util = "0.7"
-tower = { version = "0.4", features = ["util", "filter"] }
-tower-http = { version = "0.5", features = ["limit"] }
+hashlink = "0.9.1"
+lazy_static = "1"
+local-ip-address = "0.5"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-bytes = "1"
-dashmap = "5"
+simple_logger = "5"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tower = { version = "0.4", features = ["util", "filter"] }
+tower-http = { version = "0.5", features = ["limit"] }
 uuid = { version = "1", features = ["v4"] }
-lazy_static = "1"
+
+[dev-dependencies]
 axum-macros = { version = "0.4" }
-rand = { version = "0.8" }
-thiserror = "1"
-simple_logger = "4"
-async-channel = "2"
-hashlink = "0.9.1"
-local-ip-address = "0.5"
 
 [lib]
 crate-type = ["lib"]
