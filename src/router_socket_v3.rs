@@ -236,8 +236,6 @@ impl RouterSocketV3 {
 
         trace!("8");
 
-        // FIXME: The following lines should move to the `async on_cli_req()` method of
-        //  `impl RouterSocket for RouterSocketV3` block
         let full_content = ctx.tgt_res_hdr_rx.recv().await.map_err(|e| {
             CrankerRouterException::new(format!(
                 "failed to receive header from ctx: {:?}", e
@@ -262,7 +260,6 @@ impl RouterSocketV3 {
             )?;
         }
         trace!("13");
-        // todo!();
         let wrapped_stream = ctx.tgt_res_bdy_rx.clone();
         let stream_body = Body::from_stream(wrapped_stream);
         trace!("14");
@@ -373,8 +370,7 @@ impl RouterSocket for RouterSocketV3 {
                 let _ = self
                     .notify_client_request_error(ctx.clone(), crex.clone())
                     .await;
-                // TODO: Unwrap this `handle_on_cli_request_err`
-                let _ = self.handle_on_cli_request_err(ctx.as_ref(), crex.clone());
+                let _ = self.reset_stream(ctx.as_ref(), 1001, "Going away".to_string());
                 Err(crex)
             }
         }
@@ -730,15 +726,6 @@ impl RouterSocketV3 {
         })
     }
 
-    fn handle_on_cli_request_err(
-        &self,
-        ctx: &RequestContext,
-        crex: CrankerRouterException,
-    ) -> Result<(), CrankerRouterException> {
-        let _ = self.reset_stream(ctx, 1001, "Going away".to_string());
-        Err(crex)
-    }
-
     pub async fn handle_data(
         &self,
         ctx: Arc<RequestContext>,
@@ -796,7 +783,7 @@ impl RouterSocketV3 {
             }
             Err(send_err) => {
                 // TODO: in mu they handle error in the asyncHandle.write callback
-                // where should we deal with this?
+                //  where should we deal with this?
                 info!(
                     "route = {}, router socket id = {} , could not write to client response \
                     (maybe the user closed their browser) so will cancel the request. ex: {:?}",
@@ -1041,7 +1028,9 @@ impl RouterSocketV3 {
         if crex.clone().opt_err_kind.is_some_and(|ck| {
             #[allow(unreachable_patterns)]
             match ck {
-                CrexKind::Timeout_0001 => true, // FIXME: Where this timeout exception is from in mu?
+                // FIXME: Where this timeout exception is from in mu?
+                //  in scr currently thrown from read idle timeout
+                CrexKind::Timeout_0001 => true,
                 _ => false,
             }
         }) {
@@ -1153,8 +1142,11 @@ fn header_messages(
     is_stream_end: bool,
     full_header_line: String,
 ) -> Vec<Bytes> {
-    // TODO: Make it configurable?
     // FIXME: Is this a String char length or byte length?
+    //  In mu it take the String char length and assume
+    //  all chars are ascii, and according to RFC it
+    //  should be true.
+    // TODO: Make it configurable?
     let chunk_size = 16000;
     let fhl_u8 = full_header_line.as_bytes();
     if fhl_u8.len() < chunk_size {
@@ -1176,6 +1168,8 @@ fn header_messages(
     let chunk_count = chunks.len();
     let mut i = 0;
     while i < chunk_count {
+        // The way we do substring in Rust
+        // check the substring_test for details
         let slice = chunks.next().unwrap();
         let part = slice.iter().collect();
         let is_last = i == chunk_count - 1;
@@ -1215,10 +1209,8 @@ fn get_error_code(bin: &mut Bytes) -> i32 {
 }
 
 fn get_error_message(bin: &mut Bytes) -> String {
-    // TODO: Simplify it
     if bin.remaining() > 0 {
-        let msg = String::from_utf8(bin.to_vec()).ok();
-        if let Some(msg) = msg {
+        if let Some(msg) = String::from_utf8(bin.to_vec()).ok() {
             return msg;
         }
     }
@@ -1259,7 +1251,6 @@ impl WebSocketListener for RouterSocketV3 {
         // into_	Variable	owned -> owned (non-Copy types)
 
         // TODO: Can we make here zero copy???
-        // TODO Add remaining length check here otherwise it will panic
         let mut bin = Bytes::from(binary_msg); // This Bytes::from is likely to be cost-free
         if bin.remaining() < _MSG_TYPE_LEN_IN_BYTES {
             error!(
@@ -1320,13 +1311,15 @@ impl WebSocketListener for RouterSocketV3 {
                     .await;
             }
             _ => {
-                // TODO: Should we on_error here?
                 let failed_reason = format!(
                     "Received unknown type: {}. router_socket_id={}",
                     msg_type_byte, self.router_socket_id
                 );
+                warn!("{}", failed_reason);
+                // FIXME: Should we send exception and on_error here?
+                //  probably we shouldn't since there's chance old version
+                //  router need to deal with new version connector
                 // return Err(CrankerRouterException::new(failed_reason.clone()));
-                error!("{}", failed_reason);
             }
         }
         if let Err(crex) = bin_handle_res {

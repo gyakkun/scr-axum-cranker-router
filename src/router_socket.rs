@@ -605,7 +605,7 @@ impl WebSocketListener for RouterSocketV1 {
         let mut opt_bin_clone_for_listeners = None;
 
         if self.really_need_on_response_body_chunk_received_from_target {
-            // FIXME: Copy vec<u8> is expensive!
+            // WARNING: Copy vec<u8> is expensive!
             // it's inevitable to make a clone since the
             // terminate method of wss_tx.send moves the whole Vec<u8>
             opt_bin_clone_for_listeners = Some(bin.clone());
@@ -656,7 +656,7 @@ impl WebSocketListener for RouterSocketV1 {
             reason = clo_msg.reason.to_string();
         }
         trace!("42");
-        // TODO: Handle the reason carefully like mu cranker router
+
         if self.is_tgt_can_send_res_now_according_to_rfc2616.load(SeqCst)
             && self.bytes_received.load(Acquire) == 0
         {
@@ -669,7 +669,6 @@ impl WebSocketListener for RouterSocketV1 {
                 let ex = CrankerRouterException::new(
                     "ws code 1011".to_string()
                 ).with_status_code(StatusCode::BAD_GATEWAY.as_u16());
-                // TODO: Handle carefully in on_error
                 let may_ex = self.on_error(ex);
                 total_err = exceptions::compose_ex(total_err, may_ex);
             } else if code == 1008 {

@@ -24,11 +24,7 @@ pub trait WebSocketListener: Send + Sync {
     }
     async fn on_close(&self, close_msg: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException>;
 
-    fn on_error(&self, err: CrankerRouterException) -> Result<(), CrankerRouterException> {
-        // FIXME: Swallow the error by default
-        error!("error: {:?}", err);
-        Ok(())
-    }
+    fn on_error(&self, err: CrankerRouterException) -> Result<(), CrankerRouterException>;
 
     fn get_idle_read_timeout_ms(&self) -> i64;
     fn get_ping_sent_after_no_write_for_ms(&self) -> i64;

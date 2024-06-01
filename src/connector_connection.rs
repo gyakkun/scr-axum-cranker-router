@@ -12,7 +12,6 @@ pub struct ConnectorConnection {
     pub inflight: i32,
 }
 
-// TODO: Make all domain field optional
 fn _if_ser_domain(domain: &String)-> bool {
     domain == "*"
 }

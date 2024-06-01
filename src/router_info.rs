@@ -66,7 +66,7 @@ pub fn get_connector_service_list(
                 }
             }
 
-            // TODO: v3 support
+            // TODO: v3 support - domain
             // for String domain in domain to socket v3 : key set
 
             connector_services.push(ConnectorService {

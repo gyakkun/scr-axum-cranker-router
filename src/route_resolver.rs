@@ -33,14 +33,87 @@ impl<F: Send + Sync + 'static> RouteResolver for F
 
 pub static DEFAULT_ROUTE_RESOLVER: DefaultRouteResolver = DefaultRouteResolver::new();
 
-// TODO : Longest Route Resolver
+pub struct LongestRouteResolver;
+
+impl LongestRouteResolver {
+    pub const fn new() -> Self { LongestRouteResolver {} }
+}
+
+impl RouteResolver for LongestRouteResolver {
+    fn resolve(&self, routes: &DashSet<String>, target: &String) -> String {
+        if routes.contains(target) {
+            return target.clone();
+        }
+        let mut vec_char = target.clone().chars().collect::<Vec<char>>();
+        if vec_char[0] == '/' {
+            vec_char.remove(0);
+        }
+
+        let mut last_index = 0;
+        while {
+            last_index = Self::last_index_of(&vec_char, '/');
+            last_index
+        } >= 0 {
+            vec_char.drain((last_index as usize)..vec_char.len());
+            let cur_slice = Self::vec_char_to_string(&vec_char);
+            if routes.contains(&cur_slice) {
+                return cur_slice;
+            }
+        }
+
+        "*".to_string()
+    }
+}
+
+impl LongestRouteResolver {
+    fn last_index_of(str: &Vec<char>, pat: char) -> i32 {
+        let len = str.len();
+        let mut iter_rev = str.iter().rev();
+        for (pos, ele) in iter_rev.enumerate() {
+            if ele == &pat {
+                return (len - pos -1) as i32;
+            }
+        }
+        -1
+    }
+
+    fn vec_char_to_string(vec_char: &Vec<char>) -> String {
+        vec_char.iter().collect::<String>()
+    }
+}
+
+pub static LONGEST_ROUTE_RESOLVER: LongestRouteResolver = LongestRouteResolver::new();
+
 
 #[test]
-fn test() {
+fn default_route_resolver_test() {
     let s = DashSet::new();
     let resolver = DefaultRouteResolver::new();
     s.insert("route".to_string());
     s.insert("router/v1/api".to_string());
     let res = resolver.resolve(&s, &"/route".to_string());
     assert_eq!(res, "route")
+}
+
+#[test]
+fn test_vec_char_to_string() {
+    let vec_char = vec!['a', 'b', 'c', 'd', 'e'];
+    let res = LongestRouteResolver::vec_char_to_string(&vec_char);
+    assert_eq!(res.as_str(), "abcde")
+}
+
+#[test]
+fn longest_first_route_resolver_test() {
+    let s = DashSet::new();
+    let resolver = LongestRouteResolver::new();
+    s.insert("my-service".to_string());
+    s.insert("my-service/instance".to_string());
+    s.insert("my-service/instance/api".to_string());
+
+    assert_eq!(resolver.resolve(&s, &"/my-service/hello".to_string()), "my-service");
+    assert_eq!(resolver.resolve(&s, &"my-service/hello".to_string()), "my-service");
+    assert_eq!(resolver.resolve(&s, &"/my-service/instance/api/test".to_string()), "my-service/instance/api");
+    assert_eq!(resolver.resolve(&s, &"/my-service/instance/test".to_string()), "my-service/instance");
+    assert_eq!(resolver.resolve(&s, &"/non-exist/instance/test".to_string()), "*");
+    assert_eq!(resolver.resolve(&s, &"/non-exist".to_string()), "*")
 }

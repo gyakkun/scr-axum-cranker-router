@@ -7,6 +7,7 @@ use axum::extract::OriginalUri;
 use axum::http;
 use axum::http::{HeaderMap, HeaderValue, Version};
 use axum::http::header::AsHeaderName;
+use hashlink::LinkedHashMap;
 use log::error;
 
 use crate::{ACRState, LOCAL_IP};
@@ -176,8 +177,9 @@ pub(crate) fn get_existing_forwarded_headers(hdr: &HeaderMap) -> Result<Vec<Forw
                 // without regex!
                 let host_clone = host_to_use.clone().unwrap().chars().collect::<Vec<char>>();
                 let mut idx = (host_clone.len() - 1) as i32;
+                // We can use iter here, but keep align with mu for better readability
                 while idx >= 0 {
-                    let c = host_clone.get(idx).unwrap();
+                    let c = host_clone.get(idx as usize).unwrap();
                     if !c.is_ascii_digit() {
                         if *c != ':' {
                             return Err(
@@ -193,7 +195,7 @@ pub(crate) fn get_existing_forwarded_headers(hdr: &HeaderMap) -> Result<Vec<Forw
                     }
                     idx -= 1;
                 }
-                host_to_use = Some(String::from_iter(host_clone.as_slice()[0..idx].iter()));
+                host_to_use = Some(String::from_iter(host_clone.as_slice()[0..(idx as usize)].iter()));
             }
             res.push(ForwardedHeader {
                 by: None,
@@ -218,7 +220,7 @@ pub(crate) struct ForwardedHeader {
     for_value: Option<String>,
     host: Option<String>,
     proto: Option<String>,
-    extensions: Option<HashMap<String, String>>,
+    extensions: Option<LinkedHashMap<String, String>>,
 }
 
 #[derive(Debug, PartialOrd, PartialEq, Copy, Clone)]
@@ -239,8 +241,8 @@ impl ForwardedHeader {
         let mut buffer: Vec<char> = Vec::new();
         let mut i = 0;
         'outer: while i < input_chars.len() {
-            let mut opt_extensions: Option<HashMap<String, String>> = None;
-            let mut extensions = HashMap::new(); // FIXME: Should use LinkedHashMap(crate `hashlink`) to keep order
+            let mut opt_extensions: Option<LinkedHashMap<String, String>> = None;
+            let mut extensions = LinkedHashMap::new();
             let mut state = FHParseState::ParamName;
             let mut param_name: Option<String> = None;
             let mut by: Option<String> = None;

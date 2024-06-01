@@ -537,11 +537,16 @@ fn check_via_name(via_name: &String) {
     })
 }
 
-// FIXME: Use it to check
 fn check_proxy_listeners(proxy_listeners: &Vec<Arc<dyn ProxyListener>>) {
     for i in proxy_listeners {
         if i.really_need_on_response_body_chunk_received_from_target() {
-            error!("Detect a proxy listener really needs on_response_body_chunk_received_from_target hook. This hook is expensive.");
+            error!("Detected one proxy listener really needs on_response_body_chunk_received_from_target hook. This hook is expensive.");
+        }
+    }
+
+    for i in proxy_listeners {
+        if i.really_need_on_request_body_chunk_sent_to_target() {
+            error!("Detected one proxy listener really needs on_request_body_chunk_sent_to_target hook. This hook is expensive.");
         }
     }
 }
@@ -668,6 +673,7 @@ impl CrankerRouterBuilder {
     }
 
     pub fn build(&self) -> CrankerRouter {
+        check_proxy_listeners(&self.proxy_listeners);
         CrankerRouter::new(self.clone())
     }
 
@@ -758,7 +764,7 @@ fn panic_if_less_than_zero(name: &'static str, val: i64) {
 }
 
 #[cfg(test)]
-mod tests {
+mod lib_tests {
     use crate::check_via_name;
 
     #[test]
