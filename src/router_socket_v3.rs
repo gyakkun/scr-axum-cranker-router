@@ -11,8 +11,8 @@ use axum::http::{HeaderMap, Method, Response, StatusCode, Version};
 use axum_core::body::{Body, BodyDataStream};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dashmap::DashMap;
-use futures::{TryStreamExt};
 use futures::stream::{FusedStream, SplitSink, SplitStream};
+use futures::TryStreamExt;
 use log::{debug, error, info, trace, warn};
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
@@ -145,11 +145,68 @@ impl RouterSocketV3 {
         // WARNING: Start from this line, we are dealing with network I/O
         // Be careful to handle errors. Notify client error ASAP.
 
+        tokio::select! {
+            Err(crex) = self.clone().split_part_one_send_or_err(headers, opt_body, req_id, ctx.clone(), header_text) => {
+                return Err(crex);
+            }
+            ok_or_err = self.split_part_two_recv_and_res(cli_req_ident, ctx)  => {
+                return ok_or_err?;
+            }
+        }
+    }
+
+    async fn split_part_two_recv_and_res(self: Arc<Self>, cli_req_ident: Option<ClientRequestIdentifier>, ctx: Arc<RequestContext>) -> Result<Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException>, CrankerRouterException> {
+        let full_content = ctx.tgt_res_hdr_rx.recv().await.map_err(|e| {
+            CrankerRouterException::new(format!(
+                "failed to receive header from ctx: {:?}", e
+            ))
+        })??;
+        trace!("9");
+
+        trace!("10");
+
+        let cpr = CrankerProtocolResponse::try_from_string(full_content)?;
+        trace!("11");
+        let status_code = cpr.status;
+        let res_builder = cpr.build()?;
+        trace!("12");
+
+        for i in self.proxy_listeners.iter() {
+            i.on_before_responding_to_client(ctx.as_ref())?;
+            i.on_after_target_to_proxy_headers_received(
+                ctx.as_ref(),
+                status_code,
+                res_builder.headers_ref(),
+            )?;
+        }
+        trace!("13");
+        let wrapped_stream = ctx.tgt_res_bdy_rx.clone();
+        let stream_body = Body::from_stream(wrapped_stream);
+        trace!("14");
+        Ok(res_builder
+            .body(stream_body)
+            .map(|body| {
+                (body, cli_req_ident)
+            })
+            .map_err(|ie| CrankerRouterException::new(
+                format!("failed to build body: {:?}", ie)
+            )))
+    }
+
+    async fn split_part_one_send_or_err(
+        self: Arc<Self>,
+        headers: &HeaderMap,
+        opt_body: Option<BodyDataStream>,
+        req_id: i32,
+        ctx: Arc<RequestContext>,
+        header_text: String,
+    ) -> Result<(), CrankerRouterException> {
         // 3. No text based end marker is needed,
         // but we need to decide the frame type and flag.
         // As always, header first, later body
 
-        let is_stream_end = opt_body.is_none(); // if no body, stream should end right now
+        // if no body, stream should end right now
+        let is_stream_end = opt_body.is_none();
         let header_bytes = header_messages(req_id, true, is_stream_end, header_text);
         ctx.is_tgt_can_send_res_now_according_to_rfc2616.store(true, SeqCst);
         for hb in header_bytes {
@@ -233,44 +290,7 @@ impl RouterSocketV3 {
                 }
             }
         }
-
-        trace!("8");
-
-        let full_content = ctx.tgt_res_hdr_rx.recv().await.map_err(|e| {
-            CrankerRouterException::new(format!(
-                "failed to receive header from ctx: {:?}", e
-            ))
-        })??;
-        trace!("9");
-
-        trace!("10");
-
-        let cpr = CrankerProtocolResponse::try_from_string(full_content)?;
-        trace!("11");
-        let status_code = cpr.status;
-        let res_builder = cpr.build()?;
-        trace!("12");
-
-        for i in self.proxy_listeners.iter() {
-            i.on_before_responding_to_client(ctx.as_ref())?;
-            i.on_after_target_to_proxy_headers_received(
-                ctx.as_ref(),
-                status_code,
-                res_builder.headers_ref(),
-            )?;
-        }
-        trace!("13");
-        let wrapped_stream = ctx.tgt_res_bdy_rx.clone();
-        let stream_body = Body::from_stream(wrapped_stream);
-        trace!("14");
-        res_builder
-            .body(stream_body)
-            .map(|body| {
-                (body, cli_req_ident)
-            })
-            .map_err(|ie| CrankerRouterException::new(
-                format!("failed to build body: {:?}", ie)
-            ))
+        Ok(())
     }
 }
 
