@@ -233,6 +233,98 @@ impl RouterSocketV1 {
 
         arc_rs
     }
+
+    async fn split_part_one_send_or_err(
+        self: Arc<Self>, opt_body: Option<BodyDataStream>, cranker_req: String
+    ) -> Result<(), CrankerRouterException> {
+        // 4. Send protocol header frame (slow, blocking)
+        trace!("4");
+        // In theory, the target can respond once the client starts to send the request
+        // Ref:
+        //   check the golang http library issue:
+        //   1) https://github.com/golang/go/issues/57786
+        //   2) https://github.com/golang/go/issues/15527#issuecomment-218521262
+        //   3) https://lists.w3.org/Archives/Public/ietf-http-wg/2004JanMar/0041.html
+        //
+        //   RFC2616 - 8.2.2
+        //   https://datatracker.ietf.org/doc/html/rfc2616#section-8.2.2
+        self.is_tgt_can_send_res_now_according_to_rfc2616.store(true, SeqCst);
+        self.wss_send_task_tx.send(Message::Text(cranker_req)).await
+            .map_err(|e| CrankerRouterException::new(format!(
+                "failed to send cli req hdr to tgt: {:?}", e
+            )))?; // fast fail
+
+        // 5. Pipe cli req body to underlying wss (slow, blocking)
+        trace!("5");
+        if let Some(body) = opt_body {
+            let mut body = body.map_err(|e| CrankerRouterException::new(format!("{:?}", e)));
+            trace!("5.5");
+            while let Some(req_body_chunk) = body.next().await {
+                let bytes = req_body_chunk?;
+                // fast fail
+                trace!("6");
+                trace!("8");
+                for i in self.proxy_listeners.iter() {
+                    i.on_request_body_chunk_sent_to_target(self.as_ref(), &bytes)?; // fast fail
+                }
+                self.wss_send_task_tx.send(Message::Binary(bytes.to_vec())).await
+                    .map_err(|e| {
+                        let failed_reason = format!(
+                            "error when sending req body to tgt: {:?}", e
+                        );
+                        error!("{}", failed_reason);
+                        CrankerRouterException::new(failed_reason)
+                    })?; // fast fail
+            }
+            // 10. Send body end marker (slow)
+            trace!("10");
+            let end_of_body = CrankerProtocolRequestBuilder::new().with_request_body_ended().build()?; // fast fail
+            self.wss_send_task_tx.send(Message::Text(end_of_body)).await.map_err(|e| CrankerRouterException::new(format!(
+                "failed to send end of body end marker to tgt: {:?}", e
+            )))?; // fast fail
+        }
+        trace!("20");
+        for i in self.proxy_listeners.iter() {
+            i.on_request_body_sent_to_target(self.as_ref())?; // fast fail
+        }
+        trace!("21");
+        Ok(())
+    }
+
+    async fn split_part_to_recv_and_res(self: Arc<Self>) -> Result<Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException>, CrankerRouterException> {
+        // if the wss_recv_pipe chan is EMPTY AND CLOSED then err will come from this recv()
+        trace!("22");
+        // FIXME: Seems if recv Err here, the client browser will hang?
+        let hdr_res = self.tgt_res_hdr_rx.recv().await
+            .map_err(|recv_err|
+                CrankerRouterException::new(format!(
+                    "rare ex seems nothing received from tgt res hdr chan and it closed: {:?}. router_socket_id={}",
+                    recv_err, self.router_socket_id
+                ))
+            )??;  // fast fail
+        let message_to_apply = hdr_res;
+        let cranker_res = CrankerProtocolResponse::try_from_string(message_to_apply)?; // fast fail
+
+        let status_code = cranker_res.status;
+        let res_builder = cranker_res.build()?; // fast fail
+
+        for i in self.proxy_listeners.iter() {
+            i.on_before_responding_to_client(self.as_ref())?;
+            i.on_after_target_to_proxy_headers_received(
+                self.as_ref(), status_code, res_builder.headers_ref(),
+            )?;
+        }
+        let wrapped_stream = self.tgt_res_bdy_rx.clone();
+        let stream_body = Body::from_stream(wrapped_stream);
+        Ok(res_builder
+            .body(stream_body)
+            .map(|body| {
+                (body, None)
+            })
+            .map_err(|ie| CrankerRouterException::new(
+                format!("failed to build body: {:?}", ie)
+            )))
+    }
 }
 
 // FIXME: Necessary close all these chan explicitly?
@@ -891,96 +983,14 @@ impl RouterSocket for RouterSocketV1 {
                     .build()? // fast fail
             }
         };
-
-        // 4. Send protocol header frame (slow, blocking)
-        trace!("4");
-        // In theory, the target can respond once the client starts to send the request
-        // Ref:
-        //   check the golang http library issue:
-        //   1) https://github.com/golang/go/issues/57786
-        //   2) https://github.com/golang/go/issues/15527#issuecomment-218521262
-        //   3) https://lists.w3.org/Archives/Public/ietf-http-wg/2004JanMar/0041.html
-        //
-        //   RFC2616 - 8.2.2
-        //   https://datatracker.ietf.org/doc/html/rfc2616#section-8.2.2
-        self.is_tgt_can_send_res_now_according_to_rfc2616.store(true, SeqCst);
-        self.wss_send_task_tx.send(Message::Text(cranker_req)).await
-            .map_err(|e| CrankerRouterException::new(format!(
-                "failed to send cli req hdr to tgt: {:?}", e
-            )))?; // fast fail
-
-        // FIXME: So from RFC2616, no need to wait for the whole
-        //  req body sent to target, actually this "pipe req body"
-        //  part can be done in another thread/tokio task.
-        //  Currently it's not fully async that may lead to performance
-        //  issue. Need to make this pipe part separated.
-        // 5. Pipe cli req body to underlying wss (slow, blocking)
-        trace!("5");
-        if let Some(body) = opt_body {
-            let mut body = body.map_err(|e| CrankerRouterException::new(format!("{:?}", e)));
-            trace!("5.5");
-            while let Some(req_body_chunk) = body.next().await {
-                let bytes = req_body_chunk?;
-                // fast fail
-                trace!("6");
-                trace!("8");
-                for i in self.proxy_listeners.iter() {
-                    i.on_request_body_chunk_sent_to_target(self.as_ref(), &bytes)?; // fast fail
-                }
-                self.wss_send_task_tx.send(Message::Binary(bytes.to_vec())).await
-                    .map_err(|e| {
-                        let failed_reason = format!(
-                            "error when sending req body to tgt: {:?}", e
-                        );
-                        error!("{}", failed_reason);
-                        CrankerRouterException::new(failed_reason)
-                    })?; // fast fail
+        tokio::select! {
+            Err(crex) = self.clone().split_part_one_send_or_err(opt_body, cranker_req) => {
+                return Err(crex);
             }
-            // 10. Send body end marker (slow)
-            trace!("10");
-            let end_of_body = CrankerProtocolRequestBuilder::new().with_request_body_ended().build()?; // fast fail
-            self.wss_send_task_tx.send(Message::Text(end_of_body)).await.map_err(|e| CrankerRouterException::new(format!(
-                "failed to send end of body end marker to tgt: {:?}", e
-            )))?; // fast fail
+            ok_or_err = self.split_part_to_recv_and_res()  => {
+                return ok_or_err?;
+            }
         }
-        trace!("20");
-        for i in self.proxy_listeners.iter() {
-            i.on_request_body_sent_to_target(self.as_ref())?; // fast fail
-        }
-        trace!("21");
-
-        // if the wss_recv_pipe chan is EMPTY AND CLOSED then err will come from this recv()
-        trace!("22");
-        // FIXME: Seems if recv Err here, the client browser will hang?
-        let hdr_res = self.tgt_res_hdr_rx.recv().await
-            .map_err(|recv_err|
-                CrankerRouterException::new(format!(
-                    "rare ex seems nothing received from tgt res hdr chan and it closed: {:?}. router_socket_id={}",
-                    recv_err, self.router_socket_id
-                ))
-            )??;  // fast fail
-        let message_to_apply = hdr_res;
-        let cranker_res = CrankerProtocolResponse::try_from_string(message_to_apply)?; // fast fail
-
-        let status_code = cranker_res.status;
-        let res_builder = cranker_res.build()?; // fast fail
-
-        for i in self.proxy_listeners.iter() {
-            i.on_before_responding_to_client(self.as_ref())?;
-            i.on_after_target_to_proxy_headers_received(
-                self.as_ref(), status_code, res_builder.headers_ref(),
-            )?;
-        }
-        let wrapped_stream = self.tgt_res_bdy_rx.clone();
-        let stream_body = Body::from_stream(wrapped_stream);
-        res_builder
-            .body(stream_body)
-            .map(|body|{
-                (body, None)
-            })
-            .map_err(|ie| CrankerRouterException::new(
-                format!("failed to build body: {:?}", ie)
-            ))
     }
 
     async fn send_ws_msg_to_uwss(self: Arc<Self>, message: Message) -> Result<(), CrankerRouterException> {
