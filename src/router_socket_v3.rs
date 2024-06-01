@@ -54,7 +54,7 @@ const REQ_CTX_INVALID_OUTER_RS3_MSG: &str = "(invalid router socket v3)";
 pub(crate) struct RouterSocketV3 {
     pub weak_self: RwLock<Option<Weak<RouterSocketV3>>>,
     pub route: String,
-    // pub domain:String,
+    pub domain:String,
     pub component_name: String,
     pub router_socket_id: String,
     pub web_socket_farm: Weak<WebSocketFarm>,
@@ -120,7 +120,8 @@ impl RouterSocketV3 {
         req_id: i32,
         cli_req_ident: Option<ClientRequestIdentifier>,
         ctx: Arc<RequestContext>,
-    ) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException> {
+    ) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException>
+    {
         // 1. Cli header processing (fast)
         let mut hdr_to_tgt = HeaderMap::new();
         set_target_request_headers(
@@ -155,7 +156,10 @@ impl RouterSocketV3 {
         }
     }
 
-    async fn split_part_two_recv_and_res(self: Arc<Self>, cli_req_ident: Option<ClientRequestIdentifier>, ctx: Arc<RequestContext>) -> Result<Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException>, CrankerRouterException> {
+    async fn split_part_two_recv_and_res(
+        self: Arc<Self>, cli_req_ident: Option<ClientRequestIdentifier>, ctx: Arc<RequestContext>
+    ) -> Result<Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException>, CrankerRouterException>
+    {
         let full_content = ctx.tgt_res_hdr_rx.recv().await.map_err(|e| {
             CrankerRouterException::new(format!(
                 "failed to receive header from ctx: {:?}", e
@@ -200,7 +204,8 @@ impl RouterSocketV3 {
         req_id: i32,
         ctx: Arc<RequestContext>,
         header_text: String,
-    ) -> Result<(), CrankerRouterException> {
+    ) -> Result<(), CrankerRouterException>
+    {
         // 3. No text based end marker is needed,
         // but we need to decide the frame type and flag.
         // As always, header first, later body
@@ -670,6 +675,13 @@ impl RouteIdentify for RequestContext {
         }
         return SocketAddr::new([u8::MAX, u8::MAX, u8::MAX, u8::MAX].into(), u16::MAX);
     }
+
+    fn domain(&self) -> String {
+        if let Some(rs3) = self.weak_outer_router_socket_v3.upgrade() {
+            return rs3.domain.clone();
+        }
+        return REQ_CTX_INVALID_OUTER_RS3_MSG.to_string();
+    }
 }
 
 impl ProxyInfo for RequestContext {
@@ -752,7 +764,8 @@ impl RouterSocketV3 {
         flags: u8,
         req_id: i32,
         bin: Bytes,
-    ) -> Result<(), CrankerRouterException> {
+    ) -> Result<(), CrankerRouterException>
+    {
         self.check_if_tgt_can_send_res_first(&ctx, req_id).await?;
         let is_end_stream = judge_is_stream_end_from_flags(flags);
         let len = bin.remaining();
@@ -835,7 +848,8 @@ impl RouterSocketV3 {
         &self,
         ctx: &Arc<RequestContext>,
         req_id: i32,
-    ) -> Result<(), CrankerRouterException> {
+    ) -> Result<(), CrankerRouterException>
+    {
         if !ctx.is_tgt_can_send_res_now_according_to_rfc2616.load(SeqCst) {
             let failed_reason = format!(
                 "recv data/bin before handle cli req. route = {} , router socket id = {} , req id = {}",
@@ -854,7 +868,8 @@ impl RouterSocketV3 {
         flags: u8,
         req_id: i32,
         bin: Bytes,
-    ) -> Result<(), CrankerRouterException> {
+    ) -> Result<(), CrankerRouterException>
+    {
         self.check_if_tgt_can_send_res_first(&ctx, req_id).await?;
         let is_stream_end = judge_is_stream_end_from_flags(flags);
         let is_header_end = judge_is_header_end_from_flags(flags);
@@ -902,7 +917,8 @@ impl RouterSocketV3 {
         _: u8,
         req_id: i32,
         mut bin: Bytes,
-    ) -> Result<(), CrankerRouterException> {
+    ) -> Result<(), CrankerRouterException>
+    {
         let error_code = get_error_code(&mut bin);
         let error_message = get_error_message(&mut bin);
         self.notify_client_request_error(ctx_arc.clone(), CrankerRouterException::new(format!(
@@ -918,7 +934,8 @@ impl RouterSocketV3 {
         _: u8,
         _: i32,
         mut bin: Bytes,
-    ) -> Result<(), CrankerRouterException> {
+    ) -> Result<(), CrankerRouterException>
+    {
         let ctx = ctx_arc.as_ref();
         let window_update = bin.get_i32();
         ctx.target_connector_ack_bytes(window_update);
@@ -929,7 +946,8 @@ impl RouterSocketV3 {
     fn check_if_context_exists(
         &self,
         req_id: &i32,
-    ) -> Result<Arc<RequestContext>, CrankerRouterException> {
+    ) -> Result<Arc<RequestContext>, CrankerRouterException>
+    {
         let opt_ctx = self.context_map.get(&req_id);
         if opt_ctx.is_none() {
             return Err(CrankerRouterException::new(format!(
@@ -949,7 +967,8 @@ impl RouterSocketV3 {
         ctx_arc: Arc<RequestContext>,
         ws_status_code: u16,
         opt_reason: Option<String>,
-    ) -> Result<(), CrankerRouterException> {
+    ) -> Result<(), CrankerRouterException>
+    {
         let ctx = ctx_arc.as_ref();
         self.proxy_listeners.iter().for_each(|pl| {
             let _ = pl.on_response_body_chunk_received(ctx);
@@ -1042,7 +1061,8 @@ impl RouterSocketV3 {
         &self,
         ctx_arc: Arc<RequestContext>,
         crex: CrankerRouterException,
-    ) {
+    )
+    {
         let ctx = ctx_arc.as_ref();
         let _ = ctx.error.try_write().map(|mut g| g.replace(crex.clone()));
         if crex.clone().opt_err_kind.is_some_and(|ck| {
@@ -1432,8 +1452,6 @@ impl RouterSocketV3 {
     #[allow(unused_variables)]
     pub fn new_arc(
         route: String,
-        // TODO: Reserved for future enhancement,
-        //  currently domain is not in actual use even in mu-cranker-router
         domain: String,
         component_name: String,
         router_socket_id: String,
@@ -1454,6 +1472,7 @@ impl RouterSocketV3 {
         let arc_rs = Arc::new(Self {
             weak_self: RwLock::new(None),
             route: route.clone(),
+            domain,
             component_name,
             router_socket_id: router_socket_id.clone(),
             web_socket_farm,

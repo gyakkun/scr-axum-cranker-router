@@ -17,6 +17,7 @@ use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
+use axum_macros::debug_handler;
 use lazy_static::lazy_static;
 use log::{debug, error, warn};
 use tower_http::limit;
@@ -28,6 +29,8 @@ use crate::ip_validator::{AllowAll, IPValidator};
 use crate::proxy_listener::ProxyListener;
 use crate::route_resolver::{DefaultRouteResolver, RouteResolver};
 use crate::router_info::RouterInfo;
+use crate::router_socket::RouterSocket;
+use crate::router_socket_filter::{DefaultRouterSocketFilter, RouterSocketFilter};
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 
 pub mod router_socket;
@@ -41,7 +44,7 @@ pub mod websocket_listener;
 pub mod proxy_listener;
 pub mod websocket_farm;
 pub mod ip_validator;
-mod http_utils;
+pub mod router_socket_filter;
 mod connector_connection;
 mod connector_instance;
 mod connector_service;
@@ -49,6 +52,7 @@ mod dark_mode_manager;
 mod dark_host;
 mod router_info;
 mod router_socket_v3;
+mod http_utils;
 
 pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &'static str = "CrankerProtocol";
 // should be CrankerProtocol, but axum convert all header key to lowercase when reading req from client and sending res
@@ -234,7 +238,17 @@ impl CrankerRouter {
 
 
         let path = original_uri.path().to_string();
-        let socket_fut = app_state.websocket_farm.clone().get_router_socket_by_target_path(path.clone()).await;
+        // TODO: We can provide a custom "router socket selector" function here
+        //  and it should return: Result< (rs: Arc<dyn RouterSocket>, should_put_back: bool) , CrankerRouterException>
+        let socket_fut = app_state.websocket_farm.clone().get_router_socket_by_target_path_and_apply_filter(
+            path.clone(),
+            method.clone(),
+            original_uri.clone(),
+            headers.clone(),
+            addr.clone(),
+            app_state.config.clone(),
+            app_state.config.router_socket_filter.clone()
+        ).await;
         return match socket_fut {
             Ok(rs) => {
                 debug!("Get a socket router_socket_id={}, cranker_ver={}", rs.router_socket_id(), rs.cranker_version());
@@ -631,6 +645,7 @@ pub type CrankerRouterBuilder = CrankerRouterConfig;
 #[derive(Clone)]
 pub struct CrankerRouterConfig {
     proxy_listeners: Vec<Arc<dyn ProxyListener>>,
+    router_socket_filter: Arc<dyn RouterSocketFilter>,
 
     // config
     discard_client_forwarded_headers: bool,
@@ -657,6 +672,8 @@ const DEF_CONNECTOR_MAX_WAIT_TIME_MILLIS: i64 = 5_000;
 impl CrankerRouterBuilder {
     pub fn new() -> CrankerRouterBuilder {
         Self {
+            proxy_listeners: vec![],
+            router_socket_filter: Arc::new(DefaultRouterSocketFilter::new()),
             discard_client_forwarded_headers: false,
             send_legacy_forwarded_headers: false,
             via_name: "scr-axum".to_string(),
@@ -666,7 +683,6 @@ impl CrankerRouterBuilder {
             connector_max_wait_time_millis: DEF_CONNECTOR_MAX_WAIT_TIME_MILLIS,
             do_not_proxy_headers: REPRESSED_HEADERS.clone(),
             registration_ip_validator: Arc::new(AllowAll::new()),
-            proxy_listeners: vec![],
             route_resolver: Arc::new(DefaultRouteResolver::new()),
             supported_cranker_protocols: SUPPORTED_CRANKER_VERSION.clone(),
         }
@@ -748,6 +764,13 @@ impl CrankerRouterBuilder {
         c.route_resolver = route_resolver;
         c
     }
+
+    pub fn with_router_socket_filter(self, router_socket_filter: Arc<dyn RouterSocketFilter>) -> Self {
+        let mut c = self.clone();
+        c.router_socket_filter = router_socket_filter;
+        c
+    }
+
     pub fn with_supported_cranker_version(self, supported_cranker_version: HashSet<String>) -> Self {
         let scv = check_supported_cranker_version(supported_cranker_version);
         let mut c = self.clone();

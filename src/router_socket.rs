@@ -42,6 +42,7 @@ pub trait RouteIdentify {
     fn router_socket_id(&self) -> String;
     fn route(&self) -> String;
     fn service_address(&self) -> SocketAddr;
+    fn domain(&self) -> String { "*".to_string() }
 }
 
 

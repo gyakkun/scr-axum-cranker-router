@@ -140,7 +140,7 @@ impl IntoResponse for CrankerRouterException {
             " (error id = {})", err_id
         ).as_str());
         let status_code = self.opt_status_code.unwrap_or(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
-        error!("Response with CrankerRouterException: code = {} , body = {}", status_code, body_str);
+        error!("Respond with CrankerRouterException: code = {} , body = {}", status_code, body_str);
         Response::builder()
             .status(status_code)
             .body(Body::new(body_str))

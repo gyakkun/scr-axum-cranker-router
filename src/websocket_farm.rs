@@ -7,23 +7,34 @@ use std::time::Duration;
 
 use async_channel::{Receiver, Sender, unbounded};
 use axum::async_trait;
-use axum::http::StatusCode;
+use axum::extract::OriginalUri;
+use axum::http::{HeaderMap, Method, StatusCode};
 use dashmap::{DashMap, DashSet};
 use log::{error, info, trace, warn};
 use serde::Serialize;
 
-use crate::{LOCAL_IP, time_utils};
+use crate::{CrankerRouterConfig, LOCAL_IP, time_utils};
 use crate::dark_host::DarkHost;
 use crate::exceptions::{CrankerRouterException, CrexKind};
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
 use crate::route_resolver::RouteResolver;
 use crate::router_socket::{RouteIdentify, RouterSocket};
+use crate::router_socket_filter::RouterSocketFilter;
 
 #[allow(unused_variables)]
 #[async_trait]
 pub(crate) trait WebSocketFarmInterface: Sync + Send {
-    async fn get_router_socket_by_target_path(self: &Arc<Self>, target_path: String) -> Result<Arc<dyn RouterSocket>, CrankerRouterException>;
+    async fn get_router_socket_by_target_path_and_apply_filter(
+        self: &Arc<Self>,
+        target_path: String,
+        method: Method,
+        original_uri: OriginalUri,
+        headers: HeaderMap,
+        addr: SocketAddr,
+        cranker_router_config: CrankerRouterConfig,
+        router_socket_filter: Arc<dyn RouterSocketFilter>
+    ) -> Result<Arc<dyn RouterSocket>, CrankerRouterException>;
 
     fn clean_routes_in_background(self: &Arc<Self>, routes_keep_time_millis: i64);
 
@@ -101,11 +112,30 @@ impl WebSocketFarm {
             proxy_listeners,
         })
     }
+
+    fn should_remove_from_web_socket_farm_if_is_removed(self: &Arc<Self>, arc_rs: &Arc<dyn RouterSocket>) -> bool {
+        if arc_rs.is_removed() {
+            // panic here?
+            error!("unexpected removed router socket received from receiver! router_socket_id={}", arc_rs.router_socket_id());
+            self.remove_router_socket_in_background(arc_rs.route(), arc_rs.router_socket_id(), arc_rs.get_is_removed_arc_atomic_bool());
+            return true;
+        }
+        false
+    }
 }
 
 #[async_trait]
 impl WebSocketFarmInterface for WebSocketFarm {
-    async fn get_router_socket_by_target_path(self: &Arc<Self>, target_path: String) -> Result<Arc<dyn RouterSocket>, CrankerRouterException> {
+    async fn get_router_socket_by_target_path_and_apply_filter(
+        self: &Arc<Self>,
+        target_path: String,
+        method: Method,
+        original_uri: OriginalUri,
+        headers: HeaderMap,
+        addr: SocketAddr,
+        cranker_router_config: CrankerRouterConfig,
+        router_socket_filter: Arc<dyn RouterSocketFilter>
+    ) -> Result<Arc<dyn RouterSocket>, CrankerRouterException> {
         // we have both maps storing <routes, xxx >, here we use route_to_chan map since it removes route earlier
         // a little bit ( check the trace!("82") in retain )
         let current_routes = self.route_to_socket_chan.iter().map(|e| e.key().clone()).collect::<DashSet<String>>();
@@ -120,28 +150,55 @@ impl WebSocketFarmInterface for WebSocketFarm {
                 ).with_err_kind(CrexKind::NoRouterSocketAvailable_0002)
             );
         }
-        let router_socket_receiver = opt_chan.unwrap().clone().1;
+        let chan_pair = opt_chan.unwrap().clone();
+        let router_socket_sender = chan_pair.0;
+        let router_socket_receiver = chan_pair.1;
         let start_ts = time_utils::current_time_millis();
         let timeout = tokio::time::timeout(Duration::from_millis(self.max_wait_in_millis as u64), async {
-            while let Ok(rs) = router_socket_receiver.recv().await {
+            let mut visited = HashSet::new();
+            while let Ok(rs) = router_socket_receiver.recv().await /* @ filter loop await */ {
                 if let Some(arc_rs) = rs.upgrade() {
-                    // skip socket that should be removed
-                    if arc_rs.is_removed() {
-                        // panic here?
-                        error!("unexpected removed router socket received from receiver! router_socket_id={}", arc_rs.router_socket_id());
-                        self.remove_router_socket_in_background(arc_rs.route(), arc_rs.router_socket_id(), arc_rs.get_is_removed_arc_atomic_bool());
-                        continue;
+                    let rsid = arc_rs.router_socket_id();
+                    let is_visited = visited.insert(rsid);
+                    if is_visited {
+                        // put it back and break
+                        let _ = router_socket_sender.send(Arc::downgrade(&arc_rs)).await;
+                        break;
                     }
-                    return Ok(arc_rs); // @.await
-                } else {
-                    continue;
+                    // skip socket that should be removed
+                    if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs) { continue; }
+                    if router_socket_filter.should_use(
+                        target_path.clone(),
+                        method.clone(),
+                        original_uri.clone(),
+                        headers.clone(),
+                        addr.clone(),
+                        cranker_router_config.clone(),
+                        arc_rs.clone()
+                    ) {
+                        return Ok(arc_rs); // @ filter loop await
+                    }
+                    // put it back if not being chosen
+                    let _ = router_socket_sender.send(Arc::downgrade(&arc_rs)).await;
                 }
             }
-            Err(())
+            if router_socket_filter.should_fallback_to_first_path_matched() {
+                while let Ok(rs) = router_socket_receiver.recv().await /* @ fallback await */ {
+                    if let Some(arc_rs) = rs.upgrade() {
+                        // skip socket that should be removed
+                        if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs) { continue; }
+                        return Ok(arc_rs); // @ fallback await
+                    }
+                }
+            }
+            Err(CrankerRouterException::new(format!(
+                "No valid cranker connector registered after filtering, target path = {} ",
+                target_path
+            )).with_err_kind(CrexKind::NoRouterSocketAvailable_0002))
         }).await;
-        match timeout {
-            Ok(Ok(arc_rs)) => {
-                Ok(arc_rs)
+        return match timeout {
+            Ok(ok_or_err) => {
+                ok_or_err
             }
             _ => {
                 let elapsed = time_utils::current_time_millis() - start_ts;
@@ -151,7 +208,8 @@ impl WebSocketFarmInterface for WebSocketFarm {
                 }
                 Err(
                     CrankerRouterException::new(format!(
-                        "No cranker connectors available within {} ms", self.max_wait_in_millis
+                        "No cranker connector available within {} ms. target path = {} ",
+                        self.max_wait_in_millis, target_path
                     )).with_status_code(
                         StatusCode::SERVICE_UNAVAILABLE.as_u16()
                     ).with_err_kind(CrexKind::NoRouterSocketAvailable_0002)
