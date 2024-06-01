@@ -4,7 +4,7 @@ use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicI64};
-use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, SeqCst};
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
@@ -255,7 +255,7 @@ impl RouterSocketV1 {
         //
         //   RFC2616 - 8.2.2
         //   https://datatracker.ietf.org/doc/html/rfc2616#section-8.2.2
-        self.is_tgt_can_send_res_now_according_to_rfc2616.store(true, SeqCst);
+        self.is_tgt_can_send_res_now_according_to_rfc2616.store(true, Release);
         self.wss_send_task_tx.send(Message::Text(cranker_req)).await
             .map_err(|e| CrankerRouterException::new(format!(
                 "failed to send cli req hdr to tgt: {:?}", e
@@ -619,9 +619,9 @@ impl RSv1ClientSideResponseSender {
         // Ensure the header only sent once
         // Since axum / tungstenite expose only Message level of websocket
         // It should be only one header message received
-        if self.is_tgt_res_hdr_sent.load(SeqCst)
+        if self.is_tgt_res_hdr_sent.load(Acquire)
             || self.is_tgt_res_hdr_received
-            .compare_exchange(false, true, SeqCst, SeqCst).is_err()
+            .compare_exchange(false, true, Acquire, Relaxed).is_err()
         {
             return Err(CrankerRouterException::new(
                 "res header already handled!".to_string()
@@ -637,7 +637,7 @@ impl RSv1ClientSideResponseSender {
         let txt_len = txt.len(); // bytes len, not chars len
         let res = self.tgt_res_hdr_tx.send(Ok(txt)).await
             .map(|ok| {
-                self.bytes_sent.fetch_add(txt_len.try_into().unwrap(), SeqCst);
+                self.bytes_sent.fetch_add(txt_len.try_into().unwrap(), Release);
                 ok
             })
             .map_err(|e| {
@@ -648,7 +648,7 @@ impl RSv1ClientSideResponseSender {
                 CrankerRouterException::new(failed_reason)
             });
         self.tgt_res_hdr_tx.close(); // close it immediately
-        self.is_tgt_res_hdr_sent.store(true, SeqCst);
+        self.is_tgt_res_hdr_sent.store(true, Release);
         return res;
     }
 
@@ -658,8 +658,8 @@ impl RSv1ClientSideResponseSender {
         bin: Vec<u8>,
     ) -> Result<(), CrankerRouterException> {
         // Ensure the header value already sent
-        if !self.is_tgt_res_hdr_received.load(SeqCst)
-            || !self.is_tgt_res_hdr_sent.load(SeqCst)
+        if !self.is_tgt_res_hdr_received.load(Acquire)
+            || !self.is_tgt_res_hdr_sent.load(Acquire)
         {
             return Err(CrankerRouterException::new(
                 "res header not handle yet but comes binary first".to_string()
@@ -672,7 +672,7 @@ impl RSv1ClientSideResponseSender {
         let bin_len = bin.len() as i64;
         self.tgt_res_bdy_tx.send(Ok(bin)).await
             .map(|ok| {
-                self.bytes_sent.fetch_add(bin_len, SeqCst);
+                self.bytes_sent.fetch_add(bin_len, AcqRel);
                 ok
             })
             .map_err(|e| {
@@ -688,7 +688,7 @@ impl RSv1ClientSideResponseSender {
 #[async_trait]
 impl WebSocketListener for RouterSocketV1 {
     async fn on_text(&self, txt: String) -> Result<(), CrankerRouterException> {
-        if !self.is_tgt_can_send_res_now_according_to_rfc2616.load(SeqCst) {
+        if !self.is_tgt_can_send_res_now_according_to_rfc2616.load(Acquire) {
             let failed_reason = "recv txt before handle cli req.".to_string();
             return Err(CrankerRouterException::new(failed_reason));
         }
@@ -696,13 +696,13 @@ impl WebSocketListener for RouterSocketV1 {
     }
 
     async fn on_binary(&self, bin: Vec<u8>) -> Result<(), CrankerRouterException> {
-        if !self.is_tgt_can_send_res_now_according_to_rfc2616.load(SeqCst) {
+        if !self.is_tgt_can_send_res_now_according_to_rfc2616.load(Acquire) {
             let failed_reason = "recv bin before handle cli req.".to_string();
             return Err(CrankerRouterException::new(failed_reason));
         }
         // slightly different from mu cranker router that mu will judge the current state of
         // websocket / should_have_response (hasResponse) first
-        self.binary_frame_received.fetch_add(1, SeqCst);
+        self.binary_frame_received.fetch_add(1, AcqRel);
         let mut opt_bin_clone_for_listeners = None;
 
         if self.really_need_on_response_body_chunk_received_from_target {
@@ -758,7 +758,7 @@ impl WebSocketListener for RouterSocketV1 {
         }
         trace!("42");
 
-        if self.is_tgt_can_send_res_now_according_to_rfc2616.load(SeqCst)
+        if self.is_tgt_can_send_res_now_according_to_rfc2616.load(Acquire)
             && self.bytes_received.load(Acquire) == 0
         {
             trace!("43");
@@ -873,16 +873,16 @@ impl ProxyInfo for RouterSocketV1 {
         self.connector_id.clone()
     }
     fn duration_millis(&self) -> i64 {
-        self.duration_millis.load(SeqCst)
+        self.duration_millis.load(Acquire)
     }
     fn bytes_received(&self) -> i64 {
-        self.bytes_received.load(SeqCst)
+        self.bytes_received.load(Acquire)
     }
     fn bytes_sent(&self) -> i64 {
-        self.bytes_sent.load(SeqCst)
+        self.bytes_sent.load(Acquire)
     }
     fn response_body_frames(&self) -> i64 {
-        self.binary_frame_received.load(SeqCst)
+        self.binary_frame_received.load(Acquire)
     }
     fn error_if_any(&self) -> Option<CrankerRouterException> {
         self.error.try_read()
@@ -893,7 +893,7 @@ impl ProxyInfo for RouterSocketV1 {
     }
 
     fn socket_wait_in_millis(&self) -> i64 {
-        self.socket_wait_in_millis.load(SeqCst)
+        self.socket_wait_in_millis.load(Acquire)
     }
 }
 
@@ -926,12 +926,12 @@ impl RouterSocket for RouterSocketV1 {
                 self.route.clone(), self.router_socket_id.clone(), self.is_removed.clone(),
             )
         }
-        let cli_sta = self.client_req_start_ts.load(SeqCst);
+        let cli_sta = self.client_req_start_ts.load(Acquire);
         if cli_sta == 0 || self.proxy_listeners.is_empty() {
             return Ok(());
         }
-        let dur = time_utils::current_time_millis() - self.client_req_start_ts.load(SeqCst);
-        self.duration_millis.store(dur, SeqCst);
+        let dur = time_utils::current_time_millis() - self.client_req_start_ts.load(Acquire);
+        self.duration_millis.store(dur, Release);
         for i in self.proxy_listeners.iter() {
             i.on_complete(self)?;
         }
@@ -960,9 +960,9 @@ impl RouterSocket for RouterSocketV1 {
             )));
         }
         let current_time_millis = time_utils::current_time_millis();
-        self.socket_wait_in_millis.fetch_add(current_time_millis, SeqCst);
-        self.client_req_start_ts.store(current_time_millis, SeqCst);
-        self.duration_millis.store(-current_time_millis, SeqCst);
+        self.socket_wait_in_millis.fetch_add(current_time_millis, AcqRel);
+        self.client_req_start_ts.store(current_time_millis, Release);
+        self.duration_millis.store(-current_time_millis, Release);
         // 1. Cli header processing (fast)
         trace!("1");
         let mut hdr_to_tgt = HeaderMap::new();
@@ -1021,7 +1021,7 @@ impl RouterSocket for RouterSocketV1 {
     }
 
     fn inc_bytes_received_from_cli(&self, byte_count: i32) {
-        self.bytes_received.fetch_add(byte_count.try_into().unwrap(), SeqCst);
+        self.bytes_received.fetch_add(byte_count as i64, AcqRel);
     }
 
     fn try_provide_general_error(&self, opt_crex: Option<CrankerRouterException>) -> Result<(), CrankerRouterException> {

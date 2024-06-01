@@ -4,7 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::Ordering::Acquire;
 use std::time::Duration;
 
 use axum::{BoxError, Extension, http, Json, Router};
@@ -186,7 +186,7 @@ impl CrankerRouter {
     pub async fn health_root(
         State(app_state): State<ACRState>
     ) -> Response {
-        let _i = app_state.clone()._counter.load(SeqCst);
+        let _i = app_state.clone()._counter.load(Acquire);
         (StatusCode::OK, "{\"isAvailable\":true}").into_response()
     }
 

@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64};
-use std::sync::atomic::Ordering::{Release, SeqCst};
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release, SeqCst};
 
 use async_channel::{Receiver, Sender};
 use axum::async_trait;
@@ -217,12 +217,12 @@ impl RouterSocketV3 {
         // if no body, stream should end right now
         let is_stream_end = opt_body.is_none();
         let header_bytes = header_messages(req_id, true, is_stream_end, header_text);
-        ctx.is_tgt_can_send_res_now_according_to_rfc2616.store(true, SeqCst);
+        ctx.is_tgt_can_send_res_now_according_to_rfc2616.store(true, Release);
         for hb in header_bytes {
             let payload_len = (hb.len() - HEADER_LEN_IN_BYTES) as i32;
             ctx.inc_rtr_to_tgt_pending_ack_bytes(payload_len);
             self.send_data(Message::Binary(hb.into())).await?;
-            ctx.from_client_bytes.fetch_add(payload_len as i64, SeqCst);
+            ctx.from_client_bytes.fetch_add(payload_len as i64, Release);
         }
         trace!("6");
 
@@ -254,7 +254,7 @@ impl RouterSocketV3 {
                 self.send_data(Message::Binary(data.into())).await?;
 
                 // Here need to deal with flow control
-                ctx.from_client_bytes.fetch_add(byte_len as i64, SeqCst);
+                ctx.from_client_bytes.fetch_add(byte_len as i64, AcqRel);
 
                 if self.really_need_on_request_body_chunk_sent_to_target {
                     let copy = opt_copy.unwrap();
@@ -264,7 +264,7 @@ impl RouterSocketV3 {
                 }
 
                 // void flowControl
-                if ctx.is_wss_writable.load(SeqCst) && !ctx.is_wss_writing.load(SeqCst) {
+                if ctx.is_wss_writable.load(Acquire) && !ctx.is_wss_writing.load(Acquire) {
                     continue;
                 } else {
                     let should_read_from_cli = Arc::new(AtomicBool::new(false));
@@ -290,7 +290,7 @@ impl RouterSocketV3 {
                     // B)
                     should_read_from_cli_notify.notified().await;
 
-                    if !should_read_from_cli.load(SeqCst) {
+                    if !should_read_from_cli.load(Acquire) {
                         let failed_reason = format!(
                             "very rare and weird that the should_read_from_cli_notify is notified but \
                             should_read_from_cli is still false. route = {}, router socket id = {} , \
@@ -325,7 +325,7 @@ impl RouterSocket for RouterSocketV3 {
     }
 
     fn is_removed(&self) -> bool {
-        return self.is_removed.load(SeqCst);
+        return self.is_removed.load(Acquire);
     }
 
     fn cranker_version(&self) -> &'static str {
@@ -379,7 +379,7 @@ impl RouterSocket for RouterSocketV3 {
             )));
         }
         trace!("2");
-        let req_id = self.req_id_generator.fetch_add(1, SeqCst) + 1;
+        let req_id = self.req_id_generator.fetch_add(1, AcqRel) + 1;
         let cli_req_ident = Some(ClientRequestIdentifier { request_id: req_id });
         let ctx = Arc::new(RequestContext::new(
             Arc::downgrade(&self),
@@ -602,10 +602,10 @@ impl RequestContext {
 
     // void sendingBytes
     fn inc_rtr_to_tgt_pending_ack_bytes(self: &Self, pending: i32) {
-        self.wss_rtr_to_tgt_pending_ack_bytes.fetch_add(pending, SeqCst);
-        if self.wss_rtr_to_tgt_pending_ack_bytes.load(SeqCst) > WATER_MARK_HIGH {
+        self.wss_rtr_to_tgt_pending_ack_bytes.fetch_add(pending, AcqRel);
+        if self.wss_rtr_to_tgt_pending_ack_bytes.load(Acquire) > WATER_MARK_HIGH {
             if let Ok(_) = self.is_wss_writable
-                .compare_exchange(true, false, SeqCst, SeqCst) {
+                .compare_exchange(true, false, Acquire, Relaxed) {
                 error!("Should block reading from client!");
             }
         }
@@ -613,13 +613,13 @@ impl RequestContext {
 
     // void ackedBytes
     fn target_connector_ack_bytes(self: &Self, ack: i32) {
-        self.wss_tgt_connector_ack_bytes.fetch_add(ack, SeqCst);
+        self.wss_tgt_connector_ack_bytes.fetch_add(ack, AcqRel);
         self.wss_rtr_to_tgt_pending_ack_bytes
-            .fetch_add(-ack, SeqCst);
-        if self.wss_rtr_to_tgt_pending_ack_bytes.load(SeqCst) < WATER_MARK_LOW {
+            .fetch_add(-ack, AcqRel);
+        if self.wss_rtr_to_tgt_pending_ack_bytes.load(Acquire) < WATER_MARK_LOW {
             if let Ok(_) = self
                 .is_wss_writable
-                .compare_exchange(false, true, SeqCst, SeqCst)
+                .compare_exchange(false, true, Acquire, Relaxed)
             {
                 error!("Now can unblock reading from client");
                 self.write_it_maybe();
@@ -628,17 +628,17 @@ impl RequestContext {
     }
 
     fn write_it_maybe(self: &Self) {
-        // if self.is_wss_writable.load(SeqCst) && !
-        if self.is_wss_writable.load(SeqCst)
+        // if self.is_wss_writable.load(Acquire) && !
+        if self.is_wss_writable.load(Acquire)
             && (!self.should_keep_read_from_cli_rx.is_empty()
             && !self.should_keep_read_from_cli_rx.is_closed()
             && !self.should_keep_read_from_cli_rx.is_terminated())
         {
             if let Ok(_) = self
                 .is_wss_writing
-                .compare_exchange(false, true, SeqCst, SeqCst)
+                .compare_exchange(false, true, Acquire, Relaxed)
             {
-                while self.is_wss_writable.load(SeqCst)
+                while self.is_wss_writable.load(Acquire)
                     && (!self.should_keep_read_from_cli_rx.is_empty()
                     && !self.should_keep_read_from_cli_rx.is_closed()
                     && !self.should_keep_read_from_cli_rx.is_terminated())
@@ -646,7 +646,7 @@ impl RequestContext {
                     if let Ok(cbrs) = self.should_keep_read_from_cli_rx.try_recv() {
                         match cbrs {
                             Ok(cb) => {
-                                cb.should_read_from_cli.store(true, SeqCst);
+                                cb.should_read_from_cli.store(true, Release);
                                 // FIXME: We do two notifications here.
                                 //  According to doc of Notify, `notify_one` will
                                 //  provide one permit, and if there's no one waiting
@@ -668,7 +668,7 @@ impl RequestContext {
                         }
                     }
                 }
-                self.is_wss_writing.store(false, SeqCst);
+                self.is_wss_writing.store(false, Release);
                 self.write_it_maybe();
             }
         }
@@ -725,19 +725,19 @@ impl ProxyInfo for RequestContext {
     }
 
     fn duration_millis(&self) -> i64 {
-        return self.duration_millis.load(SeqCst);
+        return self.duration_millis.load(Acquire);
     }
 
     fn bytes_received(&self) -> i64 {
-        return self.from_client_bytes.load(SeqCst);
+        return self.from_client_bytes.load(Acquire);
     }
 
     fn bytes_sent(&self) -> i64 {
-        return self.to_client_bytes.load(SeqCst);
+        return self.to_client_bytes.load(Acquire);
     }
 
     fn response_body_frames(&self) -> i64 {
-        return self.wss_on_binary_call_count.load(SeqCst);
+        return self.wss_on_binary_call_count.load(Acquire);
     }
 
     fn error_if_any(&self) -> Option<CrankerRouterException> {
@@ -808,7 +808,7 @@ impl RouterSocketV3 {
             return Ok(());
         }
 
-        ctx.wss_on_binary_call_count.fetch_add(1, SeqCst);
+        ctx.wss_on_binary_call_count.fetch_add(1, AcqRel);
         if self.is_removed() {
             if is_end_stream {
                 let _ = self
@@ -830,7 +830,7 @@ impl RouterSocketV3 {
                 if is_end_stream {
                     let _ = self.notify_client_request_close(ctx.clone(), 1000, None).await;
                 }
-                ctx.to_client_bytes.fetch_add(len as i64, SeqCst);
+                ctx.to_client_bytes.fetch_add(len as i64, AcqRel);
                 let win_update_msg = window_update_message(req_id, len as i32);
                 let _ = self.send_data(Message::Binary(win_update_msg.into())).await;
                 Ok(())
@@ -871,7 +871,7 @@ impl RouterSocketV3 {
         req_id: i32,
     ) -> Result<(), CrankerRouterException>
     {
-        if !ctx.is_tgt_can_send_res_now_according_to_rfc2616.load(SeqCst) {
+        if !ctx.is_tgt_can_send_res_now_according_to_rfc2616.load(Acquire) {
             let failed_reason = format!(
                 "recv data/bin before handle cli req. route = {} , router socket id = {} , req id = {}",
                 self.route(), self.router_socket_id(), req_id
@@ -1060,7 +1060,7 @@ impl RouterSocketV3 {
         // the actual first byte of req header being sent to target, but
         // it's almost at the same time, so it's being used for the this
         // function
-        ctx.is_tgt_can_send_res_now_according_to_rfc2616.load(SeqCst) && ctx.bytes_received() == 0
+        ctx.is_tgt_can_send_res_now_according_to_rfc2616.load(Acquire) && ctx.bytes_received() == 0
     }
 
     async fn cli_fail_prior_to_tgt_res(
@@ -1557,7 +1557,7 @@ impl RouterSocketV3 {
     }
 
     pub async fn reset_stream(&self, ctx: &RequestContext, err_code: i32, msg: String) {
-        if !ctx.state.read().await.is_completed() && !ctx.is_rst_stream_sent.load(SeqCst) {
+        if !ctx.state.read().await.is_completed() && !ctx.is_rst_stream_sent.load(Acquire) {
             let rst_msg = rst_message(ctx.request_id(), err_code, msg);
             let _ = self.send_data(Message::Binary(rst_msg.into()));
             ctx.is_rst_stream_sent.store(true, SeqCst)

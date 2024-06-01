@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::Ordering::{AcqRel, Acquire};
 
 use axum::http::HeaderMap;
 use log::{info, LevelFilter};
@@ -64,13 +64,13 @@ impl DemoProxyListener {
 
 impl ProxyListener for DemoProxyListener {
     fn on_before_proxy_to_target(&self, _info: &dyn ProxyInfo, request_headers_to_target: &mut HeaderMap) -> Result<(), CrankerRouterException> {
-        let id = 1 + self.counter.fetch_add(1, SeqCst);
+        let id = 1 + self.counter.fetch_add(1, AcqRel);
         info!("[{}] on_before_proxy_to_target: header={:?}", id, request_headers_to_target);
         Ok(())
     }
 
     fn on_after_target_to_proxy_headers_received(&self, _proxy_info: &dyn ProxyInfo, status: u16, headers: Option<&HeaderMap>) -> Result<(), CrankerRouterException> {
-        info!("[{}] on_after_target_to_proxy_headers_received: {:?} {:?}", self.counter.load(SeqCst), status, headers);
+        info!("[{}] on_after_target_to_proxy_headers_received: {:?} {:?}", self.counter.load(Acquire), status, headers);
         Ok(())
     }
 

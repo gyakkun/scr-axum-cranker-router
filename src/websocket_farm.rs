@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicI32};
-use std::sync::atomic::Ordering::{Acquire, SeqCst};
+use std::sync::atomic::Ordering::{Acquire, Release};
 use std::time::Duration;
 
 use async_channel::{Receiver, Sender, unbounded};
@@ -268,7 +268,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
             trace!("92 success {}", success);
             if success {
                 trace!("93");
-                is_removed.store(true, SeqCst);
+                is_removed.store(true, Release);
             }
             trace!("94");
         });
