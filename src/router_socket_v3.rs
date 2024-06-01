@@ -89,6 +89,9 @@ pub(crate) struct RouterSocketV3 {
 
     wss_recv_pipe_join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     wss_send_task_join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+
+    really_need_on_response_body_chunk_received_from_target: bool,
+    really_need_on_request_body_chunk_sent_to_target: bool,
 }
 
 impl RouteIdentify for RouterSocketV3 {
@@ -236,9 +239,7 @@ impl RouterSocketV3 {
                 let bytes = req_body_chunk?;
                 let byte_len = bytes.len();
                 let mut opt_copy = None;
-                let need_to_copy_byte =
-                    self.proxy_listeners.iter().all(|i| i.really_need_on_request_body_chunk_sent_to_target());
-                if need_to_copy_byte {
+                if self.really_need_on_request_body_chunk_sent_to_target {
                     opt_copy.replace(bytes.clone());
                 }
                 let data = data_messages(req_id, false, Some(bytes));
@@ -248,9 +249,10 @@ impl RouterSocketV3 {
                 // Here need to deal with flow control
                 ctx.from_client_bytes.fetch_add(byte_len as i64, SeqCst);
 
-                if let Some(bytes_copy) = opt_copy {
+                if self.really_need_on_request_body_chunk_sent_to_target {
+                    let copy = opt_copy.unwrap();
                     for i in self.proxy_listeners.iter() {
-                        i.on_request_body_chunk_sent_to_target(ctx.as_ref(), &bytes_copy)?;
+                        i.on_request_body_chunk_sent_to_target(ctx.as_ref(), &copy)?;
                     }
                 }
 
@@ -770,9 +772,7 @@ impl RouterSocketV3 {
         let is_end_stream = judge_is_stream_end_from_flags(flags);
         let len = bin.remaining();
         let mut opt_copy = None;
-        let really_need_on_response_body_chunk_received_from_target
-            = self.proxy_listeners.iter().all(|i| { i.really_need_on_request_body_chunk_sent_to_target() });
-        if really_need_on_response_body_chunk_received_from_target {
+        if self.really_need_on_response_body_chunk_received_from_target {
             opt_copy.replace(bin.clone());
         }
         if len == 0 {
@@ -832,7 +832,7 @@ impl RouterSocketV3 {
             }
         };
 
-        if really_need_on_response_body_chunk_received_from_target {
+        if self.really_need_on_response_body_chunk_received_from_target {
             let copy = opt_copy.unwrap();
             for i in self.proxy_listeners.iter() {
                 if let Err(crex) = i.on_response_body_chunk_received_from_target(ctx.as_ref(), &copy) {
@@ -1469,6 +1469,10 @@ impl RouterSocketV3 {
     ) -> Arc<Self> {
         let (err_chan_tx, err_chan_rx) = async_channel::unbounded();
         let (wss_send_task_tx, wss_send_task_rx) = async_channel::unbounded();
+        let really_need_on_response_body_chunk_received_from_target
+            = proxy_listeners.iter().any(|i| i.really_need_on_response_body_chunk_received_from_target());
+        let really_need_on_request_body_chunk_sent_to_target
+            = proxy_listeners.iter().any(|i| i.really_need_on_request_body_chunk_sent_to_target());
         let arc_rs = Arc::new(Self {
             weak_self: RwLock::new(None),
             route: route.clone(),
@@ -1507,6 +1511,8 @@ impl RouterSocketV3 {
 
             wss_recv_pipe_join_handle: Arc::new(Mutex::new(None)),
             wss_send_task_join_handle: Arc::new(Mutex::new(None)),
+            really_need_on_response_body_chunk_received_from_target,
+            really_need_on_request_body_chunk_sent_to_target,
         });
         let weak_self = Arc::downgrade(&arc_rs);
         let _ = arc_rs.weak_self.try_write().map(|mut g|{

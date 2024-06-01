@@ -135,6 +135,7 @@ pub(crate) struct RouterSocketV1 {
     wss_send_task_join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 
     really_need_on_response_body_chunk_received_from_target: bool,
+    really_need_on_request_body_chunk_sent_to_target: bool,
 }
 
 impl RouterSocketV1 {
@@ -167,7 +168,8 @@ impl RouterSocketV1 {
         let router_socket_id_clone = router_socket_id.clone();
         let really_need_on_response_body_chunk_received_from_target
             = proxy_listeners.iter().any(|i| i.really_need_on_response_body_chunk_received_from_target());
-
+        let really_need_on_request_body_chunk_sent_to_target
+            = proxy_listeners.iter().any(|i| i.really_need_on_request_body_chunk_sent_to_target());
         let arc_rs = Arc::new(Self {
             route,
             component_name,
@@ -208,6 +210,7 @@ impl RouterSocketV1 {
             wss_send_task_join_handle: Arc::new(Mutex::new(None)),
 
             really_need_on_response_body_chunk_received_from_target,
+            really_need_on_request_body_chunk_sent_to_target,
         });
         // Abort these two handles in Drop
         let wss_recv_pipe_join_handle = tokio::spawn(
