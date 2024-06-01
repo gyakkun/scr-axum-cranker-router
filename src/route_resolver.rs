@@ -1,10 +1,26 @@
 use dashmap::DashSet;
 use log::debug;
 
-/// To choose a route for an HTTP path. Can be prefix matching or exact matching.
-/// See `DefaultRouteResolver` and `LongestRouteResolver`
+/// Algorithm for resolving route, which will decide which connector
+/// socket to be used.
+///
+/// To choose a route for an HTTP path. Can be prefix matching or exact
+/// matching.
+///
+/// See `DefaultRouteResolver` and `LongestFirstRouteResolver`
 pub trait RouteResolver: Sync + Send {
-    fn resolve(&self, routes: &DashSet<String>, target: &String) -> String {
+    /// Resolve the route which will decide which connector socket to be used.
+    ///
+    /// The default implementation using the first segment of the target and
+    /// do an exact match. If no matching found, returning "*", a.k.a. a
+    /// "catch all" wild card.
+    /// * `routes` - All the existing routes in cranker
+    /// * `target` - Client request uri path, e.g. /my-service/api
+    fn resolve(
+        &self,
+        routes: &DashSet<String>,
+        target: &String
+    ) -> String {
         let split: Vec<&str> = target.split("/").collect();
 
         return if split.len() >= 2 && routes.contains(&split[1].to_string()) {
@@ -33,13 +49,26 @@ impl<F: Send + Sync + 'static> RouteResolver for F
     }
 }
 
-pub struct LongestRouteResolver;
+/// A route resolver which using the longest route to match from the
+/// existing routes.
+pub struct LongestFirstRouteResolver;
 
-impl LongestRouteResolver {
-    pub const fn new() -> Self { LongestRouteResolver {} }
+impl LongestFirstRouteResolver {
+    pub const fn new() -> Self { LongestFirstRouteResolver {} }
 }
 
-impl RouteResolver for LongestRouteResolver {
+impl RouteResolver for LongestFirstRouteResolver {
+    /// Algorithm: using the longest route to match from the existing
+    /// routes.
+    ///
+    /// e.g. if request route is "/my-service/api/test" ,
+    /// it will try below mapping one by one.
+    ///
+    /// 1. "my-service/api/test"
+    /// 2. "my-service/api"
+    /// 3. "my-service"
+    ///
+    /// If no matching found, use "*"
     fn resolve(&self, routes: &DashSet<String>, target: &String) -> String {
         if routes.contains(target) {
             return target.clone();
@@ -65,7 +94,7 @@ impl RouteResolver for LongestRouteResolver {
     }
 }
 
-impl LongestRouteResolver {
+impl LongestFirstRouteResolver {
     fn last_index_of(str: &Vec<char>, pat: char) -> i32 {
         let len = str.len();
         let iter_rev = str.iter().rev();
@@ -82,7 +111,7 @@ impl LongestRouteResolver {
     }
 }
 
-pub static LONGEST_ROUTE_RESOLVER: LongestRouteResolver = LongestRouteResolver::new();
+pub static LONGEST_ROUTE_RESOLVER: LongestFirstRouteResolver = LongestFirstRouteResolver::new();
 
 
 #[test]
@@ -98,14 +127,14 @@ fn default_route_resolver_test() {
 #[test]
 fn test_vec_char_to_string() {
     let vec_char = vec!['a', 'b', 'c', 'd', 'e'];
-    let res = LongestRouteResolver::vec_char_to_string(&vec_char);
+    let res = LongestFirstRouteResolver::vec_char_to_string(&vec_char);
     assert_eq!(res.as_str(), "abcde")
 }
 
 #[test]
 fn longest_first_route_resolver_test() {
     let s = DashSet::new();
-    let resolver = LongestRouteResolver::new();
+    let resolver = LongestFirstRouteResolver::new();
     s.insert("my-service".to_string());
     s.insert("my-service/instance".to_string());
     s.insert("my-service/instance/api".to_string());

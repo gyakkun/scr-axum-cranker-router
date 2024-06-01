@@ -17,12 +17,18 @@ use crate::websocket_farm::WaitingSocketTask;
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouterInfo {
+    /// All the services / components that are registered with this cranker
+    /// This library doesn't provide the `service(String routeName)` function
+    /// in mu-cranker-router, it's easy to filter via this Vec.
     pub services: Vec<ConnectorService>,
+    /// All the hosts that this router currently will not send requests to
     pub dark_hosts: HashSet<DarkHost>,
+    /// A map containing the tasks, which are waiting for available connector
+    /// sockets
     pub waiting_tasks: HashMap<String, Vec<WaitingSocketTask>>,
 }
 
-pub fn get_connector_service_list(
+pub(crate) fn get_connector_service_list(
     sockets: HashMap<String, Vec<Weak<dyn RouterSocket>>>,
     dark_hosts: HashSet<DarkHost>,
 ) -> Vec<ConnectorService> {

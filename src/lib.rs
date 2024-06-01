@@ -120,11 +120,22 @@ pub struct CrankerRouterState {
 
 pub(crate) type ACRState = Arc<CrankerRouterState>;
 
+/// This class creates a router function in axum for receiving HTTP requests
+/// from clients (`visit_portal()`), and a router function for receiving
+/// websocket registrations from Cranker connectors.
+/// You are responsible for creating axum server instance(s) that the
+/// router functions (handler) are added to.
+/// When shutting down, the stop() method should be called after stopping your Mu Server(s).
+/// This class is created by using the `CrankerRouterBuilder::new().build()`
+/// builder.
 pub struct CrankerRouter {
+    /// An `Arc` of all states needed by the Cranker
+    /// router instance
     pub state: ACRState,
 }
 
 impl CrankerRouter {
+    /// Create a Cranker router from builder / config
     pub fn new(
         config: CrankerRouterConfig
     ) -> Self {
@@ -157,6 +168,11 @@ impl CrankerRouter {
 
     pub(crate) fn state(&self) -> ACRState { self.state.clone() }
 
+    /// The registration axum router function.
+    /// It registers multiple register and deregister paths
+    /// for compatibility of node.js connector implementations
+    /// Library users can control finer granularity by applying
+    /// the `handler` functions to their own `Router`
     pub fn registration_axum_router(&self) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
         let res = Router::new()
             .route("/register", any(Self::register_handler)
@@ -182,6 +198,9 @@ impl CrankerRouter {
         return res;
     }
 
+    /// Health endpoint root handler function.
+    /// Currently only `isAvailable` field available.
+    /// To be done...
     // TODO: Add all info
     pub async fn health_root(
         State(_): State<ACRState>
@@ -189,11 +208,16 @@ impl CrankerRouter {
         (StatusCode::OK, "{\"isAvailable\":true}").into_response()
     }
 
+    /// `/health/connectors` endpoint handler
+    /// It collects information by calling `collect_info(&ACRState)`
+    /// static method of `CrankerRouter`
     pub async fn connector_info_handler(
         State(app_state): State<ACRState>
     ) -> Response {
         let mut res_map_inner = HashMap::new();
-        let col = CrankerRouter::collect_info(&app_state);
+        let col = CrankerRouter::collect_info_by_state(
+            app_state.clone()
+        );
         col.services.iter().for_each(|cs| {
             res_map_inner.insert(cs.route.clone(), cs.clone());
         });
@@ -202,6 +226,12 @@ impl CrankerRouter {
         (StatusCode::OK, Json(res_map)).into_response()
     }
 
+    /// The client oriented visit portal router function
+    /// Basically it removes the default request body size
+    /// limitation from axum and/or tower crates.
+    /// Library users can apply further control by adding
+    /// the `visit_portal` handler function to their own
+    /// router.
     pub fn visit_portal_axum_router(&self) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
         let res = Router::new()
             .route("/*any", any(CrankerRouter::visit_portal))
@@ -211,6 +241,11 @@ impl CrankerRouter {
         return res;
     }
 
+    /// The visit portal and main logic of the Cranker router
+    /// implementation.
+    /// It will receive client requests, find valid router
+    /// socket and "pipe" them together, and proxy the request
+    /// to the connector on target services' side.
     // #[debug_handler]
     pub async fn visit_portal(
         State(app_state): State<ACRState>,
@@ -296,6 +331,8 @@ impl CrankerRouter {
         };
     }
 
+    /// The function needed to be called before
+    /// a connector is de-registering.
     pub async fn de_reg_check(
         State(app_state): State<ACRState>,
         Query(params): Query<HashMap<String, String>>, // Not expecting multiple val for a key so hashmap is fine
@@ -339,6 +376,9 @@ impl CrankerRouter {
         next.run(request).await
     }
 
+    /// The de-register handler for terminating
+    /// the WebSocket connection between router
+    /// and connector.
     pub async fn de_register_handler(
         Extension(connector_id): Extension<String>,
         wsu: WebSocketUpgrade,
@@ -357,6 +397,12 @@ impl CrankerRouter {
         let _ = ws.close().await;
     }
 
+    /// The register handler for connectors.
+    /// When a Websocket connection is successfully
+    /// created via `upgrade` mechanism of HTTP,
+    /// the ws connection will be harvested and
+    /// stored in the `WebSocketFarm` waiting for
+    /// being consumed by client requests.
     // #[debug_handler]
     pub async fn register_handler(
         State(app_state): State<ACRState>,
@@ -379,10 +425,13 @@ impl CrankerRouter {
             ))
     }
 
-    /// Domain and route is mandatory so add a middleware to check.
+    /// The function needed to be applied before connector
+    /// registration.
+    /// Domain and route is mandatory so add a middleware to
+    /// check.
     /// Return BAD_REQUEST if illegal
     // #[debug_handler]
-    async fn reg_check_and_extract(
+    pub async fn reg_check_and_extract(
         State(app_state): State<ACRState>,
         headers: HeaderMap,
         // Not expecting multiple val for a key so hashmap is fine
@@ -476,7 +525,7 @@ impl CrankerRouter {
         response
     }
 
-    pub fn collect_info(acr_state: &ACRState) -> RouterInfo {
+    pub(crate) fn collect_info_by_state(acr_state: ACRState) -> RouterInfo {
         let websocket_farm = acr_state.websocket_farm.clone();
         let services = router_info::get_connector_service_list(
             websocket_farm.clone().get_sockets(),
@@ -489,8 +538,35 @@ impl CrankerRouter {
         }
     }
 
-    pub fn idle_connection_count(acr_state: &ACRState) -> i32 {
-        acr_state.websocket_farm.idle_count()
+    /// Gets metadata about the connected services.
+    /// The function to collect all information defined in info
+    /// structs.
+    pub fn collect_info(&self) -> RouterInfo {
+        Self::collect_info_by_state(self.state.clone())
+    }
+
+    /// Return the currently idle WebSocket connection count.
+    /// It's not accurate if V3 support is enabled since in
+    /// V1 each client request consumes an idle ws but in V3
+    /// it's multiplexing so the ws is serving request but
+    /// still be counted idle.
+    pub fn idle_connection_count(&self) -> i32 {
+        self.state.clone().websocket_farm.idle_count()
+    }
+
+    /// A manager that allows you to stop or start requests
+    /// going to specific hosts.
+    ///
+    /// Currently only applies to V1 connectors. V3 in
+    /// mu-cranker-router implementation has abandoned this
+    /// feature.
+    pub fn dark_mode_manager(&self) -> Arc<DarkModeManager> {
+        self.state.clone().dark_mode_manager.clone()
+    }
+
+    /// Disconnects all sockets and cleans up.
+    pub fn stop(&self) {
+        self.state.clone().websocket_farm.clone().terminate_all()
     }
 }
 
@@ -640,8 +716,10 @@ fn extract_cranker_version(
     return Err(crex.into());
 }
 
+/// The builder / config of a CrankerRouter
 pub type CrankerRouterBuilder = CrankerRouterConfig;
 
+/// The config / builder of a CrankerRouter
 #[derive(Clone)]
 pub struct CrankerRouterConfig {
     pub proxy_listeners: Vec<Arc<dyn ProxyListener>>,
@@ -669,6 +747,7 @@ const DEF_PING_SENT_AFTER_NO_WRITE_FOR_MS: i64 = 10_000;
 const DEF_CONNECTOR_MAX_WAIT_TIME_MILLIS: i64 = 5_000;
 
 impl CrankerRouterBuilder {
+    /// Create a builder
     pub fn new() -> CrankerRouterBuilder {
         Self {
             proxy_listeners: vec![],
@@ -691,21 +770,38 @@ impl CrankerRouterBuilder {
         }
     }
 
+    /// Build and get a CrankerRouter instance
     pub fn build(&self) -> CrankerRouter {
         check_proxy_listeners(&self.proxy_listeners);
         CrankerRouter::new(self.clone())
     }
 
+    /// If true, then any Forwarded or X-Forwarded-* headers that are sent
+    /// from the client to this reverse proxy will be dropped
+    /// (defaults to false).
     pub fn with_discard_client_forwarded_headers(self, discard_client_forwarded_headers: bool) -> Self {
         let mut c = self.clone();
         c.discard_client_forwarded_headers = discard_client_forwarded_headers;
         c
     }
+
+    /// mu-cranker-router always sends Forwarded headers, however by
+    /// default does not send the non-standard X-Forwarded-* headers.
+    ///
+    /// Set this to true to enable these legacy headers for older clients
+    /// that rely on them.
     pub fn with_send_legacy_forwarded_headers(self, send_legacy_forwarded_headers: bool) -> Self {
         let mut c = self.clone();
         c.send_legacy_forwarded_headers = send_legacy_forwarded_headers;
         c
     }
+
+    /// The name to add as the Via header, which defaults to "scr-axum".
+    ///
+    /// Note that limited ASCII characters can be used for via name.
+    /// They are
+    ///
+    /// "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!#$%&'*+,-.^_`|~:"
     pub fn with_via_name(self, via_name: String) -> Self {
         let mut c = self.clone();
         check_via_name(&via_name);
@@ -713,6 +809,14 @@ impl CrankerRouterBuilder {
         c
     }
 
+    /// Sets the idle timeout of a WebSocket connection.
+    ///
+    /// If nothing read from the client target side connector
+    /// via the ws connection more than this timeout milliseconds,
+    /// including `Ping` and `Pong` message, the RouterSocket
+    /// will be terminated along with the underlying websocket.
+    ///
+    /// Default is 5 min.
     pub fn with_idle_read_timeout_ms(self, idle_read_timeout_ms: i64) -> Self {
         panic_if_less_than_zero("idle_read_timeout_ms", idle_read_timeout_ms);
         let mut c = self.clone();
@@ -720,12 +824,26 @@ impl CrankerRouterBuilder {
         c
     }
 
+    /// Sets the routes keep time if no more connector registered.
+    /// Within the time, client will receive 503 (no cranker available).
+    /// After that, the route info will be cleaned up, and client will
+    /// receive 404 if requesting against this route.
+    ///
+    /// The default keep time is 2 hours.
+    ///
+    /// The route will be kept for this amount of milliseconds until
+    /// being removed from the internal state and the Cranker router
+    /// will respond with 404 Not Found immediately without waiting
+    /// if subsequent client requests match the route.
     pub fn with_routes_keep_time_millis(self, routes_keep_time_millis: i64) -> Self {
         panic_if_less_than_zero("routes_keep_time_millis", routes_keep_time_millis);
         let mut c = self.clone();
         c.routes_keep_time_millis = routes_keep_time_millis;
         c
     }
+
+    /// Sets the amount of time to wait before sending a ping message if no
+    /// messages having been sent.
     pub fn with_ping_sent_after_no_write_for_ms(self, ping_sent_after_no_write_for_ms: i64) -> Self {
         panic_if_less_than_zero("ping_sent_after_no_write_for_ms", ping_sent_after_no_write_for_ms);
         let mut c = self.clone();
@@ -733,6 +851,17 @@ impl CrankerRouterBuilder {
         c
     }
 
+    /// When a request is made for a route that has no connectors connected
+    /// currently, the router will wait for a period to see if a connector
+    /// will connect that can service the request.
+    ///
+    /// This is important because if there are a burst of requests for a
+    /// route, there might be just a few milliseconds gap where there is no
+    /// connector available, so there is no point sending an error back to
+    /// the client if it would be found after a short period.
+    ///
+    /// This setting controls how long it waits before returning a 503
+    /// Service Unavailable to the client.
     pub fn with_connector_max_wait_time_millis(self, connector_max_wait_time_millis: i64) -> Self {
         panic_if_less_than_zero("connector_max_wait_time_millis", connector_max_wait_time_millis);
         let mut c = self.clone();
@@ -740,12 +869,23 @@ impl CrankerRouterBuilder {
         c
     }
 
+    /// Sets if allow to register catch all / wildcard ("*") route
+    /// as a fallback for all no-route-matched client requests
     pub fn should_allow_catch_all(self, allow_catch_all: bool) -> Self {
         let mut c = self.clone();
         c.allow_catch_all = allow_catch_all;
         c
     }
 
+
+    /// Specifies whether to send the original `Host` header to the
+    /// target server.
+    ///
+    /// Reverse proxies are generally supposed to forward the original Host
+    /// header to target servers, however there are cases (particularly where
+    /// you are proxying to HTTPS servers) that the Host needs to match the
+    /// Host of the SSL certificate (in which case you may see SNI-related
+    /// errors).
     pub fn should_proxy_host_header(self, should_proxy_host_header: bool) -> Self {
         let mut c = self.clone();
         if should_proxy_host_header {
@@ -756,30 +896,52 @@ impl CrankerRouterBuilder {
         c
     }
 
+    /// Sets the IP validator for service registration requests.
+    /// Defaults to `ip_validator::AllowAll`
     pub fn with_registration_ip_validator(self, ip_validator: Arc<dyn IPValidator>) -> Self {
         let mut c = self.clone();
         c.registration_ip_validator = ip_validator;
         c
     }
 
+    /// Registers proxy listeners to be called before, during and after
+    /// requests are processed.
     pub fn with_proxy_listeners(self, proxy_listeners: Vec<Arc<dyn ProxyListener>>) -> Self {
         let mut c = self.clone();
         c.proxy_listeners = proxy_listeners;
         c
     }
 
+    /// Provide a custom route resolver. If it's not specified, will use the
+    /// default implementation in RouteResolver.resolve(&DashSet, &String)
+    ///
+    /// LongestFirstRouteResolver is also provided in the library.
     pub fn with_route_resolver(self, route_resolver: Arc<dyn RouteResolver>) -> Self {
         let mut c = self.clone();
         c.route_resolver = route_resolver;
         c
     }
 
+    /// Provide a custom RouterSocketFilter.
+    ///
+    /// By default, when the RouteResolver resolves the route
+    /// from the client request path, if there's matched router
+    /// socket available, then it will be used to serve the
+    /// client request. Further filtering can be applied in
+    /// terms of whether the router socket should be used
+    /// based on its detail along with client request detail.
+    ///
+    /// By default, no filtering will be added that should_use()
+    /// will always return true.
     pub fn with_router_socket_filter(self, router_socket_filter: Arc<dyn RouterSocketFilter>) -> Self {
         let mut c = self.clone();
         c.router_socket_filter = router_socket_filter;
         c
     }
 
+    /// Set cranker protocols.
+    ///
+    /// Default supporting both ["cranker_1.0", "cranker_3.0"].
     pub fn with_supported_cranker_version(self, supported_cranker_version: HashSet<String>) -> Self {
         let scv = check_supported_cranker_version(supported_cranker_version);
         let mut c = self.clone();

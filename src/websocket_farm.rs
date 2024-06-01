@@ -86,7 +86,8 @@ pub struct WebSocketFarm {
         Sender<Weak<dyn RouterSocket>>,
         Receiver<Weak<dyn RouterSocket>>
     )>,
-    /// This is the only place we store our
+    /// This is the only place we store our Strong Arc
+    /// of dyn RouterSocket trait object
     route_to_router_socket_id_to_arc_router_socket_map: DashMap<String, DashMap<String, Arc<dyn RouterSocket>>>,
     route_last_removal_times: DashMap<String, i64>,
     idle_count: AtomicI32,
@@ -130,6 +131,12 @@ impl WebSocketFarm {
             return true;
         }
         false
+    }
+
+    pub(crate) fn terminate_all(self: Arc<Self>) {
+        self.route_to_router_socket_id_to_arc_router_socket_map.retain(|_, _| {
+            false
+        })
     }
 }
 
@@ -295,6 +302,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
             trace!("92 success {}", success);
             if success {
                 trace!("93");
+                self.idle_count.fetch_add(-1, AcqRel);
                 is_removed.store(true, Release);
             }
             trace!("94");
@@ -313,12 +321,15 @@ impl WebSocketFarmInterface for WebSocketFarm {
                 .or_insert_with(DashMap::new)
                 .value()
                 .insert(router_socket_id, router_socket);
-            let _ = another_self.route_to_socket_chan
+            let res = another_self.route_to_socket_chan
                 .entry(route)
                 .or_insert_with(unbounded)
                 .value()
                 .0
                 .send(weak).await;
+            if res.is_ok() {
+                another_self.idle_count.fetch_add(1, AcqRel);
+            }
         });
     }
 

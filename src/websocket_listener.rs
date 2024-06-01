@@ -7,9 +7,6 @@ use crate::exceptions::CrankerRouterException;
 /// The common behaviours for handling WebSocket messages
 #[async_trait]
 pub(crate) trait WebSocketListener: Send + Sync {
-    // this should be done in on_upgrade, so ignore it
-
-    // fn on_connect(&self, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;
     async fn on_text(&self, text_msg: String) -> Result<(), CrankerRouterException>;
     async fn on_binary(&self, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException>;
     async fn on_ping(&self, ping_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
