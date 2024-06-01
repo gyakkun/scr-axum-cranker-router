@@ -1,18 +1,22 @@
 use std::future::IntoFuture;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::{AcqRel, Acquire};
 
 use axum::http::HeaderMap;
+use axum::middleware::from_fn_with_state;
+use axum::Router;
+use axum::routing::{any, get};
 use log::{info, LevelFilter};
 use log::LevelFilter::{Debug};
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
 use tokio::try_join;
+use tower_http::limit;
 
-use scr_axum_cranker_router::CrankerRouterBuilder;
+use scr_axum_cranker_router::{CrankerRouter, CrankerRouterBuilder};
 use scr_axum_cranker_router::exceptions::CrankerRouterException;
 use scr_axum_cranker_router::proxy_info::ProxyInfo;
 use scr_axum_cranker_router::proxy_listener::ProxyListener;
@@ -35,6 +39,33 @@ async fn main() {
         .with_router_socket_filter(Arc::new(DomainRouterSocketFilter::new()))
         .build();
 
+    let custom_axum_wss_router = Router::new()
+        .route("/register", any(CrankerRouter::register_handler)
+            .layer(from_fn_with_state(cranker_router.state(), CrankerRouter::reg_check_and_extract)),
+        )
+        .route("/register/", any(CrankerRouter::register_handler)
+            .layer(from_fn_with_state(cranker_router.state(), CrankerRouter::reg_check_and_extract)),
+        )
+        .route("/deregister", any(CrankerRouter::de_register_handler)
+            .layer(from_fn_with_state(cranker_router.state(), CrankerRouter::de_reg_check)),
+        )
+        .route("/deregister/", any(CrankerRouter::de_register_handler)
+            .layer(from_fn_with_state(cranker_router.state(), CrankerRouter::de_reg_check)),
+        )
+        // No health endpoint exposed here
+        .with_state(cranker_router.state())
+        .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
+        .into_make_service_with_connect_info::<SocketAddr>();
+
+    let custom_axum_visit_portal_router = Router::new()
+        // Expose health handler to visit portal
+        .route("/health/connectors", get(CrankerRouter::connector_info_handler))
+        .route("/health", get(CrankerRouter::health_root))
+        .route("/*any", any(CrankerRouter::visit_portal))
+        .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
+        .with_state(cranker_router.state())
+        .into_make_service_with_connect_info::<SocketAddr>();
+
     let reg_listener = TcpListener::bind(format!("{}:{}", test_env.addr, test_env.reg_port))
         .await
         .unwrap();
@@ -42,10 +73,10 @@ async fn main() {
         .await
         .unwrap();
 
-    let reg_router = cranker_router.registration_axum_router();
-    let visit_router = cranker_router.visit_portal_axum_router();
+    let reg_router = custom_axum_wss_router;
+    let visit_router = custom_axum_visit_portal_router;
 
-    println!("trying to start simple_v1 server at - wss reg {}:{}, visit portal {}:{}",
+    println!("trying to start harder server at - wss reg {}:{}, visit portal {}:{}",
              test_env.addr, test_env.reg_port,
              test_env.addr, test_env.visit_port
     );

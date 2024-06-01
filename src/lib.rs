@@ -169,7 +169,8 @@ impl CrankerRouter {
         }
     }
 
-    pub(crate) fn state(&self) -> ACRState { self.state.clone() }
+    /// Get an Arc copy of the inner state
+    pub fn state(&self) -> ACRState { self.state.clone() }
 
     /// The registration axum router function.
     /// It registers multiple register and deregister paths
