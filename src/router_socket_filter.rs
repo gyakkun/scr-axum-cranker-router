@@ -75,8 +75,10 @@ impl RouterSocketFilter for DomainRouterSocketFilter {
 
 #[cfg(test)]
 mod router_socket_filter_test {
+    use std::collections::HashSet;
     use std::net::SocketAddr;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     use axum::async_trait;
     use axum::extract::OriginalUri;
@@ -85,6 +87,7 @@ mod router_socket_filter_test {
     use axum_core::body::{Body, BodyDataStream};
 
     use crate::{ACRState, CRANKER_V_1_0};
+    use crate::dark_host::DarkHost;
     use crate::exceptions::CrankerRouterException;
     use crate::route_identify::RouteIdentify;
     use crate::router_socket::{ClientRequestIdentifier, RouterSocket};
@@ -125,31 +128,47 @@ mod router_socket_filter_test {
             false
         }
 
+        fn get_is_removed_arc_atomic_bool(&self) -> Arc<AtomicBool> {
+            Arc::new(AtomicBool::new(false))
+        }
+
         fn cranker_version(&self) -> &'static str {
             CRANKER_V_1_0
         }
 
-        async fn on_client_req(self: Arc<Self>, app_state: ACRState, http_version: &Version, method: &Method, original_uri: &OriginalUri, headers: &HeaderMap, addr: &SocketAddr, opt_body: Option<BodyDataStream>) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException> {
+        fn raise_completion_event(&self, _: Option<ClientRequestIdentifier>) -> Result<(), CrankerRouterException> {
+            Ok(())
+        }
+
+        fn is_dark_mode_on(&self, _: &HashSet<DarkHost>) -> bool {
+            false
+        }
+
+        fn inflight_count(&self) -> i32 {
+            -1
+        }
+
+        async fn on_client_req(self: Arc<Self>, _: ACRState, _: &Version, _: &Method, _: &OriginalUri, _: &HeaderMap, _: &SocketAddr, _: Option<BodyDataStream>) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException> {
             Err(CrankerRouterException::new(
                 "mock".to_string()
             ))
         }
 
-        async fn send_ws_msg_to_uwss(self: Arc<Self>, message: Message) -> Result<(), CrankerRouterException> {
+        async fn send_ws_msg_to_uwss(self: Arc<Self>, _: Message) -> Result<(), CrankerRouterException> {
             Err(CrankerRouterException::new(
                 "mock".to_string()
             ))
         }
 
-        async fn terminate_all_conn(self: Arc<Self>, opt_crex: Option<CrankerRouterException>) -> Result<(), CrankerRouterException> {
+        async fn terminate_all_conn(self: Arc<Self>, _: Option<CrankerRouterException>) -> Result<(), CrankerRouterException> {
             Err(CrankerRouterException::new(
                 "mock".to_string()
             ))
         }
 
-        fn inc_bytes_received_from_cli(&self, byte_count: i32) {}
+        fn inc_bytes_received_from_cli(&self, _: i32) {}
 
-        fn try_provide_general_error(&self, opt_crex: Option<CrankerRouterException>) -> Result<(), CrankerRouterException> {
+        fn try_provide_general_error(&self, _: Option<CrankerRouterException>) -> Result<(), CrankerRouterException> {
             Err(CrankerRouterException::new(
                 "mock".to_string()
             ))

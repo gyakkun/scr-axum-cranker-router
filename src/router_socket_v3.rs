@@ -1607,7 +1607,6 @@ mod tests {
     use std::sync::Arc;
 
     use dashmap::DashMap;
-    use tokio::sync::Notify;
     use tokio::task::JoinHandle;
 
     #[test]
@@ -1634,14 +1633,11 @@ mod tests {
 
     #[tokio::test]
     pub async fn test_dashmap_dead_lock_will_pass_but_ugly() {
-        struct ForTest {
-            notify: Notify,
-        }
+        struct ForTest;
         let dm: Arc<DashMap<i32, Arc<ForTest>>> = Arc::new(DashMap::new());
         dm.insert(
             1024,
             Arc::new(ForTest {
-                notify: Notify::new(),
             }),
         );
 
@@ -1656,20 +1652,17 @@ mod tests {
 
     #[tokio::test]
     pub async fn test_dashmap_dead_lock_will_pass() {
-        struct ForTest {
-            notify: Notify,
-        }
+        struct ForTest;
         let dm: Arc<DashMap<i32, Arc<ForTest>>> = Arc::new(DashMap::new());
         dm.insert(
             1024,
             Arc::new(ForTest {
-                notify: Notify::new(),
             }),
         );
         let mut join: Option<JoinHandle<()>> = None;
         for i in dm.iter() {
             let k = i.key().clone();
-            let v = i.value();
+            let _v = i.value();
             let dm = dm.clone();
             let ts = tokio::spawn(async move {
                 dm.remove(&k);
