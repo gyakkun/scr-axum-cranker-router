@@ -226,12 +226,8 @@ impl RouterSocketV3 {
         }
         trace!("6");
 
-        for i in self.proxy_listeners.iter() {
-            i.on_after_proxy_to_target_headers_sent(ctx.as_ref(), Some(headers))?;
-            i.on_request_body_sent_to_target(ctx.as_ref())?;
-        }
-        trace!("7");
 
+        trace!("7");
         if opt_body.is_some() {
             let mut body = opt_body
                 .unwrap()
@@ -307,6 +303,12 @@ impl RouterSocketV3 {
                     }
                 }
             }
+            let end_data_msg = data_messages(req_id, true, None);
+            self.send_data(Message::Binary(end_data_msg.to_vec())).await?;
+        }
+        for i in self.proxy_listeners.iter() {
+            i.on_after_proxy_to_target_headers_sent(ctx.as_ref(), Some(headers))?;
+            i.on_request_body_sent_to_target(ctx.as_ref())?;
         }
         Ok(())
     }

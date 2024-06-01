@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use axum::http::HeaderMap;
 use log::{info, LevelFilter};
-use log::LevelFilter::{Info};
+use log::LevelFilter::{Debug};
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
 use tokio::try_join;
@@ -92,7 +92,7 @@ fn get_test_env() -> TestEnv {
         .unwrap_or(true);
     let log_level = std::env::var("ACT_LOG_LEVEL").ok()
         .and_then(|s| LevelFilter::from_str(&s).ok())
-        .unwrap_or(Info);
+        .unwrap_or(Debug);
     let reg_port = std::env::var("ACT_REG_PORT").ok()
         .and_then(|s| u16::from_str(&s).ok())
         .unwrap_or(3000);
