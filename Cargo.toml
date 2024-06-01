@@ -4,6 +4,7 @@ version = "0.0.1"
 edition = "2021"
 rust-version = "1.78.0"
 description = "A Rust port of [mu-cranker-router](https://github.com/hsbc/mu-cranker-router)"
+homepage = "https://github.com/gyakkun/scr-axum-cranker-router"
 repository = "https://github.com/gyakkun/scr-axum-cranker-router"
 keywords = ["cranker", "reverse-proxy", "http", "websocket", "router"]
 categories = ["network-programming"]
