@@ -21,5 +21,5 @@ but it's not so painful now, that's why this one is written from scratch again.
 * [x] Tidy up access modifiers, expose as little implementation details as possible.
 * [ ] Consider `tracing` crate for logging
 * [x] Get rid of the `rfc7239` crate which has bug in parsing host with port
-* [ ] Documentation
-* [ ] Graceful shutdown
+* [x] Documentation. Migrate from java doc for all public available code.
+* [x] Graceful shutdown. Check [simple_v1](examples/simple_v1.rs).
