@@ -60,9 +60,6 @@ pub(crate) struct RouterSocketV3 {
     pub web_socket_farm: Weak<WebSocketFarm>,
     pub connector_id: String,
     pub proxy_listeners: Vec<Arc<dyn ProxyListener>>,
-    pub discard_client_forwarded_headers: bool,
-    pub send_legacy_forwarded_headers: bool,
-    pub via_value: String,
     // private Runnable onReadyForAction;
     pub remote_address: SocketAddr,
 
@@ -81,7 +78,6 @@ pub(crate) struct RouterSocketV3 {
     // underlying_wss_rx: SplitStream<WebSocket>,
 
     err_chan_tx: Sender<CrankerRouterException>,
-    err_chan_rx: Receiver<CrankerRouterException>,
 
     wss_send_task_tx: Sender<Message>,
     // wss_send_task_rx: Receiver<Message>,
@@ -140,7 +136,12 @@ impl RouterSocketV3 {
         // 2. No text based request line is needed, Skip
 
         for i in self.proxy_listeners.iter() {
-            i.on_before_proxy_to_target(ctx.as_ref(), &mut hdr_to_tgt)?;
+            match i.on_before_proxy_to_target(ctx.as_ref(), &mut hdr_to_tgt) {
+                Err(crex) => {
+                    return Err(crex.with_err_kind(CrexKind::ProxyListenerError_0009))
+                }
+                _ => continue
+            }
         }
 
         let header_text = create_request_line(method, original_uri);
@@ -235,8 +236,18 @@ impl RouterSocketV3 {
             let mut body = opt_body
                 .unwrap()
                 .map_err(|e| CrankerRouterException::new(format!("{:?}", e)));
-            while let Some(req_body_chunk) = body.next().await {
-                let bytes = req_body_chunk?;
+            while let Some(req_body_chunk_res) = body.next().await {
+                let bytes: Bytes;
+                match req_body_chunk_res {
+                    Err(crex) => {
+                        return Err(crex.with_err_kind(
+                            CrexKind::ClientRequestBodyReadError_0010
+                        ));
+                    }
+                    Ok(req_body_chunk) => {
+                        bytes = req_body_chunk;
+                    }
+                }
                 let byte_len = bytes.len();
                 let mut opt_copy = None;
                 if self.really_need_on_request_body_chunk_sent_to_target {
@@ -397,7 +408,13 @@ impl RouterSocket for RouterSocketV3 {
                 let _ = self
                     .notify_client_request_error(ctx.clone(), crex.clone())
                     .await;
-                let _ = self.reset_stream(ctx.as_ref(), 1001, "Going away".to_string()).await;
+                if let Some(CrexKind::ProxyListenerError_0009) = crex.clone().opt_err_kind {
+                    let _ = self.reset_stream(ctx.as_ref(), ERROR_INTERNAL, "Proxy listener error".to_string()).await;
+                } else if let Some(CrexKind::ClientRequestBodyReadError_0010) = crex.clone().opt_err_kind {
+                    let _ = self.reset_stream(ctx.as_ref(), ERROR_INTERNAL, "Client request body read error".to_string()).await;
+                } else {
+                    let _ = self.reset_stream(ctx.as_ref(), 1001, "Going away".to_string()).await;
+                }
                 Err(crex)
             }
         }
@@ -730,6 +747,7 @@ impl ProxyInfo for RequestContext {
     }
 }
 
+#[allow(dead_code)]
 pub enum StreamState {
     Open,
     HalfClose,
@@ -1482,9 +1500,6 @@ impl RouterSocketV3 {
             web_socket_farm,
             connector_id,
             proxy_listeners,
-            discard_client_forwarded_headers,
-            send_legacy_forwarded_headers,
-            via_value,
             // private Runnable onReadyForAction;
             remote_address,
 
@@ -1503,7 +1518,6 @@ impl RouterSocketV3 {
             // underlying_wss_rx,
 
             err_chan_tx,
-            err_chan_rx: err_chan_rx.clone(),
 
             wss_send_task_tx,
             // wss_send_task_rx,

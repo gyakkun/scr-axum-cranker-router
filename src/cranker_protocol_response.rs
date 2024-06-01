@@ -1,7 +1,6 @@
 use std::str::FromStr;
 
 use axum::http;
-use axum::http::StatusCode;
 use axum::response::Response;
 
 use crate::{HOP_BY_HOP_HEADERS, RESPONSE_HEADERS_TO_NOT_SEND_BACK};
@@ -59,14 +58,14 @@ impl CrankerProtocolResponse {
         Ok(Self { headers, status })
     }
 
-    pub fn headers_map(&self) {}
+    // pub fn headers_map(&self) {}
 
-    pub fn default_failed() -> Self {
-        Self {
-            headers: Vec::new(),
-            status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-        }
-    }
+    // pub fn default_failed() -> Self {
+    //     Self {
+    //         headers: Vec::new(),
+    //         status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+    //     }
+    // }
 
     pub fn build(&self) -> Result<http::response::Builder, CrankerRouterException> {
         let mut res = Response::builder().status(self.status);

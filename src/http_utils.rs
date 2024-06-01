@@ -1,5 +1,5 @@
 use std::cmp::max;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 
@@ -240,7 +240,7 @@ impl ForwardedHeader {
 
         let mut buffer: Vec<char> = Vec::new();
         let mut i = 0;
-        'outer: while i < input_chars.len() {
+        while i < input_chars.len() /* @ outer */ {
             let mut opt_extensions: Option<LinkedHashMap<String, String>> = None;
             let mut extensions = LinkedHashMap::new();
             let mut state = FHParseState::ParamName;

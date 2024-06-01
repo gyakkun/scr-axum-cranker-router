@@ -31,6 +31,10 @@ pub enum CrankerRouterExceptionErrorKind {
     CrankerProtocolHttpStatusCodeMissing_0007,
 
     ForwardedHeaderParserError_0008,
+
+    ProxyListenerError_0009,
+
+    ClientRequestBodyReadError_0010
 }
 
 impl CrankerRouterException {

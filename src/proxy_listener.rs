@@ -34,6 +34,13 @@ pub trait ProxyListener: Sync + Send {
 
 pub(crate) struct DefaultProxyListener;
 
+#[allow(dead_code)]
+impl DefaultProxyListener {
+    pub const fn new() -> Self {
+        DefaultProxyListener {}
+    }
+}
+
 impl ProxyListener for DefaultProxyListener {
     fn really_need_on_response_body_chunk_received_from_target(&self) -> bool {
         false

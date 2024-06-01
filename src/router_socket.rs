@@ -163,9 +163,9 @@ impl RouterSocketV1 {
 
         let is_removed = Arc::new(AtomicBool::new(false));
 
-        let should_have_response = Arc::new(AtomicBool::new(false));
+        let is_tgt_can_send_res_now_according_to_rfc2616 = Arc::new(AtomicBool::new(false));
 
-        let router_socket_id_clone = router_socket_id.clone();
+        // let router_socket_id_clone = router_socket_id.clone();
         let really_need_on_response_body_chunk_received_from_target
             = proxy_listeners.iter().any(|i| i.really_need_on_response_body_chunk_received_from_target());
         let really_need_on_request_body_chunk_sent_to_target
@@ -180,7 +180,7 @@ impl RouterSocketV1 {
             remote_address,
 
             is_removed: is_removed.clone(),
-            is_tgt_can_send_res_now_according_to_rfc2616: should_have_response.clone(),
+            is_tgt_can_send_res_now_according_to_rfc2616: is_tgt_can_send_res_now_according_to_rfc2616.clone(),
             bytes_received: bytes_received.clone(),
             bytes_sent: bytes_sent.clone(),
             binary_frame_received: AtomicI64::new(0),
@@ -194,9 +194,12 @@ impl RouterSocketV1 {
             err_chan_tx,
 
             cli_side_res_sender: RSv1ClientSideResponseSender::new(
-                router_socket_id_clone, bytes_sent,
-                is_removed, should_have_response,
-                tgt_res_hdr_tx.clone(), tgt_res_bdy_tx.clone(),
+                // router_socket_id_clone,
+                bytes_sent,
+                // is_removed,
+                // is_tgt_can_send_res_now_according_to_rfc2616,
+                tgt_res_hdr_tx.clone(),
+                tgt_res_bdy_tx.clone(),
             ),
 
             tgt_res_hdr_tx,
@@ -268,8 +271,10 @@ impl RouterSocketV1 {
                 // fast fail
                 trace!("6");
                 trace!("8");
-                for i in self.proxy_listeners.iter() {
-                    i.on_request_body_chunk_sent_to_target(self.as_ref(), &bytes)?; // fast fail
+                if self.really_need_on_request_body_chunk_sent_to_target{
+                    for i in self.proxy_listeners.iter() {
+                        i.on_request_body_chunk_sent_to_target(self.as_ref(), &bytes)?; // fast fail
+                    }
                 }
                 self.wss_send_task_tx.send(Message::Binary(bytes.to_vec())).await
                     .map_err(|e| {
@@ -566,10 +571,10 @@ pub(crate) async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
 
 #[derive(Debug)]
 pub(crate) struct RSv1ClientSideResponseSender {
-    pub router_socket_id: String,
+    // pub router_socket_id: String,
     pub bytes_sent: Arc<AtomicI64>,
-    pub is_removed: Arc<AtomicBool>,
-    pub should_have_response: Arc<AtomicBool>,
+    // pub is_removed: Arc<AtomicBool>,
+    // pub should_have_response: Arc<AtomicBool>,
 
     pub tgt_res_hdr_tx: Sender<Result<String, CrankerRouterException>>,
     pub tgt_res_bdy_tx: Sender<Result<Vec<u8>, CrankerRouterException>>,
@@ -577,32 +582,32 @@ pub(crate) struct RSv1ClientSideResponseSender {
     pub is_tgt_res_hdr_received: AtomicBool,
     pub is_tgt_res_hdr_sent: AtomicBool,
     pub is_tgt_res_bdy_received: AtomicBool,
-    pub is_wss_closed: AtomicBool,
+    // pub is_wss_closed: AtomicBool,
 }
 
 
 impl RSv1ClientSideResponseSender {
     fn new(
-        router_socket_id: String,
+        // router_socket_id: String,
         bytes_sent: Arc<AtomicI64>,
-        is_removed: Arc<AtomicBool>,
-        should_have_response: Arc<AtomicBool>,
+        // is_removed: Arc<AtomicBool>,
+        // is_tgt_can_send_res_now_according_to_rfc2616: Arc<AtomicBool>,
         tgt_res_hdr_tx: Sender<Result<String, CrankerRouterException>>,
         tgt_res_bdy_tx: Sender<Result<Vec<u8>, CrankerRouterException>>,
     ) -> Self {
         Self {
-            router_socket_id,
+            // router_socket_id,
             bytes_sent,
 
-            is_removed,
-            should_have_response,
+            // is_removed,
+            // is_tgt_can_send_res_now_according_to_rfc2616,
 
             tgt_res_hdr_tx,
             tgt_res_bdy_tx,
             is_tgt_res_hdr_received: AtomicBool::new(false), // 1
             is_tgt_res_hdr_sent: AtomicBool::new(false),     // 2
             is_tgt_res_bdy_received: AtomicBool::new(false), // 3
-            is_wss_closed: AtomicBool::new(false),           // 4
+            // is_wss_closed: AtomicBool::new(false),           // 4
         }
     }
 
@@ -1114,6 +1119,7 @@ pub(crate) async fn harvest_router_socket(
 }
 
 trait MessageIdentifier {
+    #[allow(dead_code)]
     fn identifier(&self) -> &'static str;
     fn err_msg_for_uwss(&self) -> &'static str;
 }

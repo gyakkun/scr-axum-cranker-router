@@ -69,7 +69,7 @@ impl ProxyListener for DemoProxyListener {
         Ok(())
     }
 
-    fn on_after_target_to_proxy_headers_received(&self, proxy_info: &dyn ProxyInfo, status: u16, headers: Option<&HeaderMap>) -> Result<(), CrankerRouterException> {
+    fn on_after_target_to_proxy_headers_received(&self, _proxy_info: &dyn ProxyInfo, status: u16, headers: Option<&HeaderMap>) -> Result<(), CrankerRouterException> {
         info!("[{}] on_after_target_to_proxy_headers_received: {:?} {:?}", self.counter.load(SeqCst), status, headers);
         Ok(())
     }

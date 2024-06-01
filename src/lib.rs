@@ -17,7 +17,6 @@ use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
-use axum_macros::debug_handler;
 use lazy_static::lazy_static;
 use log::{debug, error, warn};
 use tower_http::limit;
@@ -29,7 +28,6 @@ use crate::ip_validator::{AllowAll, IPValidator};
 use crate::proxy_listener::ProxyListener;
 use crate::route_resolver::{DefaultRouteResolver, RouteResolver};
 use crate::router_info::RouterInfo;
-use crate::router_socket::RouterSocket;
 use crate::router_socket_filter::{DefaultRouterSocketFilter, RouterSocketFilter};
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 
@@ -343,6 +341,7 @@ impl CrankerRouter {
         }
         next.run(request).await
     }
+
     pub async fn de_register_handler(
         Extension(connector_id): Extension<String>,
         wsu: WebSocketUpgrade,
@@ -480,8 +479,8 @@ impl CrankerRouter {
         response
     }
 
-    pub fn collect_info(arc_state: &ACRState) -> RouterInfo {
-        let websocket_farm = arc_state.websocket_farm.clone();
+    pub fn collect_info(acr_state: &ACRState) -> RouterInfo {
+        let websocket_farm = acr_state.websocket_farm.clone();
         let services = router_info::get_connector_service_list(
             websocket_farm.clone().get_sockets(),
             websocket_farm.clone().get_dark_hosts(),
@@ -491,6 +490,10 @@ impl CrankerRouter {
             dark_hosts: websocket_farm.clone().get_dark_hosts(),
             waiting_tasks: websocket_farm.clone().get_waiting_tasks(),
         }
+    }
+
+    pub fn idle_connection_count(acr_state: &ACRState) -> i32 {
+        acr_state.websocket_farm.idle_count()
     }
 }
 

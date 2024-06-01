@@ -31,8 +31,6 @@ impl<F: Send + Sync + 'static> RouteResolver for F
     }
 }
 
-pub static DEFAULT_ROUTE_RESOLVER: DefaultRouteResolver = DefaultRouteResolver::new();
-
 pub struct LongestRouteResolver;
 
 impl LongestRouteResolver {
@@ -49,7 +47,7 @@ impl RouteResolver for LongestRouteResolver {
             vec_char.remove(0);
         }
 
-        let mut last_index = 0;
+        let mut last_index;
         while {
             last_index = Self::last_index_of(&vec_char, '/');
             last_index
@@ -68,7 +66,7 @@ impl RouteResolver for LongestRouteResolver {
 impl LongestRouteResolver {
     fn last_index_of(str: &Vec<char>, pat: char) -> i32 {
         let len = str.len();
-        let mut iter_rev = str.iter().rev();
+        let iter_rev = str.iter().rev();
         for (pos, ele) in iter_rev.enumerate() {
             if ele == &pat {
                 return (len - pos -1) as i32;

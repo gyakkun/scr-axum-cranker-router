@@ -1,6 +1,6 @@
 use axum::async_trait;
 use axum::extract::ws::CloseFrame;
-use log::{debug, error};
+use log::debug;
 
 use crate::exceptions::CrankerRouterException;
 
