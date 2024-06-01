@@ -370,7 +370,7 @@ impl RouterSocket for RouterSocketV3 {
                 let _ = self
                     .notify_client_request_error(ctx.clone(), crex.clone())
                     .await;
-                let _ = self.reset_stream(ctx.as_ref(), 1001, "Going away".to_string());
+                let _ = self.reset_stream(ctx.as_ref(), 1001, "Going away".to_string()).await;
                 Err(crex)
             }
         }
@@ -1327,7 +1327,7 @@ impl WebSocketListener for RouterSocketV3 {
             let _ = self
                 .notify_client_request_error(ctx_for_err.clone(), crex.clone())
                 .await;
-            let _ = self.handle_on_cli_request_err(ctx_for_err.as_ref(), crex.clone());
+            let _ = self.reset_stream(ctx_for_err.as_ref(), 1001, "Going away".to_string()).await;
         }
 
         Ok(())
