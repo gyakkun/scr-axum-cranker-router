@@ -8,6 +8,7 @@ homepage = "https://github.com/gyakkun/scr-axum-cranker-router"
 repository = "https://github.com/gyakkun/scr-axum-cranker-router"
 keywords = ["cranker", "reverse-proxy", "http", "websocket", "router"]
 categories = ["network-programming"]
+readme = "README.md"
 license = "Apache-2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
