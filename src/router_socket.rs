@@ -49,7 +49,6 @@ pub trait RouteIdentify {
 #[async_trait]
 pub trait RouterSocket: Send + Sync + RouteIdentify {
     fn component_name(&self) -> String;
-    // TODO: Should make this opt to keep in line with mu
     fn connector_id(&self) -> String;
     fn is_removed(&self) -> bool;
     fn get_is_removed_arc_atomic_bool(&self) -> Arc<AtomicBool> {

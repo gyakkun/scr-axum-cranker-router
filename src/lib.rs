@@ -100,7 +100,8 @@ lazy_static! {
     static ref REPRESSED_HEADERS: HashSet<&'static str> = {
         let mut s = HOP_BY_HOP_HEADERS.clone();
         [
-            // expect is already handled by mu server, so if it's forwarded it will break stuff
+            // expect is already handled by hyper under axum, so if it's forwarded it will break stuff
+            // Check https://github.com/hyperium/hyper/pull/377
             "expect",
 
             // Headers that mucranker will overwrite
@@ -236,8 +237,6 @@ impl CrankerRouter {
 
 
         let path = original_uri.path().to_string();
-        // TODO: We can provide a custom "router socket selector" function here
-        //  and it should return: Result< (rs: Arc<dyn RouterSocket>, should_put_back: bool) , CrankerRouterException>
         let socket_fut = app_state.websocket_farm.clone().get_router_socket_by_target_path_and_apply_filter(
             path.clone(),
             method.clone(),
@@ -330,7 +329,7 @@ impl CrankerRouter {
             ).into_response();
         }
         if connector_id.is_none() {
-            request.extensions_mut().insert("UNKNOWN");
+            request.extensions_mut().insert("unknown-".to_string().push_str(addr.to_string().as_str()));
             warn!("the service route={} using unsupported zero down time connector, will not deregister socket", route);
         } else {
             let connector_id = connector_id.unwrap();

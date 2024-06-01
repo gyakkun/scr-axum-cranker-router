@@ -836,8 +836,8 @@ impl RouterSocketV3 {
                 Ok(())
             }
             Err(send_err) => {
-                // TODO: in mu they handle error in the asyncHandle.write callback
-                //  where should we deal with this?
+                // In mu they handle error in the asyncHandle.write callback
+                // here we handle the error (send to chan failure) here
                 info!(
                     "route = {}, router socket id = {} , could not write to client response \
                     (maybe the user closed their browser) so will cancel the request. ex: {:?}",
@@ -1071,7 +1071,6 @@ impl RouterSocketV3 {
     ) {
         let failed_reason = opt_reason.unwrap_or("unknown early failed reason".to_string());
         let failed_code = opt_status_code_to_cli.unwrap_or(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
-        // TODO: Make crex support define status code
         let ex =
             CrankerRouterException::new(failed_reason.to_string()).with_status_code(failed_code);
         let _ = ctx.tgt_res_hdr_tx.send(Err(ex.clone())).await;
@@ -1175,8 +1174,6 @@ fn rst_message(req_id: i32, err_code: i32, msg: String) -> Bytes {
     bm.put_i32(req_id);
     bm.put_i32(err_code);
     bm.put(msg.as_str().as_bytes());
-    // FIXME: Use into() to convert Bytes to Vec<u8> for free. Currently Bytes.to_vec() are mostly
-    //  being used.
     bm.into()
 }
 
@@ -1307,7 +1304,6 @@ impl WebSocketListener for RouterSocketV3 {
         // to_	Expensive	borrowed -> borrowed
         // into_	Variable	owned -> owned (non-Copy types)
 
-        // TODO: Can we make here zero copy???
         let mut bin = Bytes::from(binary_msg); // This Bytes::from is likely to be cost-free
         if bin.remaining() < _MSG_TYPE_LEN_IN_BYTES {
             error!(
@@ -1373,7 +1369,7 @@ impl WebSocketListener for RouterSocketV3 {
                     msg_type_byte, self.router_socket_id
                 );
                 warn!("{}", failed_reason);
-                // FIXME: Should we send exception and on_error here?
+                // Note: Should we send exception and on_error here?
                 //  probably we shouldn't since there's chance old version
                 //  router need to deal with new version connector
                 // return Err(CrankerRouterException::new(failed_reason.clone()));

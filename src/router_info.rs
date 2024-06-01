@@ -53,7 +53,7 @@ pub fn get_connector_service_list(
                             };
 
                         connector_instance.connections.push(ConnectorConnection {
-                            domain: "*".to_string(),
+                            domain: router_socket.domain(),
                             port: router_socket.service_address().port() as i32,
                             router_socket_id: router_socket.router_socket_id(),
                             protocol: router_socket.cranker_version().to_string(),
@@ -65,9 +65,6 @@ pub fn get_connector_service_list(
                     }
                 }
             }
-
-            // TODO: v3 support - domain
-            // for String domain in domain to socket v3 : key set
 
             connector_services.push(ConnectorService {
                 route: route.clone(),
