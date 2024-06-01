@@ -1422,7 +1422,7 @@ impl WebSocketListener for RouterSocketV3 {
         let mut reason: Option<String> = None;
         if !self.is_removed() {
             self.web_socket_farm.upgrade().map(|wsf| {
-                wsf.remove_router_socket_in_background(
+                wsf.clone().remove_router_socket_in_background(
                     self.route(),
                     self.router_socket_id(),
                     self.get_is_removed_arc_atomic_bool(),

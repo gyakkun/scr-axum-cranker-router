@@ -620,7 +620,7 @@ impl RouterSocket for RouterSocketV1 {
 
     fn raise_completion_event(&self, _: Option<ClientRequestIdentifier>) -> Result<(), CrankerRouterException> {
         if let Some(wsf) = self.websocket_farm.upgrade() {
-            wsf.remove_router_socket_in_background(
+            wsf.clone().remove_router_socket_in_background(
                 self.route.clone(), self.router_socket_id.clone(), self.is_removed.clone(),
             )
         }

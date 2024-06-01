@@ -229,7 +229,7 @@ pub(crate) async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
                 // 2. Remove bad router_socket
                 if !rs.is_removed() {
                     if let Some(wsf) = rs.get_opt_arc_websocket_farm() {
-                        wsf.remove_router_socket_in_background(rs.route(), rs.router_socket_id(), rs.get_is_removed_arc_atomic_bool().clone());
+                        wsf.clone().remove_router_socket_in_background(rs.route(), rs.router_socket_id(), rs.get_is_removed_arc_atomic_bool().clone());
                     }
                 }
                 // 3. Close the res to cli
@@ -329,6 +329,7 @@ pub(crate) async fn harvest_router_socket(
         info!("Connector (v1) registered! route: {} , connector_id: {} , router_socket_id: {}",route, connector_id, router_socket_id);
         app_state
             .websocket_farm
+            .clone()
             .add_router_socket_in_background(rs);
     } else if cranker_version == CRANKER_V_3_0 {
         let (wss_tx, wss_rx) = wss.split();
@@ -352,6 +353,7 @@ pub(crate) async fn harvest_router_socket(
         info!("Connector (v3) registered! route: {} , connector_id: {} , router_socket_id: {}", route,  connector_id, router_socket_id);
         app_state
             .websocket_farm
+            .clone()
             .add_router_socket_in_background(rs);
     } else {
         error!("not supported cranker version: {}", cranker_version);

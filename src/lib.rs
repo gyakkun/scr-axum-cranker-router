@@ -154,7 +154,7 @@ impl CrankerRouter {
                     config.routes_keep_time_millis as u64
                 )
                 ).await;
-                websocket_farm_clone.clean_routes_in_background(config.routes_keep_time_millis);
+                websocket_farm_clone.clone().clean_routes_in_background(config.routes_keep_time_millis);
             }
         });
         Self {
@@ -371,6 +371,7 @@ impl CrankerRouter {
             request.extensions_mut().insert(connector_id.clone());
             app_state
                 .websocket_farm
+                .clone()
                 .de_register_router_socket_in_background(route, addr, connector_id);
         }
         next.run(request).await
