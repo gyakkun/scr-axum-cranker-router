@@ -6,8 +6,8 @@ use serde::Serialize;
 #[serde(rename_all = "camelCase")]
 pub struct DarkHost {
     pub address: IpAddr,
+    /// unix epoch in millisecond
     pub date_enabled: i64,
-    // unix timestamp,
     pub reason: String,
 }
 

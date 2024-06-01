@@ -1,6 +1,8 @@
 use dashmap::DashSet;
 use log::debug;
 
+/// To choose a route for an HTTP path. Can be prefix matching or exact matching.
+/// See `DefaultRouteResolver` and `LongestRouteResolver`
 pub trait RouteResolver: Sync + Send {
     fn resolve(&self, routes: &DashSet<String>, target: &String) -> String {
         let split: Vec<&str> = target.split("/").collect();

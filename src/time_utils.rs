@@ -1,7 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Like the `System.currentTimeMillis()` in Java
 #[inline]
-pub fn current_time_millis() -> i64 {
+pub(crate) fn current_time_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicI32};
-use std::sync::atomic::Ordering::{Acquire, Release};
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Release};
 use std::time::Duration;
 
 use async_channel::{Receiver, Sender, unbounded};
@@ -18,10 +18,16 @@ use crate::dark_host::DarkHost;
 use crate::exceptions::{CrankerRouterException, CrexKind};
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
+use crate::route_identify::RouteIdentify;
 use crate::route_resolver::RouteResolver;
-use crate::router_socket::{RouteIdentify, RouterSocket};
+use crate::router_socket::RouterSocket;
 use crate::router_socket_filter::RouterSocketFilter;
 
+/// Here we mimic the Java WebSocketFarm but allow adding
+/// both V1 and V3 router socket to the same farm to reduce
+/// complexity. The `RouterSocket` trait should define all
+/// common behaviours needed for the farm to pick an eligible
+/// router socket for a client side request
 #[allow(unused_variables)]
 #[async_trait]
 pub(crate) trait WebSocketFarmInterface: Sync + Send {
@@ -70,21 +76,25 @@ pub struct WaitingSocketTask {
     target: String,
 }
 
+/// The implementation of WebSocketFarmInterface
 pub struct WebSocketFarm {
-    pub route_resolver: Arc<dyn RouteResolver>,
-    pub route_to_socket_chan: DashMap<String, (
+    route_resolver: Arc<dyn RouteResolver>,
+    /// Use an unbounded channel of `Weak<dyn RouterSocket>`,
+    /// to pick connector/connection/cranker socket in FIFO
+    /// style, implying round-robin like behaviour.
+    route_to_socket_chan: DashMap<String, (
         Sender<Weak<dyn RouterSocket>>,
         Receiver<Weak<dyn RouterSocket>>
     )>,
-    pub route_to_router_socket_id_to_arc_router_socket_map: DashMap<String, DashMap<String, Arc<dyn RouterSocket>>>,
-    pub route_last_removal_times: DashMap<String, i64>,
-    pub idle_count: AtomicI32,
-    pub waiting_tasks: DashMap<String, DashSet<WaitingSocketTask>>,
-    pub waiting_task_count: AtomicI32,
-    pub dark_hosts: DashSet<DarkHost>,
-    pub has_catch_all: AtomicBool,
-    pub max_wait_in_millis: i64,
-    pub proxy_listeners: Vec<Arc<dyn ProxyListener>>,
+    /// This is the only place we store our
+    route_to_router_socket_id_to_arc_router_socket_map: DashMap<String, DashMap<String, Arc<dyn RouterSocket>>>,
+    route_last_removal_times: DashMap<String, i64>,
+    idle_count: AtomicI32,
+    waiting_tasks: DashMap<String, DashSet<WaitingSocketTask>>,
+    waiting_task_count: AtomicI32,
+    dark_hosts: DashSet<DarkHost>,
+    max_wait_in_millis: i64,
+    proxy_listeners: Vec<Arc<dyn ProxyListener>>,
 }
 
 // unsafe impl<ANY> Send for WebSocketFarm<ANY>{}
@@ -139,6 +149,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
         // we have both maps storing <routes, xxx >, here we use route_to_chan map since it removes route earlier
         // a little bit ( check the trace!("82") in retain )
         let current_routes = self.route_to_socket_chan.iter().map(|e| e.key().clone()).collect::<DashSet<String>>();
+        // TODO: Catch all handling
         let resolved_route = self.route_resolver.resolve(&current_routes, &target_path);
         let opt_chan = self.route_to_socket_chan.get(&resolved_route);
         if opt_chan.is_none() {
@@ -154,6 +165,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
         let router_socket_sender = chan_pair.0;
         let router_socket_receiver = chan_pair.1;
         let start_ts = time_utils::current_time_millis();
+        self.waiting_task_count.fetch_add(1, AcqRel);
         let timeout = tokio::time::timeout(Duration::from_millis(self.max_wait_in_millis as u64), async {
             let mut visited = HashSet::new();
             while let Ok(rs) = router_socket_receiver.recv().await /* @ filter loop await */ {
@@ -183,11 +195,24 @@ impl WebSocketFarmInterface for WebSocketFarm {
                 }
             }
             if router_socket_filter.should_fallback_to_first_path_matched() {
-                while let Ok(rs) = router_socket_receiver.recv().await /* @ fallback await */ {
+                while let Ok(rs) = router_socket_receiver.recv().await /* @ fallback await 1 */ {
                     if let Some(arc_rs) = rs.upgrade() {
                         // skip socket that should be removed
                         if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs) { continue; }
-                        return Ok(arc_rs); // @ fallback await
+                        return Ok(arc_rs); // @ fallback await 1
+                    }
+                }
+            }
+            if cranker_router_config.allow_catch_all && router_socket_filter.should_fallback_to_catch_all() {
+                let opt_catch_all_chan = self.route_to_socket_chan.get("*");
+                if opt_catch_all_chan.is_some() {
+                    let (_, ca_rx) = opt_catch_all_chan.unwrap().clone();
+                    while let Ok(rs) = ca_rx.recv().await /* @ fallback await 2 */ {
+                        if let Some(arc_rs) = rs.upgrade() {
+                            // skip socket that should be removed
+                            if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs) { continue; }
+                            return Ok(arc_rs); // @ fallback await 2
+                        }
                     }
                 }
             }
@@ -196,11 +221,14 @@ impl WebSocketFarmInterface for WebSocketFarm {
                 target_path
             )).with_err_kind(CrexKind::NoRouterSocketAvailable_0002))
         }).await;
+
         return match timeout {
             Ok(ok_or_err) => {
+                self.waiting_task_count.fetch_add(-1, AcqRel);
                 ok_or_err
             }
             _ => {
+                self.waiting_task_count.fetch_add(-1, AcqRel);
                 let elapsed = time_utils::current_time_millis() - start_ts;
                 let epif = ErrorProxyInfo::new(resolved_route.clone(), elapsed);
                 for i in self.proxy_listeners.iter() {
@@ -381,16 +409,16 @@ impl ErrorProxyInfo {
 }
 
 impl RouteIdentify for ErrorProxyInfo {
-    fn service_address(&self) -> SocketAddr {
-        SocketAddr::new(LOCAL_IP.clone(), 0)
+    fn router_socket_id(&self) -> String {
+        "N/A".to_string()
     }
 
     fn route(&self) -> String {
         self.route.clone()
     }
 
-    fn router_socket_id(&self) -> String {
-        "N/A".to_string()
+    fn service_address(&self) -> SocketAddr {
+        SocketAddr::new(LOCAL_IP.clone(), 0)
     }
 }
 

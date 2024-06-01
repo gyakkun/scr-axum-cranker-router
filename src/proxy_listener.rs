@@ -5,6 +5,7 @@ use log::error;
 use crate::exceptions::CrankerRouterException;
 use crate::proxy_info::ProxyInfo;
 
+/// All hooks to be applied during Cranker proxying requests
 #[allow(unused_variables)]
 pub trait ProxyListener: Sync + Send {
     fn on_before_proxy_to_target(&self, info: &dyn ProxyInfo, request_headers_to_target: &mut HeaderMap) -> Result<(), CrankerRouterException> { Ok(()) }
@@ -17,14 +18,14 @@ pub trait ProxyListener: Sync + Send {
     fn on_request_body_sent_to_target(&self, proxy_info: &dyn ProxyInfo) -> Result<(), CrankerRouterException> { Ok(()) }
     fn on_response_body_chunk_received_from_target(&self, proxy_info: &dyn ProxyInfo, chunk: &Bytes) -> Result<(), CrankerRouterException> { Ok(()) }
 
+    /// `on_response_body_chunk_received_from_target` is expensive, we need you to tell us ahead
     fn really_need_on_response_body_chunk_received_from_target(&self) -> bool {
-        // `on_response_body_chunk_received_from_target` is expensive, we need you to tell us ahead
         error!("BOOM");
         panic!("Please ensure you implement this method! It's very important to us: do you `really_need_on_response_body_chunk_received_from_target`");
     }
 
+    /// `on_request_body_chunk_sent_to_targe` is expensive in V3, we need you to tell us ahead
     fn really_need_on_request_body_chunk_sent_to_target(&self) -> bool {
-        // `on_request_body_chunk_sent_to_targe` is expensive in V3, we need you to tell us ahead
         error!("BOOM");
         panic!("Please ensure you implement this method! It's very important to us: do you `really_need_on_request_body_chunk_sent_to_target` (V3)");
     }

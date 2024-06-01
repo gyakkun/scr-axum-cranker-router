@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64};
@@ -20,11 +21,13 @@ use tokio_stream::StreamExt;
 
 use crate::{ACRState, CRANKER_V_3_0, time_utils};
 use crate::cranker_protocol_response::CrankerProtocolResponse;
+use crate::dark_host::DarkHost;
 use crate::exceptions::{CrankerRouterException, CrexKind};
 use crate::http_utils::set_target_request_headers;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
-use crate::router_socket::{ClientRequestIdentifier, create_request_line, pipe_and_queue_the_wss_send_task_and_handle_err_chan, pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary, RouteIdentify, RouterSocket};
+use crate::route_identify::RouteIdentify;
+use crate::router_socket::{ClientRequestIdentifier, create_request_line, pipe_and_queue_the_wss_send_task_and_handle_err_chan, pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary, RouterSocket};
 use crate::router_socket_v3::StreamState::Open;
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
@@ -328,6 +331,10 @@ impl RouterSocket for RouterSocketV3 {
         return self.is_removed.load(Acquire);
     }
 
+    fn get_is_removed_arc_atomic_bool(&self) -> Arc<AtomicBool> {
+        return self.is_removed.clone()
+    }
+
     fn cranker_version(&self) -> &'static str {
         return CRANKER_V_3_0;
     }
@@ -353,6 +360,11 @@ impl RouterSocket for RouterSocketV3 {
             }
         }
         Ok(())
+    }
+
+    // Not used in V3
+    fn is_dark_mode_on(&self, _: &HashSet<DarkHost>) -> bool {
+        false
     }
 
     fn inflight_count(&self) -> i32 {
@@ -628,7 +640,6 @@ impl RequestContext {
     }
 
     fn write_it_maybe(self: &Self) {
-        // if self.is_wss_writable.load(Acquire) && !
         if self.is_wss_writable.load(Acquire)
             && (!self.should_keep_read_from_cli_rx.is_empty()
             && !self.should_keep_read_from_cli_rx.is_closed()
@@ -924,12 +935,12 @@ impl RouterSocketV3 {
             })?;
         }
         if is_stream_end {
-            let _ = self.notify_client_request_close(ctx, 1000, None).await; // TODO: What does 1000 mean?
+            // TODO: What does 1000 mean?
+            let _ = self.notify_client_request_close(ctx, 1000, None).await;
         }
         let win_update_msg = window_update_message(req_id, byte_len);
         self.send_data(Message::Binary(win_update_msg.into()))
             .await
-        // no mu callbacks needed here ? (doneAndPullData, SeqCstBuffer)
     }
 
     pub async fn handle_rst_stream(
@@ -1509,13 +1520,8 @@ impl RouterSocketV3 {
             req_id_generator: AtomicI32::new(0),
 
             // START WSS EXCHANGE PART
-            // underlying_wss_tx,
-            // underlying_wss_rx,
-
             err_chan_tx,
-
             wss_send_task_tx,
-            // wss_send_task_rx,
             // END WSS EXCHANGE PART
 
             wss_recv_pipe_join_handle: Arc::new(Mutex::new(None)),
@@ -1664,7 +1670,6 @@ mod tests {
         for i in dm.iter() {
             let k = i.key().clone();
             let v = i.value();
-            // Will deadlock and hang here
             let dm = dm.clone();
             let ts = tokio::spawn(async move {
                 dm.remove(&k);

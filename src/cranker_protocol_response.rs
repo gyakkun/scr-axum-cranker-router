@@ -58,15 +58,6 @@ impl CrankerProtocolResponse {
         Ok(Self { headers, status })
     }
 
-    // pub fn headers_map(&self) {}
-
-    // pub fn default_failed() -> Self {
-    //     Self {
-    //         headers: Vec::new(),
-    //         status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-    //     }
-    // }
-
     pub fn build(&self) -> Result<http::response::Builder, CrankerRouterException> {
         let mut res = Response::builder().status(self.status);
         for header_line in self.headers.iter() {

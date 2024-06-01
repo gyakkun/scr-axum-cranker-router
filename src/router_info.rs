@@ -10,6 +10,10 @@ use crate::dark_host::DarkHost;
 use crate::router_socket::RouterSocket;
 use crate::websocket_farm::WaitingSocketTask;
 
+/// An info trait to gather all useful information from Cranker,
+/// including the registered components/services, routes, connector
+/// instances, remote address and port and so on.
+/// Visit `/health/connectors` endpoint for detail
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouterInfo {

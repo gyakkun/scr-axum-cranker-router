@@ -42,6 +42,7 @@ pub mod websocket_listener;
 pub mod proxy_listener;
 pub mod websocket_farm;
 pub mod ip_validator;
+pub mod route_identify;
 pub mod router_socket_filter;
 mod connector_connection;
 mod connector_instance;
@@ -51,6 +52,7 @@ mod dark_host;
 mod router_info;
 mod router_socket_v3;
 mod http_utils;
+mod router_socket_v1;
 
 pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &'static str = "CrankerProtocol";
 // should be CrankerProtocol, but axum convert all header key to lowercase when reading req from client and sending res
@@ -71,7 +73,6 @@ lazy_static! {
     static ref SUPPORTED_CRANKER_VERSION: HashMap<&'static str, &'static str> =  {
         let mut s = HashMap::new();
         s.insert(_VER_1_0, CRANKER_V_1_0);
-        // V3 not implemented yet
         s.insert(_VER_3_0, CRANKER_V_3_0);
         s
     };
@@ -658,8 +659,8 @@ pub struct CrankerRouterConfig {
     connector_max_wait_time_millis: i64,
     ping_sent_after_no_write_for_ms: i64,
     idle_read_timeout_ms: i64,
+    allow_catch_all: bool,
 
-    // proxy_host_header: bool,
     do_not_proxy_headers: HashSet<&'static str>,
     registration_ip_validator: Arc<dyn IPValidator>,
     route_resolver: Arc<dyn RouteResolver>,
@@ -676,13 +677,17 @@ impl CrankerRouterBuilder {
         Self {
             proxy_listeners: vec![],
             router_socket_filter: Arc::new(DefaultRouterSocketFilter::new()),
+
             discard_client_forwarded_headers: false,
             send_legacy_forwarded_headers: false,
             via_name: "scr-axum".to_string(),
-            idle_read_timeout_ms: DEF_IDLE_READ_TIMEOUT_MS,
+
             routes_keep_time_millis: DEF_ROUTES_KEEP_TIME_MILLIS,
-            ping_sent_after_no_write_for_ms: DEF_PING_SENT_AFTER_NO_WRITE_FOR_MS,
             connector_max_wait_time_millis: DEF_CONNECTOR_MAX_WAIT_TIME_MILLIS,
+            ping_sent_after_no_write_for_ms: DEF_PING_SENT_AFTER_NO_WRITE_FOR_MS,
+            idle_read_timeout_ms: DEF_IDLE_READ_TIMEOUT_MS,
+            allow_catch_all: true,
+
             do_not_proxy_headers: REPRESSED_HEADERS.clone(),
             registration_ip_validator: Arc::new(AllowAll::new()),
             route_resolver: Arc::new(DefaultRouteResolver::new()),
@@ -736,6 +741,12 @@ impl CrankerRouterBuilder {
         panic_if_less_than_zero("connector_max_wait_time_millis", connector_max_wait_time_millis);
         let mut c = self.clone();
         c.connector_max_wait_time_millis = connector_max_wait_time_millis;
+        c
+    }
+
+    pub fn should_allow_catch_all(self, allow_catch_all: bool) -> Self {
+        let mut c = self.clone();
+        c.allow_catch_all = allow_catch_all;
         c
     }
 

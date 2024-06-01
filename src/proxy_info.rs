@@ -1,6 +1,9 @@
 use crate::exceptions::CrankerRouterException;
-use crate::router_socket::RouteIdentify;
+use crate::route_identify::RouteIdentify;
 
+/// An info trait to tell the information during Cranker
+/// proxying a request. It's applied to multiple proxy
+/// listener hooks.
 pub trait ProxyInfo : RouteIdentify {
     fn is_catch_all(&self) -> bool;
     fn connector_id(&self) -> String;

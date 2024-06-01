@@ -4,8 +4,9 @@ use log::debug;
 
 use crate::exceptions::CrankerRouterException;
 
+/// The common behaviours for handling WebSocket messages
 #[async_trait]
-pub trait WebSocketListener: Send + Sync {
+pub(crate) trait WebSocketListener: Send + Sync {
     // this should be done in on_upgrade, so ignore it
 
     // fn on_connect(&self, wss_tx: SplitSink<WebSocket, Message>) -> Result<(), CrankerRouterException>;

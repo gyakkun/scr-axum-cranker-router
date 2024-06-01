@@ -50,7 +50,7 @@ impl CrankerProtocolRequestBuilder {
             match self.end_marker {
                 Some(RequestBodyEnded) => Ok(self.end_marker.unwrap().as_str().to_string()),
                 _ => Err(CrankerRouterException::new(
-                    "failed to build cranker protocol request. end marker should be RequestBodyEnded \\
+                    "failed to build cranker protocol request. end marker should be RequestBodyEnded \
                      when no request line and header map str is present.".to_string()
                 ))
             }

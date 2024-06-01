@@ -22,11 +22,18 @@ pub trait RouterSocketFilter: Sync + Send {
         router_socket: Arc<dyn RouterSocket>,
     ) -> bool;
 
+    /// If no exact ones matched, should fall back to the first
+    /// one which matches the target path by `RouteResolver`
     fn should_fallback_to_first_path_matched(&self) -> bool {
         false
     }
+
+    /// If no any path matched (even partial), should fall back
+    /// to the catch-all connector socket
+    fn should_fallback_to_catch_all(&self) -> bool { true }
 }
 
+/// Always return true for should_use()
 pub struct DefaultRouterSocketFilter;
 
 impl DefaultRouterSocketFilter {
@@ -77,7 +84,8 @@ mod router_socket_filter_test {
 
     use crate::{ACRState, CRANKER_V_1_0};
     use crate::exceptions::CrankerRouterException;
-    use crate::router_socket::{ClientRequestIdentifier, RouteIdentify, RouterSocket};
+    use crate::route_identify::RouteIdentify;
+    use crate::router_socket::{ClientRequestIdentifier, RouterSocket};
     use crate::router_socket_filter::RouterSocketFilter;
     use crate::websocket_farm::WebSocketFarm;
 

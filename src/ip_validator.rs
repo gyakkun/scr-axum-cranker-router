@@ -7,7 +7,7 @@ pub trait IPValidator: Sync + Send {
 pub struct AllowAll;
 
 impl AllowAll {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {}
     }
 }
