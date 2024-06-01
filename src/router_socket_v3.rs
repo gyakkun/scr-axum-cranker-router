@@ -408,12 +408,16 @@ impl RouterSocket for RouterSocketV3 {
                 let _ = self
                     .notify_client_request_error(ctx.clone(), crex.clone())
                     .await;
-                if let Some(CrexKind::ProxyListenerError_0009) = crex.clone().opt_err_kind {
-                    let _ = self.reset_stream(ctx.as_ref(), ERROR_INTERNAL, "Proxy listener error".to_string()).await;
-                } else if let Some(CrexKind::ClientRequestBodyReadError_0010) = crex.clone().opt_err_kind {
-                    let _ = self.reset_stream(ctx.as_ref(), ERROR_INTERNAL, "Client request body read error".to_string()).await;
-                } else {
-                    let _ = self.reset_stream(ctx.as_ref(), 1001, "Going away".to_string()).await;
+                match crex.opt_err_kind {
+                    Some(CrexKind::ProxyListenerError_0009) => {
+                        let _ = self.reset_stream(ctx.as_ref(), ERROR_INTERNAL, "Proxy listener error".to_string()).await;
+                    }
+                    Some(CrexKind::ClientRequestBodyReadError_0010) => {
+                        let _ = self.reset_stream(ctx.as_ref(), ERROR_INTERNAL, "Client request body read error".to_string()).await;
+                    }
+                    _ => {
+                        let _ = self.reset_stream(ctx.as_ref(), 1001, "Going away".to_string()).await;
+                    }
                 }
                 Err(crex)
             }
