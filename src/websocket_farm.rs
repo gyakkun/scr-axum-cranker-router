@@ -70,6 +70,8 @@ pub trait WebSocketFarmInterface: Sync + Send {
     }
 }
 
+/// Contains the target path waiting for matched router socket
+/// available
 #[derive(Serialize, Clone, Debug, Hash, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WaitingSocketTask {

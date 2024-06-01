@@ -30,13 +30,9 @@ use crate::router_socket_filter::{DefaultRouterSocketFilter, RouterSocketFilter}
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 
 pub mod router_socket;
-pub mod time_utils;
 pub mod exceptions;
-pub mod cranker_protocol_response;
-pub mod cranker_protocol_request_builder;
 pub mod route_resolver;
 pub mod proxy_info;
-pub mod websocket_listener;
 pub mod proxy_listener;
 pub mod websocket_farm;
 pub mod ip_validator;
@@ -45,12 +41,16 @@ pub mod router_socket_filter;
 mod connector_connection;
 mod connector_instance;
 mod connector_service;
+mod cranker_protocol_response;
+mod cranker_protocol_request_builder;
 mod dark_mode_manager;
 mod dark_host;
 mod router_info;
 mod router_socket_v3;
+mod time_utils;
 mod http_utils;
 mod router_socket_v1;
+mod websocket_listener;
 
 pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &'static str = "CrankerProtocol";
 // should be CrankerProtocol, but axum convert all header key to lowercase when reading req from client and sending res
@@ -111,10 +111,13 @@ lazy_static! {
     };
 }
 
-// Our shared state
+/// The shared state of Cranker router
 pub struct CrankerRouterState {
+    /// An Arc of the WebSocketFarm
     pub websocket_farm: Arc<WebSocketFarm>,
+    /// An Arc of DarkModeManager
     pub dark_mode_manager: Arc<DarkModeManager>,
+    /// The original config copy from the builder
     pub config: CrankerRouterConfig,
 }
 
@@ -571,6 +574,8 @@ impl CrankerRouter {
     }
 }
 
+/// Mainly for extracting connector information during registration
+/// Not being used in main logic of the router.
 #[derive(Clone)]
 pub struct CrankerConnectorInfo {
     pub connector_id: String,

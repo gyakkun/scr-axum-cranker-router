@@ -98,7 +98,7 @@ impl CrankerProtocolRequestBuilder {
 }
 
 
-pub enum EndMarker {
+pub(crate) enum EndMarker {
     RequestBodyPending,
     RequestHasNoBody,
     RequestBodyEnded,

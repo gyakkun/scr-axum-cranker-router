@@ -111,9 +111,6 @@ impl LongestFirstRouteResolver {
     }
 }
 
-pub static LONGEST_ROUTE_RESOLVER: LongestFirstRouteResolver = LongestFirstRouteResolver::new();
-
-
 #[test]
 fn default_route_resolver_test() {
     let s = DashSet::new();

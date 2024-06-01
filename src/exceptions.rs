@@ -9,13 +9,20 @@ use uuid::Uuid;
 
 pub(crate) type CrexKind = CrankerRouterExceptionErrorKind;
 
+/// The custom error struct in this library
 #[derive(Debug, Clone)]
 pub struct CrankerRouterException {
+    /// Description of the error
     pub reason: String,
+    /// If the error specifies the status code
+    /// then this status code will be responded
+    /// to client request
     pub opt_status_code: Option<u16>,
+    /// An option error kind enum
     pub opt_err_kind: Option<CrexKind>
 }
 
+/// Kinds of error that can be easily categorized
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -37,8 +44,9 @@ pub enum CrankerRouterExceptionErrorKind {
     ClientRequestBodyReadError_0010
 }
 
+#[allow(dead_code)]
 impl CrankerRouterException {
-    pub fn new(reason: String) -> Self {
+    pub(crate) fn new(reason: String) -> Self {
         Self {
             reason,
             opt_status_code: None,
@@ -46,7 +54,7 @@ impl CrankerRouterException {
         }
     }
 
-    pub fn with_status_code(self, status_code: u16) -> Self {
+    pub(crate) fn with_status_code(self, status_code: u16) -> Self {
         Self {
             reason: self.reason,
             opt_status_code: Some(status_code),
@@ -54,7 +62,7 @@ impl CrankerRouterException {
         }
     }
 
-    pub fn with_err_kind(self, err_kind: CrexKind) -> Self {
+    pub(crate) fn with_err_kind(self, err_kind: CrexKind) -> Self {
         Self {
             reason: self.reason,
             opt_status_code: self.opt_status_code,
@@ -62,7 +70,7 @@ impl CrankerRouterException {
         }
     }
 
-    pub fn plus(self, another: CrankerRouterException) -> Self {
+    pub(crate) fn plus(self, another: CrankerRouterException) -> Self {
         let mut reason = self.reason;
         reason.push_str(another.reason.as_str());
         Self {
@@ -72,7 +80,7 @@ impl CrankerRouterException {
         }
     }
 
-    pub fn append_string(self, further_reason: String) -> Self {
+    pub(crate) fn append_string(self, further_reason: String) -> Self {
         let mut reason = self.reason;
         reason.push_str(further_reason.as_str());
         Self {
@@ -82,7 +90,7 @@ impl CrankerRouterException {
         }
     }
 
-    pub fn append_str(self, further_reason: &str) -> Self {
+    pub(crate) fn append_str(self, further_reason: &str) -> Self {
         let mut reason = self.reason;
         reason.push_str(further_reason);
         Self {
@@ -92,15 +100,15 @@ impl CrankerRouterException {
         }
     }
 
-    pub fn plus_str(self, further_reason: &str) -> Self {
+    pub(crate) fn plus_str(self, further_reason: &str) -> Self {
         self.append_str(further_reason)
     }
 
-    pub fn plus_string(self, further_reason: String) -> Self {
+    pub(crate) fn plus_string(self, further_reason: String) -> Self {
         self.append_string(further_reason)
     }
 
-    pub fn prepend_str(self, prior_reason: &str) -> Self {
+    pub(crate) fn prepend_str(self, prior_reason: &str) -> Self {
         let mut reason = prior_reason.to_string();
         reason.push(' ');
         reason.push_str(self.reason.as_str());
@@ -111,7 +119,7 @@ impl CrankerRouterException {
         }
     }
 
-    pub fn prepend_string(self, prior_reason: String) -> Self {
+    pub(crate) fn prepend_string(self, prior_reason: String) -> Self {
         let mut reason = prior_reason.clone();
         reason.push(' ');
         reason.push_str(self.reason.as_str());
@@ -153,7 +161,7 @@ impl IntoResponse for CrankerRouterException {
 }
 
 #[inline]
-pub fn compose_ex<ANY>(
+pub(crate) fn compose_ex<ANY>(
     opt_total_err: Option<CrankerRouterException>,
     this_may_err: Result<ANY, CrankerRouterException>,
 ) -> Option<CrankerRouterException> {
