@@ -276,7 +276,7 @@ impl RouterSocketV1 {
                         i.on_request_body_chunk_sent_to_target(self.as_ref(), &bytes)?; // fast fail
                     }
                 }
-                self.wss_send_task_tx.send(Message::Binary(bytes.to_vec())).await
+                self.wss_send_task_tx.send(Message::Binary(bytes.into())).await
                     .map_err(|e| {
                         let failed_reason = format!(
                             "error when sending req body to tgt: {:?}", e
@@ -472,7 +472,7 @@ pub(crate) async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
                 Err(_) => {
                     if let Some(rs) = rs_weak.upgrade() {
                         trace!("80");
-                        let _ = rs.send_ws_msg_to_uwss(Message::Ping("ping".as_bytes().to_vec())).await;
+                        let _ = rs.send_ws_msg_to_uwss(Message::Ping("ping".into())).await;
                         trace!("83");
                     } else {
                         trace!("84");

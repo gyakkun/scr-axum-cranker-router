@@ -251,7 +251,7 @@ impl RouterSocketV3 {
                 }
                 let data = data_messages(req_id, false, Some(bytes));
                 ctx.inc_rtr_to_tgt_pending_ack_bytes((data.len() - HEADER_LEN_IN_BYTES) as i32);
-                self.send_data(Message::Binary(data.to_vec())).await?;
+                self.send_data(Message::Binary(data.into())).await?;
 
                 // Here need to deal with flow control
                 ctx.from_client_bytes.fetch_add(byte_len as i64, SeqCst);
@@ -304,7 +304,7 @@ impl RouterSocketV3 {
                 }
             }
             let end_data_msg = data_messages(req_id, true, None);
-            self.send_data(Message::Binary(end_data_msg.to_vec())).await?;
+            self.send_data(Message::Binary(end_data_msg.into())).await?;
         }
         for i in self.proxy_listeners.iter() {
             i.on_after_proxy_to_target_headers_sent(ctx.as_ref(), Some(headers))?;
@@ -824,10 +824,7 @@ impl RouterSocketV3 {
             "route={}, router_socket_id={}, sending {} bytes to client",
             self.route, self.router_socket_id, len
         );
-        // FIXME: bin.to_vec() is underlying copying the bin
-        //  try to do zero-copy here!
-        //  We should probably use `bin.into_vec()` here that seems cost-free
-        let send_tgt_bdy_to_chan_res = ctx.tgt_res_bdy_tx.send(Ok(bin.to_vec())).await;
+        let send_tgt_bdy_to_chan_res = ctx.tgt_res_bdy_tx.send(Ok(bin.into())).await;
         let res = match send_tgt_bdy_to_chan_res {
             Ok(_) => {
                 if is_end_stream {
@@ -835,7 +832,7 @@ impl RouterSocketV3 {
                 }
                 ctx.to_client_bytes.fetch_add(len as i64, SeqCst);
                 let win_update_msg = window_update_message(req_id, len as i32);
-                let _ = self.send_data(Message::Binary(win_update_msg.to_vec())).await;
+                let _ = self.send_data(Message::Binary(win_update_msg.into())).await;
                 Ok(())
             }
             Err(send_err) => {
@@ -906,7 +903,7 @@ impl RouterSocketV3 {
         })?;
         // FIXME: bin.to_vec() is underlying copying the bin
         //  try to do zero-copy here!
-        let content = String::from_utf8(bin.to_vec())
+        let content = String::from_utf8(bin.into())
             .map_err(|fu8e| {
                 CrankerRouterException::new(format!(
                     "failed to convert binary to header text in utf8 : {:?}, req id = {} , router socket id = {} , route = {}",
@@ -930,7 +927,7 @@ impl RouterSocketV3 {
             let _ = self.notify_client_request_close(ctx, 1000, None).await; // TODO: What does 1000 mean?
         }
         let win_update_msg = window_update_message(req_id, byte_len);
-        self.send_data(Message::Binary(win_update_msg.to_vec()))
+        self.send_data(Message::Binary(win_update_msg.into()))
             .await
         // no mu callbacks needed here ? (doneAndPullData, SeqCstBuffer)
     }
@@ -1300,14 +1297,10 @@ impl WebSocketListener for RouterSocketV3 {
 
     async fn on_binary(&self, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
         debug!("v3 on binary: {}", binary_msg.len());
-
         // WARNING: Here must return Ok(()).
         // We can not return Error here, otherwise the websocket listener `on_error`
         // will be trigger and error sent to err chan and all connection on the same
         // websocket will all be terminated
-
-        // FIXME: We convert binary_msg to Bytes to make use of its APIs for convenience
-        //  but it means some operations are not cost-free
 
         // From Rust API Guidelines - Naming (https://rust-lang.github.io/api-guidelines/naming.html)
         // as_	Free	borrowed -> borrowed
@@ -1566,7 +1559,7 @@ impl RouterSocketV3 {
     pub async fn reset_stream(&self, ctx: &RequestContext, err_code: i32, msg: String) {
         if !ctx.state.read().await.is_completed() && !ctx.is_rst_stream_sent.load(SeqCst) {
             let rst_msg = rst_message(ctx.request_id(), err_code, msg);
-            let _ = self.send_data(Message::Binary(rst_msg.to_vec()));
+            let _ = self.send_data(Message::Binary(rst_msg.into()));
             ctx.is_rst_stream_sent.store(true, SeqCst)
         }
 
