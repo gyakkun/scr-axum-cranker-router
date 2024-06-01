@@ -24,12 +24,14 @@ pub trait RouterSocketFilter: Sync + Send {
 
     /// If no exact ones matched, should fall back to the first
     /// one which matches the target path by `RouteResolver`
+    /// Return false by default
     fn should_fallback_to_first_path_matched(&self) -> bool {
         false
     }
 
     /// If no any path matched (even partial), should fall back
     /// to the catch-all connector socket
+    /// Return true by default
     fn should_fallback_to_catch_all(&self) -> bool { true }
 }
 

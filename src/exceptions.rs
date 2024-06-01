@@ -13,7 +13,7 @@ pub(crate) type CrexKind = CrankerRouterExceptionErrorKind;
 pub struct CrankerRouterException {
     pub reason: String,
     pub opt_status_code: Option<u16>,
-    pub(crate) opt_err_kind: Option<CrexKind>
+    pub opt_err_kind: Option<CrexKind>
 }
 
 #[allow(non_camel_case_types)]

@@ -3,8 +3,6 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering::Acquire;
 use std::time::Duration;
 
 use axum::{BoxError, Extension, http, Json, Router};
@@ -68,7 +66,7 @@ pub const CRANKER_V_3_0: &'static str = "cranker_3.0";
 lazy_static! {
     // Runtime evaluated, so it should be the actual serving server local ip
     // rather than compile machine ip
-    pub static ref LOCAL_IP: IpAddr = local_ip_address::local_ip().unwrap();
+    pub(crate) static ref LOCAL_IP: IpAddr = local_ip_address::local_ip().unwrap();
 
     static ref SUPPORTED_CRANKER_VERSION: HashMap<&'static str, &'static str> =  {
         let mut s = HashMap::new();
@@ -115,13 +113,12 @@ lazy_static! {
 
 // Our shared state
 pub struct CrankerRouterState {
-    pub _counter: AtomicU64,
     pub websocket_farm: Arc<WebSocketFarm>,
-    pub dark_mode_manager: DarkModeManager,
+    pub dark_mode_manager: Arc<DarkModeManager>,
     pub config: CrankerRouterConfig,
 }
 
-pub type ACRState = Arc<CrankerRouterState>;
+pub(crate) type ACRState = Arc<CrankerRouterState>;
 
 pub struct CrankerRouter {
     pub state: ACRState,
@@ -137,7 +134,9 @@ impl CrankerRouter {
             config.proxy_listeners.clone(),
         );
         let websocket_farm_clone = websocket_farm.clone();
-        let dark_mode_manager = DarkModeManager { websocket_farm: websocket_farm.clone() };
+        let dark_mode_manager = Arc::new(DarkModeManager {
+            websocket_farm: websocket_farm.clone()
+        });
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(
@@ -149,7 +148,6 @@ impl CrankerRouter {
         });
         Self {
             state: Arc::new(CrankerRouterState {
-                _counter: AtomicU64::new(0),
                 websocket_farm,
                 dark_mode_manager,
                 config,
@@ -186,9 +184,8 @@ impl CrankerRouter {
 
     // TODO: Add all info
     pub async fn health_root(
-        State(app_state): State<ACRState>
+        State(_): State<ACRState>
     ) -> Response {
-        let _i = app_state.clone()._counter.load(Acquire);
         (StatusCode::OK, "{\"isAvailable\":true}").into_response()
     }
 
@@ -499,11 +496,11 @@ impl CrankerRouter {
 
 #[derive(Clone)]
 pub struct CrankerConnectorInfo {
-    connector_id: String,
-    route: String,
-    component_name: String,
-    domain: String,
-    negotiated_cranker_version: &'static str,
+    pub connector_id: String,
+    pub route: String,
+    pub component_name: String,
+    pub domain: String,
+    pub negotiated_cranker_version: &'static str,
 }
 
 fn check_supported_cranker_version(versions: HashSet<String>) -> HashMap<&'static str, &'static str> {
@@ -647,24 +644,23 @@ pub type CrankerRouterBuilder = CrankerRouterConfig;
 
 #[derive(Clone)]
 pub struct CrankerRouterConfig {
-    proxy_listeners: Vec<Arc<dyn ProxyListener>>,
-    router_socket_filter: Arc<dyn RouterSocketFilter>,
+    pub proxy_listeners: Vec<Arc<dyn ProxyListener>>,
+    pub router_socket_filter: Arc<dyn RouterSocketFilter>,
 
     // config
-    discard_client_forwarded_headers: bool,
-    send_legacy_forwarded_headers: bool,
-    via_name: String,
+    pub discard_client_forwarded_headers: bool,
+    pub send_legacy_forwarded_headers: bool,
+    pub via_name: String,
+    pub routes_keep_time_millis: i64,
+    pub connector_max_wait_time_millis: i64,
+    pub ping_sent_after_no_write_for_ms: i64,
+    pub idle_read_timeout_ms: i64,
+    pub allow_catch_all: bool,
 
-    routes_keep_time_millis: i64,
-    connector_max_wait_time_millis: i64,
-    ping_sent_after_no_write_for_ms: i64,
-    idle_read_timeout_ms: i64,
-    allow_catch_all: bool,
-
-    do_not_proxy_headers: HashSet<&'static str>,
-    registration_ip_validator: Arc<dyn IPValidator>,
-    route_resolver: Arc<dyn RouteResolver>,
-    supported_cranker_protocols: HashMap<&'static str, &'static str>,
+    pub do_not_proxy_headers: HashSet<&'static str>,
+    pub registration_ip_validator: Arc<dyn IPValidator>,
+    pub route_resolver: Arc<dyn RouteResolver>,
+    pub supported_cranker_protocols: HashMap<&'static str, &'static str>,
 }
 
 const DEF_IDLE_READ_TIMEOUT_MS: i64 = 60_000;

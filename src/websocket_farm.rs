@@ -30,7 +30,7 @@ use crate::router_socket_filter::RouterSocketFilter;
 /// router socket for a client side request
 #[allow(unused_variables)]
 #[async_trait]
-pub(crate) trait WebSocketFarmInterface: Sync + Send {
+pub trait WebSocketFarmInterface: Sync + Send {
     async fn get_router_socket_by_target_path_and_apply_filter(
         self: &Arc<Self>,
         target_path: String,
@@ -73,7 +73,7 @@ pub(crate) trait WebSocketFarmInterface: Sync + Send {
 #[derive(Serialize, Clone, Debug, Hash, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WaitingSocketTask {
-    target: String,
+    pub target: String,
 }
 
 /// The implementation of WebSocketFarmInterface
@@ -117,7 +117,6 @@ impl WebSocketFarm {
             waiting_tasks: DashMap::new(),
             waiting_task_count: AtomicI32::new(0),
             dark_hosts: DashSet::new(),
-            has_catch_all: AtomicBool::new(false),
             max_wait_in_millis,
             proxy_listeners,
         })
