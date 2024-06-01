@@ -131,7 +131,7 @@ impl CrankerRouter {
         config: CrankerRouterConfig
     ) -> Self {
         let websocket_farm = WebSocketFarm::new(
-            Arc::new(DefaultRouteResolver::new()),
+            config.route_resolver.clone(),
             config.connector_max_wait_time_millis,
             config.proxy_listeners.clone(),
         );
