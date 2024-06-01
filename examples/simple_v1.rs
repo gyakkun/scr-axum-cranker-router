@@ -45,6 +45,8 @@ async fn main() {
     let reg_router = cranker_router.registration_axum_router();
     let visit_router = cranker_router.visit_portal_axum_router();
 
+    println!("trying to start simple_v1 server at {}:{}", test_env.addr, test_env.reg_port);
+
     let _ = try_join!(
         axum::serve(reg_listener, reg_router).into_future(),
         axum::serve(visit_listener, visit_router).into_future()
