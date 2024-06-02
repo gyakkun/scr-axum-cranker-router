@@ -8,4 +8,4 @@
 
 openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -days 65535 -nodes -x509 \
     -subj "//PLACEHOLDER=PLACEHOLDER/C=MA/L=Casablanca/O=SHIROHATO/OU=Principal Team/CN=ange.princess" \
-    -keyout cert.key  -out cert.crt
+    -keyout key.bin  -out cert.bin
