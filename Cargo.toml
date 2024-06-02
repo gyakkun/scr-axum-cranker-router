@@ -35,12 +35,23 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 axum-macros = { version = "0.4" }
+# for tls example - single domain
+axum-server = { version = "0.6", features = ["rustls", "rustls-pemfile", "tls-rustls", "tokio-rustls"] }
+rustls-pemfile = { version = "2" }
 
 [lib]
 crate-type = ["lib"]
 
 [[example]]
 name = "simple_v1"
+crate-type = ["bin"]
+
+[[example]]
+name = "harder"
+crate-type = ["bin"]
+
+[[example]]
+name = "tls_single_domain_server"
 crate-type = ["bin"]
 
 [profile.dev]
