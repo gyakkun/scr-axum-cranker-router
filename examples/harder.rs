@@ -13,7 +13,7 @@ use log::{info, LevelFilter};
 use log::LevelFilter::{Debug};
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
-use tokio::try_join;
+use tokio::{signal, try_join};
 use tower_http::limit;
 
 use scr_axum_cranker_router::{CrankerRouter, CrankerRouterBuilder};
@@ -38,6 +38,7 @@ async fn main() {
         .with_routes_keep_time_millis(5000)
         .with_router_socket_filter(Arc::new(DomainRouterSocketFilter::new()))
         .build();
+    let cranker_router = Arc::new(cranker_router);
 
     let custom_axum_wss_router = Router::new()
         .route("/register", any(CrankerRouter::register_handler)
@@ -81,9 +82,25 @@ async fn main() {
              test_env.addr, test_env.visit_port
     );
 
+    async fn sig(cranker_router:  Arc<CrankerRouter>) {
+        match signal::ctrl_c().await {
+            Ok(()) => {
+                eprintln!("stopping cranker router");
+                cranker_router.stop();
+                eprintln!("cranker router stopped");
+            }
+            Err(err) => {
+                eprintln!("Unable to listen for shutdown signal: {}", err);
+                eprintln!("stopping cranker router");
+                cranker_router.stop();
+                eprintln!("cranker router stopped");
+            }
+        }
+    }
+
     let _ = try_join!(
-        axum::serve(reg_listener, reg_router).into_future(),
-        axum::serve(visit_listener, visit_router).into_future()
+        axum::serve(reg_listener, reg_router).with_graceful_shutdown(sig(cranker_router.clone()).into_future()).into_future(),
+        axum::serve(visit_listener, visit_router).with_graceful_shutdown(sig(cranker_router.clone()).into_future()).into_future(),
     );
 
 }
