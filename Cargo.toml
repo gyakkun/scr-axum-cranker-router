@@ -1,6 +1,6 @@
 [package]
 name = "scr-axum-cranker-router"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 rust-version = "1.78.0"
 description = "A Rust port of [mu-cranker-router](https://github.com/hsbc/mu-cranker-router)"
