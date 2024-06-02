@@ -233,7 +233,7 @@ pub(crate) async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
                     }
                 }
                 // 3. Close the res to cli
-                let _ = rs.terminate_all_conn(Some(crex.clone()));
+                let _ = rs.terminate_all_conn(Some(crex.clone())).await;
                 break;
             }
             recv_res = wss_send_task_rx.recv() => {

@@ -20,6 +20,7 @@ use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
 use crate::{ACRState, CRANKER_V_3_0, time_utils};
+use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::cranker_protocol_response::CrankerProtocolResponse;
 use crate::dark_host::DarkHost;
 use crate::exceptions::{CrankerRouterException, CrexKind};
@@ -147,14 +148,17 @@ impl RouterSocketV3 {
             }
         }
 
-        let header_text = create_request_line(method, original_uri);
+        let mut header_text = create_request_line(method, original_uri);
+        header_text.push('\n');
+        header_text.push_str(CrankerProtocolRequestBuilder::build_header_str(&hdr_to_tgt).as_str());
+        header_text.push('\n'); // Not necessary but add an extra newline to keep align with mu
         trace!("5");
 
         // WARNING: Start from this line, we are dealing with network I/O
         // Be careful to handle errors. Notify client error ASAP.
 
         tokio::select! {
-            Err(crex) = self.clone().split_part_one_send_or_err(headers, opt_body, req_id, ctx.clone(), header_text) => {
+            Err(crex) = self.clone().split_part_one_send_or_err(&hdr_to_tgt, opt_body, req_id, ctx.clone(), header_text) => {
                 return Err(crex);
             }
             ok_or_err = self.split_part_two_recv_and_res(cli_req_ident, ctx)  => {
@@ -206,7 +210,7 @@ impl RouterSocketV3 {
 
     async fn split_part_one_send_or_err(
         self: Arc<Self>,
-        headers: &HeaderMap,
+        hdr_to_tgt: &HeaderMap,
         opt_body: Option<BodyDataStream>,
         req_id: i32,
         ctx: Arc<RequestContext>,
@@ -310,7 +314,7 @@ impl RouterSocketV3 {
             self.send_data(Message::Binary(end_data_msg.into())).await?;
         }
         for i in self.proxy_listeners.iter() {
-            i.on_after_proxy_to_target_headers_sent(ctx.as_ref(), Some(headers))?;
+            i.on_after_proxy_to_target_headers_sent(ctx.as_ref(), Some(hdr_to_tgt))?;
             i.on_request_body_sent_to_target(ctx.as_ref())?;
         }
         Ok(())
@@ -1579,7 +1583,7 @@ impl Drop for RouterSocketV3 {
             .and_then(|weak_rs3| weak_rs3.upgrade())
             .map(|strong_rs3| {
                 tokio::spawn(async move {
-                    let _ = strong_rs3.terminate_all_conn(None);
+                    let _ = strong_rs3.terminate_all_conn(None).await;
                 });
             });
         trace!("71v3");

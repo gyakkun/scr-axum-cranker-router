@@ -67,7 +67,7 @@ impl CrankerProtocolRequestBuilder {
         res
     }
 
-    fn build_header_str(header_map: &HeaderMap) -> String {
+    pub(crate) fn build_header_str(header_map: &HeaderMap) -> String {
         let mut headers_str = String::new();
         let mut cookie_list: Vec<&str> = vec![];
 
