@@ -26,7 +26,6 @@ local-ip-address = "0.5"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-simple_logger = "5"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tower = { version = "0.4", features = ["util", "filter"] }
@@ -38,6 +37,7 @@ axum-macros = { version = "0.4" }
 # for tls example - single domain
 axum-server = { version = "0.6", features = ["rustls", "rustls-pemfile", "tls-rustls", "tokio-rustls"] }
 rustls-pemfile = { version = "2" }
+simple_logger = "5"
 
 [lib]
 crate-type = ["lib"]
