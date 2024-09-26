@@ -5,16 +5,16 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{BoxError, Extension, http, Json, Router};
 use axum::body::{Body, HttpBody};
-use axum::extract::{ConnectInfo, OriginalUri, Query, State, WebSocketUpgrade};
 use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
+use axum::extract::{ConnectInfo, OriginalUri, Query, State, WebSocketUpgrade};
 use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
+use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
+use axum::{http, BoxError, Extension, Json, Router};
 use lazy_static::lazy_static;
 use log::{debug, error, warn};
 use tower_http::limit;
@@ -38,14 +38,14 @@ pub mod websocket_farm;
 pub mod ip_validator;
 pub mod route_identify;
 pub mod router_socket_filter;
-mod connector_connection;
-mod connector_instance;
-mod connector_service;
+pub mod connector_connection;
+pub mod connector_instance;
+pub mod connector_service;
+pub mod dark_mode_manager;
+pub mod dark_host;
+pub mod router_info;
 mod cranker_protocol_response;
 mod cranker_protocol_request_builder;
-mod dark_mode_manager;
-mod dark_host;
-mod router_info;
 mod router_socket_v3;
 mod time_utils;
 mod http_utils;
@@ -128,7 +128,8 @@ pub(crate) type ACRState = Arc<CrankerRouterState>;
 /// websocket registrations from Cranker connectors.
 /// You are responsible for creating axum server instance(s) that the
 /// router functions (handler) are added to.
-/// When shutting down, the stop() method should be called after stopping your Mu Server(s).
+/// When shutting down, the stop() method should be called after stopping your axum
+/// server(s).
 /// This class is created by using the `CrankerRouterBuilder::new().build()`
 /// builder.
 pub struct CrankerRouter {
