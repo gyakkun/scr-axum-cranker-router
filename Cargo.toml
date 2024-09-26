@@ -34,8 +34,8 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 axum-macros = { version = "0.4" }
 # for tls example - single domain
-axum-server = { version = "0.7", features = ["tls-rustls"] }
-rustls-pemfile = { version = "2" }
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "logging", "tls12", "ring"] }
 simple_logger = "5"
 
 [lib]
