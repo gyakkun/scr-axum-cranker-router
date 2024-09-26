@@ -26,8 +26,8 @@ use scr_axum_cranker_router::router_socket_filter::DomainRouterSocketFilter;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
-
-    // Please run the openssl_command.sh first
+    // To generate self-signed certificate please install openssl
+    // and run the /self_signed_certs/openssl_command.sh first.
     // Reference:
     // https://github.com/tokio-rs/axum/blob/axum-v0.7.5/examples/tls-rustls/src/main.rs
     //
