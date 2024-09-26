@@ -18,24 +18,23 @@ async-channel = "2"
 axum = { version = "0.7", features = ["default", "ws", "original-uri", "http2"] }
 axum-core = "0.4"
 bytes = "1"
-dashmap = "5"
+dashmap = "6"
 futures = "0.3"
-hashlink = "0.9.1"
+hashlink = "0.9"
 lazy_static = "1"
-local-ip-address = "0.5"
+local-ip-address = "0.6"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
-tower = { version = "0.4", features = ["util", "filter"] }
-tower-http = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.6", features = ["limit"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 axum-macros = { version = "0.4" }
 # for tls example - single domain
-axum-server = { version = "0.6", features = ["rustls", "rustls-pemfile", "tls-rustls", "tokio-rustls"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls-pemfile = { version = "2" }
 simple_logger = "5"
 
