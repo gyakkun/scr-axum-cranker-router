@@ -20,7 +20,6 @@ use scr_axum_cranker_router::{CrankerRouter, CrankerRouterBuilder};
 use scr_axum_cranker_router::exceptions::CrankerRouterException;
 use scr_axum_cranker_router::proxy_info::ProxyInfo;
 use scr_axum_cranker_router::proxy_listener::ProxyListener;
-use scr_axum_cranker_router::router_socket_filter::DomainRouterSocketFilter;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
@@ -36,7 +35,6 @@ async fn main() {
     let cranker_router = CrankerRouterBuilder::new()
         .with_proxy_listeners(listeners)
         .with_routes_keep_time_millis(5000)
-        .with_router_socket_filter(Arc::new(DomainRouterSocketFilter::new()))
         .build();
     let cranker_router = Arc::new(cranker_router);
 
