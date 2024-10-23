@@ -41,7 +41,9 @@ pub enum CrankerRouterExceptionErrorKind {
 
     ProxyListenerError_0009,
 
-    ClientRequestBodyReadError_0010
+    ClientRequestBodyReadError_0010,
+
+    BrokenConnection_0011,
 }
 
 #[allow(dead_code)]

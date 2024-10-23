@@ -1,11 +1,13 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use async_channel::Receiver;
+use async_stream::__private::AsyncStream;
 use axum::async_trait;
 use axum::body::Body;
 use axum::extract::OriginalUri;
@@ -53,7 +55,7 @@ pub trait RouterSocket: Send + Sync + RouteIdentify {
                            http_version: &Version,
                            method: &Method,
                            original_uri: &OriginalUri,
-                           headers: &HeaderMap,
+                           cli_headers: &HeaderMap,
                            addr: &SocketAddr,
                            opt_body: Option<BodyDataStream>,
     ) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException>;
@@ -69,6 +71,7 @@ pub trait RouterSocket: Send + Sync + RouteIdentify {
 }
 
 /// For V3 multiplexed request contexts
+#[derive(Debug, Clone)]
 pub struct ClientRequestIdentifier {
     pub request_id: i32,
 }
@@ -388,4 +391,37 @@ impl MessageIdentifier for Message {
             Message::Close(_) => "err sending close to uwss"
         }
     }
+}
+
+pub(crate) struct TcpConnClosureGuard {
+    pub(crate) notify: Arc<Notify>,
+}
+
+impl Drop for TcpConnClosureGuard {
+    fn drop(&mut self) {
+        self.notify.notify_waiters();
+    }
+}
+
+pub(crate) fn wrap_async_stream_with_guard(wrapped_stream: Receiver<Result<Vec<u8>, CrankerRouterException>>, stream_close_notify_clone: Arc<Notify>) -> AsyncStream<Result<Vec<u8>, CrankerRouterException>, impl Future<Output=()> + Sized> {
+    async_stream::stream! {
+            let _guard = TcpConnClosureGuard {
+                notify: stream_close_notify_clone,
+            };
+            loop {
+                tokio::select! {
+                    next = wrapped_stream.recv() => {
+                        match next {
+                            Ok(res) => {
+                                yield res;
+                            }
+                            Err(_) => {
+                                break;
+                            }
+                        }
+                    }
+                }
+                // The guard should be dropped here, then the notification will be sent
+            }
+        }
 }

@@ -30,6 +30,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tower-http = { version = "0.6", features = ["limit"] }
 uuid = { version = "1", features = ["v4"] }
+async-stream = "0.3"
 
 [dev-dependencies]
 axum-macros = { version = "0.4" }

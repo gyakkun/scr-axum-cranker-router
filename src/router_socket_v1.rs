@@ -1,34 +1,34 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::{Arc, Weak};
-use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::sync::{Arc, Weak};
 
 use async_channel::{Receiver, Sender};
 use axum::async_trait;
-use axum::extract::OriginalUri;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use axum::extract::OriginalUri;
 use axum::http::{HeaderMap, Method, Response, StatusCode, Version};
 use axum_core::body::{Body, BodyDataStream};
 use bytes::Bytes;
-use futures::{StreamExt, TryStreamExt};
 use futures::stream::{SplitSink, SplitStream};
+use futures::{StreamExt, TryStreamExt};
 use log::{error, trace};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 
-use crate::{ACRState, CRANKER_V_1_0, exceptions, time_utils};
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::cranker_protocol_response::CrankerProtocolResponse;
 use crate::dark_host::DarkHost;
-use crate::exceptions::CrankerRouterException;
+use crate::exceptions::{CrankerRouterException, CrexKind};
 use crate::http_utils::set_target_request_headers;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
 use crate::route_identify::RouteIdentify;
-use crate::router_socket::{ClientRequestIdentifier, create_request_line, HEADER_MAX_SIZE, pipe_and_queue_the_wss_send_task_and_handle_err_chan, pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary, RouterSocket};
+use crate::router_socket::{create_request_line, pipe_and_queue_the_wss_send_task_and_handle_err_chan, pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary, wrap_async_stream_with_guard, ClientRequestIdentifier, RouterSocket, HEADER_MAX_SIZE};
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
+use crate::{exceptions, time_utils, ACRState, CRANKER_V_1_0};
 
 pub(crate) struct RouterSocketV1 {
     pub route: String,
@@ -73,6 +73,8 @@ pub(crate) struct RouterSocketV1 {
 
     really_need_on_response_body_chunk_received_from_target: bool,
     really_need_on_request_body_chunk_sent_to_target: bool,
+
+    is_close_msg_received: AtomicBool
 }
 
 impl RouterSocketV1 {
@@ -147,6 +149,8 @@ impl RouterSocketV1 {
 
             really_need_on_response_body_chunk_received_from_target,
             really_need_on_request_body_chunk_sent_to_target,
+
+            is_close_msg_received: AtomicBool::new(false),
         });
         // Abort these two handles in Drop
         let wss_recv_pipe_join_handle = tokio::spawn(
@@ -233,7 +237,7 @@ impl RouterSocketV1 {
         Ok(())
     }
 
-    async fn split_part_to_recv_and_res(self: Arc<Self>) -> Result<Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException>, CrankerRouterException> {
+    async fn split_part_two_recv_and_res(self: Arc<Self>) -> Result<Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException>, CrankerRouterException> {
         // if the wss_recv_pipe chan is EMPTY AND CLOSED then err will come from this recv()
         trace!("22");
         // FIXME: Seems if recv Err here, the client browser will hang?
@@ -257,7 +261,23 @@ impl RouterSocketV1 {
             )?;
         }
         let wrapped_stream = self.tgt_res_bdy_rx.clone();
-        let stream_body = Body::from_stream(wrapped_stream);
+        let stream_close_notify = Arc::new(Notify::new());
+        let stream_close_notify_clone = stream_close_notify.clone();
+        let another_self = self.clone();
+        let wrapped_stream_further = wrap_async_stream_with_guard(wrapped_stream, stream_close_notify_clone);
+        tokio::spawn(async move {
+            stream_close_notify.notified().await;
+            if another_self.is_close_msg_received.load(Acquire) {
+                return;
+            }
+            // Unexpected close from client side, may due to network error
+            // or long connection (SSE) closed actively by client
+            let crex = CrankerRouterException::new(
+                "connection to client closed unexpectedly".to_string()
+            ).with_err_kind(CrexKind::BrokenConnection_0011);
+            let _ = another_self.on_error(crex);
+        });
+        let stream_body = Body::from_stream(wrapped_stream_further);
         Ok(res_builder
             .body(stream_body)
             .map(|body| {
@@ -267,6 +287,8 @@ impl RouterSocketV1 {
                 format!("failed to build body: {:?}", ie)
             )))
     }
+
+
 }
 
 
@@ -451,6 +473,7 @@ impl WebSocketListener for RouterSocketV1 {
     // Theoretically, tungstenite should already reply a close frame to connector, but in practice chances are it wouldn't
     async fn on_close(&self, opt_close_frame: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException> {
         trace!("40");
+        self.is_close_msg_received.store(true, Release);
         let _ = self.wss_send_task_tx.send(Message::Close(opt_close_frame.clone())).await;
         // ^ send it manually again? as tested, it always failed though, should be fine
         trace!("40.5");
@@ -651,7 +674,7 @@ impl RouterSocket for RouterSocketV1 {
                            app_state: ACRState,
                            http_version: &Version,
                            method: &Method,
-                           orig_uri: &OriginalUri,
+                           original_uri: &OriginalUri,
                            cli_headers: &HeaderMap,
                            addr: &SocketAddr,
                            opt_body: Option<BodyDataStream>,
@@ -669,10 +692,10 @@ impl RouterSocket for RouterSocketV1 {
         // 1. Cli header processing (fast)
         trace!("1");
         let mut hdr_to_tgt = HeaderMap::new();
-        set_target_request_headers(cli_headers, &mut hdr_to_tgt, &app_state, http_version, addr, orig_uri);
+        set_target_request_headers(cli_headers, &mut hdr_to_tgt, &app_state, http_version, addr, original_uri);
         // 2. Build protocol request line / protocol header frame without endmarker (fast)
         trace!("2");
-        let request_line = create_request_line(method, &orig_uri);
+        let request_line = create_request_line(method, &original_uri);
         let cranker_req_bdr = CrankerProtocolRequestBuilder::new()
             .with_request_line(request_line)
             .with_request_headers(&hdr_to_tgt);
@@ -699,7 +722,7 @@ impl RouterSocket for RouterSocketV1 {
             Err(crex) = self.clone().split_part_one_send_or_err(opt_body, cranker_req) => {
                 return Err(crex);
             }
-            ok_or_err = self.split_part_to_recv_and_res()  => {
+            ok_or_err = self.split_part_two_recv_and_res()  => {
                 return ok_or_err?;
             }
         }

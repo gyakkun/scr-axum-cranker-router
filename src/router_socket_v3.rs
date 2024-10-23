@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::{Arc, Weak};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release, SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64};
+use std::sync::{Arc, Weak};
 
 use async_channel::{Receiver, Sender};
 use axum::async_trait;
-use axum::extract::OriginalUri;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use axum::extract::OriginalUri;
 use axum::http::{HeaderMap, Method, Response, StatusCode, Version};
 use axum_core::body::{Body, BodyDataStream};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -19,7 +19,6 @@ use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
-use crate::{ACRState, CRANKER_V_3_0, time_utils};
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
 use crate::cranker_protocol_response::CrankerProtocolResponse;
 use crate::dark_host::DarkHost;
@@ -28,10 +27,11 @@ use crate::http_utils::set_target_request_headers;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
 use crate::route_identify::RouteIdentify;
-use crate::router_socket::{ClientRequestIdentifier, create_request_line, pipe_and_queue_the_wss_send_task_and_handle_err_chan, pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary, RouterSocket};
+use crate::router_socket::{create_request_line, pipe_and_queue_the_wss_send_task_and_handle_err_chan, pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary, wrap_async_stream_with_guard, ClientRequestIdentifier, RouterSocket};
 use crate::router_socket_v3::StreamState::Open;
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
+use crate::{time_utils, ACRState, CRANKER_V_3_0};
 
 // u8
 const _MSG_TYPE_LEN_IN_BYTES: usize = 1;
@@ -168,7 +168,7 @@ impl RouterSocketV3 {
     }
 
     async fn split_part_two_recv_and_res(
-        self: Arc<Self>, cli_req_ident: Option<ClientRequestIdentifier>, ctx: Arc<RequestContext>
+        self: Arc<Self>, opt_cli_req_ident: Option<ClientRequestIdentifier>, ctx: Arc<RequestContext>
     ) -> Result<Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException>, CrankerRouterException>
     {
         let full_content = ctx.tgt_res_hdr_rx.recv().await.map_err(|e| {
@@ -196,12 +196,46 @@ impl RouterSocketV3 {
         }
         trace!("13");
         let wrapped_stream = ctx.tgt_res_bdy_rx.clone();
-        let stream_body = Body::from_stream(wrapped_stream);
+        let stream_close_notify = Arc::new(Notify::new());
+        let stream_close_notify_clone = stream_close_notify.clone();
+        let wrapped_stream_further = wrap_async_stream_with_guard(wrapped_stream, stream_close_notify_clone);
+        let ctx_clone = ctx.clone();
+        let mut cli_req_ident_clone_1 = None;
+        let mut cli_req_ident_clone_2 = None;
+        if let Some(cli_req_id) = opt_cli_req_ident {
+            cli_req_ident_clone_1.replace(cli_req_id.clone());
+            cli_req_ident_clone_2.replace(cli_req_id.clone());
+        }
+        tokio::spawn(async move {
+            stream_close_notify.notified().await;
+            if ctx_clone.is_end_stream_received_from_tgt.load(Acquire) {
+                return;
+            }
+            // Unexpected close from client side, may due to network error
+            // or long connection (SSE) closed actively by client
+            if let Some(cli_req_id) = cli_req_ident_clone_1 {
+                if let Ok(found_ctx) = self.check_if_context_exists(&cli_req_id.request_id) {
+                    let crex = CrankerRouterException::new(
+                        "connection to client closed unexpectedly".to_string()
+                    ).with_err_kind(CrexKind::BrokenConnection_0011);
+                    let _ = found_ctx.error.try_write()
+                        .map(|mut g| {
+                            g.replace(crex);
+                        });
+                    self.reset_stream(
+                        found_ctx.as_ref(),
+                        1001,
+                        "Going away".to_string(),
+                    ).await;
+                }
+            }
+        });
+        let stream_body = Body::from_stream(wrapped_stream_further);
         trace!("14");
         Ok(res_builder
             .body(stream_body)
             .map(|body| {
-                (body, cli_req_ident)
+                (body, cli_req_ident_clone_2)
             })
             .map_err(|ie| CrankerRouterException::new(
                 format!("failed to build body: {:?}", ie)
@@ -381,7 +415,7 @@ impl RouterSocket for RouterSocketV3 {
         http_version: &Version,
         method: &Method,
         original_uri: &OriginalUri,
-        headers: &HeaderMap,
+        cli_headers: &HeaderMap,
         addr: &SocketAddr,
         opt_body: Option<BodyDataStream>,
     ) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException>
@@ -412,7 +446,7 @@ impl RouterSocket for RouterSocketV3 {
             http_version,
             method,
             original_uri,
-            headers,
+            cli_headers,
             addr,
             opt_body,
             req_id,
@@ -557,6 +591,8 @@ pub(crate) struct RequestContext {
     // use to notify there's a target response available
     // init false
     pub is_tgt_can_send_res_now_according_to_rfc2616: AtomicBool,
+
+    pub is_end_stream_received_from_tgt: AtomicBool,
 }
 
 impl RequestContext {
@@ -613,6 +649,8 @@ impl RequestContext {
 
             // use to notify there's a target response available
             is_tgt_can_send_res_now_according_to_rfc2616: AtomicBool::new(false),
+
+            is_end_stream_received_from_tgt: AtomicBool::new(false),
         }
     }
 
@@ -809,6 +847,9 @@ impl RouterSocketV3 {
     {
         self.check_if_tgt_can_send_res_first(&ctx, req_id).await?;
         let is_end_stream = judge_is_stream_end_from_flags(flags);
+        if is_end_stream {
+            ctx.is_end_stream_received_from_tgt.store(true, Release);
+        }
         let len = bin.remaining();
         let mut opt_copy = None;
         if self.really_need_on_response_body_chunk_received_from_target {
@@ -908,6 +949,9 @@ impl RouterSocketV3 {
     {
         self.check_if_tgt_can_send_res_first(&ctx, req_id).await?;
         let is_stream_end = judge_is_stream_end_from_flags(flags);
+        if is_stream_end {
+            ctx.is_end_stream_received_from_tgt.store(true, Release);
+        }
         let is_header_end = judge_is_header_end_from_flags(flags);
         let byte_len: i32 = bin.remaining().try_into().map_err(|e| {
             CrankerRouterException::new(format!(
@@ -987,7 +1031,7 @@ impl RouterSocketV3 {
         let opt_ctx = self.context_map.get(&req_id);
         if opt_ctx.is_none() {
             return Err(CrankerRouterException::new(format!(
-                "can not found ctx for req id={} in router_socket_id={}. route = {}",
+                "can not find ctx for req id={} in router_socket_id={}. route = {}",
                 req_id,
                 self.router_socket_id(),
                 self.route()
@@ -1565,7 +1609,7 @@ impl RouterSocketV3 {
     pub async fn reset_stream(&self, ctx: &RequestContext, err_code: i32, msg: String) {
         if !ctx.state.read().await.is_completed() && !ctx.is_rst_stream_sent.load(Acquire) {
             let rst_msg = rst_message(ctx.request_id(), err_code, msg);
-            let _ = self.send_data(Message::Binary(rst_msg.into()));
+            let _ = self.send_data(Message::Binary(rst_msg.into())).await;
             ctx.is_rst_stream_sent.store(true, SeqCst)
         }
 
