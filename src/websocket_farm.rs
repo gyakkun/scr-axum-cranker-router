@@ -179,7 +179,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
             while let Ok(rs) = router_socket_receiver.recv().await /* @ filter loop await */ {
                 if let Some(arc_rs) = rs.upgrade() {
                     let rsid = arc_rs.router_socket_id();
-                    let is_visited = visited.insert(rsid);
+                    let is_visited = !visited.insert(rsid);
                     if is_visited {
                         // put it back and break
                         let _ = router_socket_sender.send(Arc::downgrade(&arc_rs)).await;
