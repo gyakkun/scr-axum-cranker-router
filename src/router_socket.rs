@@ -2,25 +2,24 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_channel::Receiver;
 use async_stream::__private::AsyncStream;
 use axum::async_trait;
 use axum::body::Body;
-use axum::extract::OriginalUri;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use axum::extract::OriginalUri;
 use axum::http::{HeaderMap, Method, Response, Version};
 use axum_core::body::BodyDataStream;
-use futures::{SinkExt, StreamExt};
 use futures::stream::{SplitSink, SplitStream};
+use futures::{SinkExt, StreamExt};
 use log::{debug, error, info, trace};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-use crate::{ACRState, CRANKER_V_1_0, CRANKER_V_3_0};
 use crate::dark_host::DarkHost;
 use crate::exceptions::{CrankerRouterException, CrexKind};
 use crate::route_identify::RouteIdentify;
@@ -28,6 +27,7 @@ use crate::router_socket_v1::RouterSocketV1;
 use crate::router_socket_v3::RouterSocketV3;
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
+use crate::{ACRState, CRANKER_V_1_0, CRANKER_V_3_0};
 
 pub const HEADER_MAX_SIZE: usize = 64 * 1024; // 64KBytes
 
@@ -409,19 +409,15 @@ pub(crate) fn wrap_async_stream_with_guard(wrapped_stream: Receiver<Result<Vec<u
                 notify: stream_close_notify_clone,
             };
             loop {
-                tokio::select! {
-                    next = wrapped_stream.recv() => {
-                        match next {
-                            Ok(res) => {
-                                yield res;
-                            }
-                            Err(_) => {
-                                break;
-                            }
-                        }
+                match wrapped_stream.recv().await {
+                    Ok(res) => {
+                        yield res;
+                    }
+                    Err(_) => {
+                        break;
                     }
                 }
-                // The guard should be dropped here, then the notification will be sent
             }
+            // The guard should be dropped here, then the notification will be sent
         }
 }
