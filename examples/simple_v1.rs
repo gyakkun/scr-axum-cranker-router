@@ -17,13 +17,6 @@ use scr_axum_cranker_router::exceptions::CrankerRouterException;
 use scr_axum_cranker_router::proxy_info::ProxyInfo;
 use scr_axum_cranker_router::proxy_listener::ProxyListener;
 
-#[cfg(not(target_env = "msvc"))]
-use tikv_jemallocator::Jemalloc;
-
-#[cfg(not(target_env = "msvc"))]
-#[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
-
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
     let test_env = get_test_env();

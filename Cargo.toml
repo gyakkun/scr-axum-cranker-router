@@ -32,9 +32,6 @@ tower-http = { version = "0.6", features = ["limit"] }
 uuid = { version = "1", features = ["v4"] }
 async-stream = "0.3"
 
-[target.'cfg(not(target_env = "msvc"))'.dev-dependencies]
-tikv-jemallocator = "0.6"
-
 [dev-dependencies]
 axum-macros = { version = "0.4" }
 # for tls example - single domain
