@@ -415,11 +415,11 @@ pub(crate) fn wrap_async_stream_with_guard(wrapped_stream: Receiver<Result<Vec<u
                         yield res;
                     }
                     Err(_) => {
+                        notify_when_close.notify_waiters();
                         break;
                     }
                 }
             }
-            notify_when_close.notify_waiters();
             // The guard should be dropped here, then the notification will be sent
         }
 }
