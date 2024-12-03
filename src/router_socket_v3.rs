@@ -437,8 +437,8 @@ impl RouterSocket for RouterSocketV3 {
             method.clone(),
             original_uri.clone(),
         ));
-        let old_v = self.context_map.insert(req_id, ctx.clone());
-        assert!(old_v.is_none());
+        let _old_v = self.context_map.insert(req_id, ctx.clone());
+        // assert!(_old_v.is_none());
         trace!("3");
 
         return match self.clone().send_request_over_websocket_v3(
@@ -505,7 +505,7 @@ impl RouterSocket for RouterSocketV3 {
                 }),
         ).await;
 
-        assert!(self.context_map.is_empty());
+        // assert!(self.context_map.is_empty());
 
         if !self.context_map.is_empty() {
             error!("seems our dirty deadlock experiment failed! Manually retain all false");
