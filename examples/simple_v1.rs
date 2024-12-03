@@ -19,6 +19,7 @@ use scr_axum_cranker_router::proxy_listener::ProxyListener;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
+    console_subscriber::init();
     let test_env = get_test_env();
     if !test_env.is_nop_logger {
         SimpleLogger::new()
