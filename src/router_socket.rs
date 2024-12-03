@@ -405,6 +405,7 @@ impl Drop for TcpConnClosureGuard {
 
 pub(crate) fn wrap_async_stream_with_guard(wrapped_stream: Receiver<Result<Vec<u8>, CrankerRouterException>>, stream_close_notify_clone: Arc<Notify>) -> AsyncStream<Result<Vec<u8>, CrankerRouterException>, impl Future<Output=()> + Sized> {
     async_stream::stream! {
+            let notify_when_close = stream_close_notify_clone.clone();
             let _guard = TcpConnClosureGuard {
                 notify: stream_close_notify_clone,
             };
@@ -418,6 +419,7 @@ pub(crate) fn wrap_async_stream_with_guard(wrapped_stream: Receiver<Result<Vec<u
                     }
                 }
             }
+            notify_when_close.notify_waiters();
             // The guard should be dropped here, then the notification will be sent
         }
 }
