@@ -394,22 +394,21 @@ impl MessageIdentifier for Message {
 }
 
 pub(crate) struct TcpConnClosureGuard {
-    pub(crate) notify: Arc<Notify>,
+    pub(crate) notify: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl Drop for TcpConnClosureGuard {
     fn drop(&mut self) {
         error!("dropping TcpConnClosureGuard");
-        self.notify.notify_waiters();
+        self.notify.take().unwrap().send(()).ok();
         error!("TcpConnClosureGuard dropped");
     }
 }
 
-pub(crate) fn wrap_async_stream_with_guard(wrapped_stream: Receiver<Result<Vec<u8>, CrankerRouterException>>, stream_close_notify_clone: Arc<Notify>) -> AsyncStream<Result<Vec<u8>, CrankerRouterException>, impl Future<Output=()> + Sized> {
+pub(crate) fn wrap_async_stream_with_guard(wrapped_stream: Receiver<Result<Vec<u8>, CrankerRouterException>>, oneshot_tx: tokio::sync::oneshot::Sender<()>) -> AsyncStream<Result<Vec<u8>, CrankerRouterException>, impl Future<Output=()> + Sized> {
     async_stream::stream! {
-            let notify_when_close = stream_close_notify_clone.clone();
             let _guard = TcpConnClosureGuard {
-                notify: stream_close_notify_clone,
+                notify: Some(oneshot_tx),
             };
             loop {
                 match wrapped_stream.recv().await {
@@ -418,13 +417,11 @@ pub(crate) fn wrap_async_stream_with_guard(wrapped_stream: Receiver<Result<Vec<u
                     }
                     Err(_) => {
                         error!("dropping notify when err received");
-                        notify_when_close.notify_waiters();
                         break;
                     }
                 }
             }
             error!("dropping notify when outside loop");
-            drop(notify_when_close);
             error!("manually dropping _guard");
             drop(_guard);
             error!("done manually dropping _guard");

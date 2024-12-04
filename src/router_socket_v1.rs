@@ -261,12 +261,11 @@ impl RouterSocketV1 {
             )?;
         }
         let wrapped_stream = self.tgt_res_bdy_rx.clone();
-        let stream_close_notify = Arc::new(Notify::new());
-        let stream_close_notify_clone = stream_close_notify.clone();
+        let (oneshot_tx,oneshot_rx) = tokio::sync::oneshot::channel();
         let another_self = self.clone();
-        let wrapped_stream_further = wrap_async_stream_with_guard(wrapped_stream, stream_close_notify_clone);
+        let wrapped_stream_further = wrap_async_stream_with_guard(wrapped_stream, oneshot_tx);
         tokio::spawn(async move {
-            stream_close_notify.notified().await;
+            let _ = oneshot_rx.await;
             if another_self.is_close_msg_received.load(Acquire) {
                 return;
             }

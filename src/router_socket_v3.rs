@@ -196,9 +196,8 @@ impl RouterSocketV3 {
         }
         trace!("13");
         let wrapped_stream = ctx.tgt_res_bdy_rx.clone();
-        let stream_close_notify = Arc::new(Notify::new());
-        let stream_close_notify_clone = stream_close_notify.clone();
-        let wrapped_stream_further = wrap_async_stream_with_guard(wrapped_stream, stream_close_notify_clone);
+        let (oneshot_tx,oneshot_rx) = tokio::sync::oneshot::channel::<()>();
+        let wrapped_stream_further = wrap_async_stream_with_guard(wrapped_stream, oneshot_tx);
         let ctx_clone = ctx.clone();
         let mut cli_req_ident_clone_1 = None;
         let mut cli_req_ident_clone_2 = None;
@@ -209,7 +208,7 @@ impl RouterSocketV3 {
         tokio::spawn(async move {
             let for_log_req_id = format!("{:?}",cli_req_ident_clone_1);
             error!("entering spawn task , req id = {for_log_req_id}", );
-            stream_close_notify.notified().await;
+            let _ = oneshot_rx.await;
             error!("notified , req id = {:?}", cli_req_ident_clone_1);
             if ctx_clone.is_end_stream_received_from_tgt.load(Acquire) {
                 error!("is_end_stream_received_from_tgt, not a reset, req id = {for_log_req_id}");
