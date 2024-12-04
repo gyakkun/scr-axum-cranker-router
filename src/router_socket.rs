@@ -399,7 +399,9 @@ pub(crate) struct TcpConnClosureGuard {
 
 impl Drop for TcpConnClosureGuard {
     fn drop(&mut self) {
+        info!("dropping TcpConnClosureGuard");
         self.notify.notify_waiters();
+        info!("TcpConnClosureGuard dropped");
     }
 }
 
@@ -415,13 +417,17 @@ pub(crate) fn wrap_async_stream_with_guard(wrapped_stream: Receiver<Result<Vec<u
                         yield res;
                     }
                     Err(_) => {
+                        info!("dropping notify when err received");
                         notify_when_close.notify_waiters();
                         break;
                     }
                 }
             }
+            info!("dropping notify when outside loop");
             drop(notify_when_close);
+            info!("manually dropping _guard");
             drop(_guard);
+            info!("done manually dropping _guard");
             // The guard should be dropped here, then the notification will be sent
         }
 }
