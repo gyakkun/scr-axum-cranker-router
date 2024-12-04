@@ -420,6 +420,8 @@ pub(crate) fn wrap_async_stream_with_guard(wrapped_stream: Receiver<Result<Vec<u
                     }
                 }
             }
+            drop(notify_when_close);
+            drop(_guard);
             // The guard should be dropped here, then the notification will be sent
         }
 }
