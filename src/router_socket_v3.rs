@@ -207,10 +207,15 @@ impl RouterSocketV3 {
             cli_req_ident_clone_2.replace(cli_req_id.clone());
         }
         tokio::spawn(async move {
+            let for_log_req_id = format!("{:?}",cli_req_ident_clone_1);
+            error!("entering spawn task , req id = {for_log_req_id}", );
             stream_close_notify.notified().await;
+            error!("notified , req id = {:?}", cli_req_ident_clone_1);
             if ctx_clone.is_end_stream_received_from_tgt.load(Acquire) {
+                error!("is_end_stream_received_from_tgt, not a reset, req id = {for_log_req_id}");
                 return;
             }
+            error!("Unexpected close from client side, may due to network error, req id = {for_log_req_id}");
             // Unexpected close from client side, may due to network error
             // or long connection (SSE) closed actively by client
             if let Some(cli_req_id) = cli_req_ident_clone_1 {
@@ -229,6 +234,7 @@ impl RouterSocketV3 {
                     ).await;
                 }
             }
+            error!("done reset req id = {for_log_req_id}");
         });
         let stream_body = Body::from_stream(wrapped_stream_further);
         trace!("14");
