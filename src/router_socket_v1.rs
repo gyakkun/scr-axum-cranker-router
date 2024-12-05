@@ -14,7 +14,7 @@ use bytes::Bytes;
 use futures::stream::{SplitSink, SplitStream};
 use futures::{StreamExt, TryStreamExt};
 use log::{error, trace};
-use tokio::sync::{oneshot, Mutex, Notify, RwLock};
+use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
