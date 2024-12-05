@@ -397,9 +397,7 @@ pub(crate) struct TcpConnClosureGuard {
 
 impl Drop for TcpConnClosureGuard {
     fn drop(&mut self) {
-        error!("dropping TcpConnClosureGuard");
         self.notify.take().unwrap().send(()).ok();
-        error!("TcpConnClosureGuard dropped");
     }
 }
 
@@ -426,15 +424,10 @@ pub(crate) fn wrap_tgt_res_body_stream_with_guard(
                         yield res;
                     }
                     Err(_) => {
-                        error!("dropping notify when err received");
                         break;
                     }
                 }
             }
-            error!("dropping notify when outside loop");
-            error!("manually dropping _guard");
-            drop(_guard);
-            error!("done manually dropping _guard");
             // The guard should be dropped here, then the notification will be sent
         }
 }

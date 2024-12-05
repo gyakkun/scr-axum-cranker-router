@@ -212,15 +212,10 @@ impl RouterSocketV3 {
             cli_req_ident_clone_2.replace(cli_req_id.clone());
         }
         tokio::spawn(async move {
-            let for_log_req_id = format!("{:?}",cli_req_ident_clone_1);
-            error!("entering spawn task , req id = {for_log_req_id}", );
             let _ = notified_when_body_stream_ends.await;
-            error!("notified , req id = {:?}", cli_req_ident_clone_1);
             if ctx_clone.is_end_stream_received_from_tgt.load(Acquire) {
-                error!("is_end_stream_received_from_tgt, not a reset, req id = {for_log_req_id}");
                 return;
             }
-            error!("Unexpected close from client side, may due to network error, req id = {for_log_req_id}");
             // Unexpected close from client side, may due to network error
             // or long connection (SSE) closed actively by client
             if let Some(cli_req_id) = cli_req_ident_clone_1 {
@@ -239,7 +234,6 @@ impl RouterSocketV3 {
                     ).await;
                 }
             }
-            error!("done reset req id = {for_log_req_id}");
         });
         let stream_body = Body::from_stream(tgt_body_with_guard);
         trace!("14");
@@ -448,8 +442,8 @@ impl RouterSocket for RouterSocketV3 {
             method.clone(),
             original_uri.clone(),
         ));
-        let _old_v = self.context_map.insert(req_id, ctx.clone());
-        // assert!(_old_v.is_none());
+        let old_v = self.context_map.insert(req_id, ctx.clone());
+        debug_assert!(old_v.is_none());
         trace!("3");
 
         return match self.clone().send_request_over_websocket_v3(
@@ -516,7 +510,7 @@ impl RouterSocket for RouterSocketV3 {
                 }),
         ).await;
 
-        // assert!(self.context_map.is_empty());
+        debug_assert!(self.context_map.is_empty());
 
         if !self.context_map.is_empty() {
             error!("seems our dirty deadlock experiment failed! Manually retain all false");
