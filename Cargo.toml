@@ -1,8 +1,8 @@
 [package]
 name = "scr-axum-cranker-router"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2021"
-rust-version = "1.78.0"
+rust-version = "1.83.0"
 description = "A Rust port of mu-cranker-router"
 homepage = "https://github.com/gyakkun/scr-axum-cranker-router"
 repository = "https://github.com/gyakkun/scr-axum-cranker-router"
@@ -25,7 +25,6 @@ lazy_static = "1"
 local-ip-address = "0.6"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tower-http = { version = "0.6", features = ["limit"] }
@@ -33,9 +32,9 @@ uuid = { version = "1", features = ["v4"] }
 async-stream = "0.3"
 
 [dev-dependencies]
-axum-macros = { version = "0.4" }
 # for tls example - single domain
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+# As CryptoProvider
 rustls = { version = "0.23", default-features = false, features = ["std", "logging", "tls12", "ring"] }
 simple_logger = "5"
 
