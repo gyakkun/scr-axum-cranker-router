@@ -27,7 +27,7 @@ use crate::http_utils::set_target_request_headers;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
 use crate::route_identify::RouteIdentify;
-use crate::router_socket::{create_request_line, pipe_and_queue_the_wss_send_task_and_handle_err_chan, pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary, wrap_async_stream_with_guard, ClientRequestIdentifier, RouterSocket};
+use crate::router_socket::{create_request_line, pipe_and_queue_the_wss_send_task_and_handle_err_chan, pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary, wrap_tgt_res_body_stream_with_guard, ClientRequestIdentifier, RouterSocket};
 use crate::router_socket_v3::StreamState::Open;
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
@@ -195,9 +195,15 @@ impl RouterSocketV3 {
             )?;
         }
         trace!("13");
-        let wrapped_stream = ctx.tgt_res_bdy_rx.clone();
-        let (oneshot_tx,oneshot_rx) = tokio::sync::oneshot::channel::<()>();
-        let wrapped_stream_further = wrap_async_stream_with_guard(wrapped_stream, oneshot_tx);
+        let tgt_res_body_byte_stream = ctx.tgt_res_bdy_rx.clone();
+        let (
+            fire_it_when_body_stream_ends,
+            notified_when_body_stream_ends
+        ) = tokio::sync::oneshot::channel::<()>();
+        let tgt_body_with_guard = wrap_tgt_res_body_stream_with_guard(
+            tgt_res_body_byte_stream,
+            fire_it_when_body_stream_ends
+        );
         let ctx_clone = ctx.clone();
         let mut cli_req_ident_clone_1 = None;
         let mut cli_req_ident_clone_2 = None;
@@ -208,7 +214,7 @@ impl RouterSocketV3 {
         tokio::spawn(async move {
             let for_log_req_id = format!("{:?}",cli_req_ident_clone_1);
             error!("entering spawn task , req id = {for_log_req_id}", );
-            let _ = oneshot_rx.await;
+            let _ = notified_when_body_stream_ends.await;
             error!("notified , req id = {:?}", cli_req_ident_clone_1);
             if ctx_clone.is_end_stream_received_from_tgt.load(Acquire) {
                 error!("is_end_stream_received_from_tgt, not a reset, req id = {for_log_req_id}");
@@ -235,7 +241,7 @@ impl RouterSocketV3 {
             }
             error!("done reset req id = {for_log_req_id}");
         });
-        let stream_body = Body::from_stream(wrapped_stream_further);
+        let stream_body = Body::from_stream(tgt_body_with_guard);
         trace!("14");
         Ok(res_builder
             .body(stream_body)

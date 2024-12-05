@@ -14,7 +14,7 @@ use bytes::Bytes;
 use futures::stream::{SplitSink, SplitStream};
 use futures::{StreamExt, TryStreamExt};
 use log::{error, trace};
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::cranker_protocol_request_builder::CrankerProtocolRequestBuilder;
@@ -25,7 +25,7 @@ use crate::http_utils::set_target_request_headers;
 use crate::proxy_info::ProxyInfo;
 use crate::proxy_listener::ProxyListener;
 use crate::route_identify::RouteIdentify;
-use crate::router_socket::{create_request_line, pipe_and_queue_the_wss_send_task_and_handle_err_chan, pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary, wrap_async_stream_with_guard, ClientRequestIdentifier, RouterSocket, HEADER_MAX_SIZE};
+use crate::router_socket::{create_request_line, pipe_and_queue_the_wss_send_task_and_handle_err_chan, pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessary, wrap_tgt_res_body_stream_with_guard, ClientRequestIdentifier, RouterSocket, HEADER_MAX_SIZE};
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 use crate::websocket_listener::WebSocketListener;
 use crate::{exceptions, time_utils, ACRState, CRANKER_V_1_0};
@@ -260,12 +260,18 @@ impl RouterSocketV1 {
                 self.as_ref(), status_code, res_builder.headers_ref(),
             )?;
         }
-        let wrapped_stream = self.tgt_res_bdy_rx.clone();
-        let (oneshot_tx,oneshot_rx) = tokio::sync::oneshot::channel();
+        let tgt_res_body_byte_stream = self.tgt_res_bdy_rx.clone();
+        let (
+            fire_it_when_body_stream_ends,
+            notified_when_body_stream_ends
+        ) = oneshot::channel::<()>();
         let another_self = self.clone();
-        let wrapped_stream_further = wrap_async_stream_with_guard(wrapped_stream, oneshot_tx);
+        let tgt_body_with_guard = wrap_tgt_res_body_stream_with_guard(
+            tgt_res_body_byte_stream,
+            fire_it_when_body_stream_ends
+        );
         tokio::spawn(async move {
-            let _ = oneshot_rx.await;
+            let _ = notified_when_body_stream_ends.await;
             if another_self.is_close_msg_received.load(Acquire) {
                 return;
             }
@@ -276,7 +282,7 @@ impl RouterSocketV1 {
             ).with_err_kind(CrexKind::BrokenConnection_0011);
             let _ = another_self.on_error(crex);
         });
-        let stream_body = Body::from_stream(wrapped_stream_further);
+        let stream_body = Body::from_stream(tgt_body_with_guard);
         Ok(res_builder
             .body(stream_body)
             .map(|body| {

@@ -15,7 +15,7 @@ use axum::extract::OriginalUri;
 use axum::http::{HeaderMap, Method, Response, Version};
 use axum_core::body::BodyDataStream;
 use futures::stream::{SplitSink, SplitStream};
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, Stream, StreamExt};
 use log::{debug, error, info, trace};
 use tokio::sync::Notify;
 use uuid::Uuid;
@@ -405,13 +405,25 @@ impl Drop for TcpConnClosureGuard {
     }
 }
 
-pub(crate) fn wrap_async_stream_with_guard(wrapped_stream: Receiver<Result<Vec<u8>, CrankerRouterException>>, oneshot_tx: tokio::sync::oneshot::Sender<()>) -> AsyncStream<Result<Vec<u8>, CrankerRouterException>, impl Future<Output=()> + Sized> {
+pub(crate) fn wrap_tgt_res_body_stream_with_guard(
+    orig_res_vec_u8_receiver: Receiver<Result<Vec<u8>, CrankerRouterException>>,
+    fire_it_when_stream_ends: tokio::sync::oneshot::Sender<()>
+) -> impl Stream<Item=Result<Vec<u8>, CrankerRouterException>> {
+    // The async-channel receiver itself is already an impl Stream,
+    // But it hasn't exposed its drop method or any hooking point
+    // to add listener to tell if the stream ends.
+    //
+    // By using async-stream crate, we add a thin wrapping to the
+    // original async-channel receiver, and let it hold a guard
+    // that will fire a one shot when it's dropped, so that we
+    // can tell when the vec u8 stream ends, and its underlying
+    // http / tcp connection.
     async_stream::stream! {
             let _guard = TcpConnClosureGuard {
-                notify: Some(oneshot_tx),
+                notify: Some(fire_it_when_stream_ends),
             };
             loop {
-                match wrapped_stream.recv().await {
+                match orig_res_vec_u8_receiver.recv().await {
                     Ok(res) => {
                         yield res;
                     }
