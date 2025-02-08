@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::Weak;
 
 use crate::dark_host::DarkHost;
 use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
@@ -13,7 +13,7 @@ use crate::websocket_farm::{WebSocketFarm, WebSocketFarmInterface};
 /// You can acquire an instance of this class by creating a cranker router
 /// instance and then calling `CrankerRouter.dark_mode_manager()`
 pub struct DarkModeManager {
-    pub(crate) websocket_farm: Arc<WebSocketFarm>,
+    pub(crate) websocket_farm: Weak<WebSocketFarm>,
 }
 
 impl DarkModeManager {
@@ -22,19 +22,26 @@ impl DarkModeManager {
     ///
     /// Does nothing if the host was already in dark mode.
     pub fn enable_dark_mode(&self, dark_host: DarkHost) {
-        self.websocket_farm.enable_dark_mode(dark_host);
+        if let Some(wsf) = self.websocket_farm.upgrade() {
+            wsf.enable_dark_mode(dark_host);
+        }
     }
 
     /// Removes the target from the set of blocked hosts.
     ///
     /// Does nothing if the host was not already in dark mode.
     pub fn disable_dark_mode(&self, dark_host: DarkHost) {
-        self.websocket_farm.disable_dark_mode(dark_host);
+        if let Some(wsf) = self.websocket_farm.upgrade() {
+            wsf.disable_dark_mode(dark_host);
+        }
     }
 
     /// The current dark hosts.
     pub fn get_dark_hosts(&self) -> HashSet<DarkHost> {
-        self.websocket_farm.get_dark_hosts()
+        if let Some(wsf) = self.websocket_farm.upgrade() {
+            return wsf.get_dark_hosts();
+        }
+        panic!("no websocket farm strong reference, already end of life");
     }
 
     /// Finds the host associated with the given address, if it is in dark mode.

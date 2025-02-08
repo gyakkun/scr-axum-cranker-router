@@ -150,7 +150,7 @@ impl CrankerRouter {
         );
         let websocket_farm_clone = websocket_farm.clone();
         let dark_mode_manager = Arc::new(DarkModeManager {
-            websocket_farm: websocket_farm.clone()
+            websocket_farm: Arc::downgrade(&websocket_farm)
         });
         tokio::spawn(async move {
             loop {
@@ -221,7 +221,7 @@ impl CrankerRouter {
     ) -> Response {
         let mut res_map_inner = HashMap::new();
         let col = CrankerRouter::collect_info_by_state(
-            app_state.clone()
+            &app_state
         );
         col.services.iter().for_each(|cs| {
             res_map_inner.insert(cs.route.clone(), cs.clone());
@@ -531,16 +531,15 @@ impl CrankerRouter {
         response
     }
 
-    pub(crate) fn collect_info_by_state(acr_state: ACRState) -> RouterInfo {
-        let websocket_farm = acr_state.websocket_farm.clone();
+    pub(crate) fn collect_info_by_state(acr_state: &ACRState) -> RouterInfo {
         let services = router_info::get_connector_service_list(
-            websocket_farm.clone().get_sockets(),
-            websocket_farm.clone().get_dark_hosts(),
+            acr_state.websocket_farm.get_sockets(),
+            acr_state.websocket_farm.get_dark_hosts(),
         );
         RouterInfo {
             services,
-            dark_hosts: websocket_farm.clone().get_dark_hosts(),
-            waiting_tasks: websocket_farm.clone().get_waiting_tasks(),
+            dark_hosts: acr_state.websocket_farm.get_dark_hosts(),
+            waiting_tasks: acr_state.websocket_farm.get_waiting_tasks(),
         }
     }
 
@@ -548,7 +547,7 @@ impl CrankerRouter {
     /// The function to collect all information defined in info
     /// structs.
     pub fn collect_info(&self) -> RouterInfo {
-        Self::collect_info_by_state(self.state.clone())
+        Self::collect_info_by_state(&self.state)
     }
 
     /// Return the currently idle WebSocket connection count.
@@ -557,7 +556,7 @@ impl CrankerRouter {
     /// it's multiplexing so the ws is serving request but
     /// still be counted idle.
     pub fn idle_connection_count(&self) -> i32 {
-        self.state.clone().websocket_farm.idle_count()
+        self.state.websocket_farm.idle_count()
     }
 
     /// A manager that allows you to stop or start requests
@@ -567,12 +566,12 @@ impl CrankerRouter {
     /// mu-cranker-router implementation has abandoned this
     /// feature.
     pub fn dark_mode_manager(&self) -> Arc<DarkModeManager> {
-        self.state.clone().dark_mode_manager.clone()
+        self.state.dark_mode_manager.clone()
     }
 
     /// Disconnects all sockets and cleans up.
     pub fn stop(&self) {
-        self.state.clone().websocket_farm.clone().terminate_all()
+        self.state.websocket_farm.clone().terminate_all()
     }
 }
 
