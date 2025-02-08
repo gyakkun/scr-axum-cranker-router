@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering::{AcqRel, Acquire, Release};
 use std::time::Duration;
 
 use async_channel::{Receiver, Sender, unbounded};
-use axum::async_trait;
+use async_trait::async_trait;
 use axum::extract::OriginalUri;
 use axum::http::{HeaderMap, Method, StatusCode};
 use dashmap::{DashMap, DashSet};

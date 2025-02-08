@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
@@ -15,6 +14,7 @@ use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{http, BoxError, Extension, Json, Router};
+use futures::SinkExt;
 use lazy_static::lazy_static;
 use log::{debug, error, warn};
 use tower_http::limit;
@@ -239,7 +239,7 @@ impl CrankerRouter {
     /// router.
     pub fn visit_portal_axum_router(&self) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
         let res = Router::new()
-            .route("/*any", any(CrankerRouter::visit_portal))
+            .route("/{*any}", any(CrankerRouter::visit_portal))
             .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
             .with_state(self.state())
             .into_make_service_with_connect_info::<SocketAddr>();
@@ -398,9 +398,9 @@ impl CrankerRouter {
     async fn send_goodbye(mut ws: WebSocket) {
         let _ = ws.send(Message::Close(Some(CloseFrame {
             code: 1000,
-            reason: Cow::from("Deregister complete"),
+            reason: "Deregister complete".into(),
         }))).await;
-        let _ = ws.close().await;
+        let _ = ws.close();
     }
 
     /// The register handler for connectors.

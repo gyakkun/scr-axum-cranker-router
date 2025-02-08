@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::{Arc, Weak};
 
 use async_channel::{Receiver, Sender};
-use axum::async_trait;
+use async_trait::async_trait;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::OriginalUri;
 use axum::http::{HeaderMap, Method, Response, StatusCode, Version};
@@ -63,8 +63,8 @@ pub(crate) struct RouterSocketV1 {
     tgt_res_hdr_rx: Receiver<Result<String, CrankerRouterException>>,
     // Send any exception immediately to this chan in on_error so that even
     // when body is streaming, we can end the stream early to save resource
-    tgt_res_bdy_tx: Sender<Result<Vec<u8>, CrankerRouterException>>,
-    tgt_res_bdy_rx: Receiver<Result<Vec<u8>, CrankerRouterException>>,
+    tgt_res_bdy_tx: Sender<Result<Bytes, CrankerRouterException>>,
+    tgt_res_bdy_rx: Receiver<Result<Bytes, CrankerRouterException>>,
 
     wss_recv_pipe_join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 
@@ -193,7 +193,7 @@ impl RouterSocketV1 {
         //   RFC2616 - 8.2.2
         //   https://datatracker.ietf.org/doc/html/rfc2616#section-8.2.2
         self.is_tgt_can_send_res_now_according_to_rfc2616.store(true, Release);
-        self.wss_send_task_tx.send(Message::Text(cranker_req)).await
+        self.wss_send_task_tx.send(Message::Text(cranker_req.into())).await
             .map_err(|e| CrankerRouterException::new(format!(
                 "failed to send cli req hdr to tgt: {:?}", e
             )))?; // fast fail
@@ -225,7 +225,7 @@ impl RouterSocketV1 {
             // 10. Send body end marker (slow)
             trace!("10");
             let end_of_body = CrankerProtocolRequestBuilder::new().with_request_body_ended().build()?; // fast fail
-            self.wss_send_task_tx.send(Message::Text(end_of_body)).await.map_err(|e| CrankerRouterException::new(format!(
+            self.wss_send_task_tx.send(Message::Text(end_of_body.into())).await.map_err(|e| CrankerRouterException::new(format!(
                 "failed to send end of body end marker to tgt: {:?}", e
             )))?; // fast fail
         }
@@ -302,7 +302,7 @@ pub(crate) struct RSv1ClientSideResponseSender {
     pub bytes_sent: Arc<AtomicI64>,
 
     pub tgt_res_hdr_tx: Sender<Result<String, CrankerRouterException>>,
-    pub tgt_res_bdy_tx: Sender<Result<Vec<u8>, CrankerRouterException>>,
+    pub tgt_res_bdy_tx: Sender<Result<Bytes, CrankerRouterException>>,
 
     pub is_tgt_res_hdr_received: AtomicBool,
     pub is_tgt_res_hdr_sent: AtomicBool,
@@ -313,7 +313,7 @@ impl RSv1ClientSideResponseSender {
     fn new(
         bytes_sent: Arc<AtomicI64>,
         tgt_res_hdr_tx: Sender<Result<String, CrankerRouterException>>,
-        tgt_res_bdy_tx: Sender<Result<Vec<u8>, CrankerRouterException>>,
+        tgt_res_bdy_tx: Sender<Result<Bytes, CrankerRouterException>>,
     ) -> Self {
         Self {
             bytes_sent,
@@ -370,7 +370,7 @@ impl RSv1ClientSideResponseSender {
     #[inline]
     async fn send_target_response_body_binary_fragment_to_client(
         &self,
-        bin: Vec<u8>,
+        bin: Bytes,
     ) -> Result<(), CrankerRouterException> {
         // Ensure the header value already sent
         if !self.is_tgt_res_hdr_received.load(Acquire)
@@ -432,7 +432,7 @@ impl WebSocketListener for RouterSocketV1 {
         self.cli_side_res_sender.send_target_response_header_text_to_client(txt).await
     }
 
-    async fn on_binary(&self, bin: Vec<u8>) -> Result<(), CrankerRouterException> {
+    async fn on_binary(&self, bin: Bytes) -> Result<(), CrankerRouterException> {
         if !self.is_tgt_can_send_res_now_according_to_rfc2616.load(Acquire) {
             let failed_reason = "recv bin before handle cli req.".to_string();
             return Err(CrankerRouterException::new(failed_reason));
@@ -465,7 +465,7 @@ impl WebSocketListener for RouterSocketV1 {
         Ok(())
     }
 
-    async fn on_ping(&self, ping_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
+    async fn on_ping(&self, ping_msg: Bytes) -> Result<(), CrankerRouterException> {
         if let Err(e) = self.wss_send_task_tx.send(Message::Pong(ping_msg)).await {
             return self.on_error(CrankerRouterException::new(format!(
                 "failed to pong back {:?}", e
@@ -476,7 +476,7 @@ impl WebSocketListener for RouterSocketV1 {
 
     // when receiving close frame (equals client close ?)
     // Theoretically, tungstenite should already reply a close frame to connector, but in practice chances are it wouldn't
-    async fn on_close(&self, opt_close_frame: Option<CloseFrame<'static>>) -> Result<(), CrankerRouterException> {
+    async fn on_close(&self, opt_close_frame: Option<CloseFrame>) -> Result<(), CrankerRouterException> {
         trace!("40");
         self.is_close_msg_received.store(true, Release);
         let _ = self.wss_send_task_tx.send(Message::Close(opt_close_frame.clone())).await;

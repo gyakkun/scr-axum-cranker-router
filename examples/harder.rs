@@ -60,7 +60,7 @@ async fn main() {
         // Expose health handler to visit portal
         .route("/health/connectors", get(CrankerRouter::connector_info_handler))
         .route("/health", get(CrankerRouter::health_root))
-        .route("/*any", any(CrankerRouter::visit_portal))
+        .route("/{*any}", any(CrankerRouter::visit_portal))
         .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
         .with_state(cranker_router.state())
         .into_make_service_with_connect_info::<SocketAddr>();

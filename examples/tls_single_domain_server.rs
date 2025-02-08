@@ -6,11 +6,11 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::{AcqRel, Acquire};
 
-use axum::extract::Host;
 use axum::handler::HandlerWithoutStateExt;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::Redirect;
 use axum_core::BoxError;
+use axum_extra::extract::Host;
 use axum_server::tls_rustls::RustlsConfig;
 use log::{debug, info, LevelFilter, warn};
 use log::LevelFilter::Debug;

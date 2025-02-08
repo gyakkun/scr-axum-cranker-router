@@ -80,7 +80,7 @@ mod router_socket_filter_test {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    use axum::async_trait;
+    use async_trait::async_trait;
     use axum::extract::OriginalUri;
     use axum::extract::ws::Message;
     use axum::http::{HeaderMap, Method, Response, Version};

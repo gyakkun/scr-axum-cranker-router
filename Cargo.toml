@@ -15,12 +15,12 @@ license = "Apache-2.0"
 
 [dependencies]
 async-channel = "2"
-axum = { version = "0.7", features = ["default", "ws", "original-uri", "http2"] }
-axum-core = "0.4"
+axum = { version = "0.8", features = ["default", "ws", "original-uri", "http2"] }
+axum-core = "0.5"
 bytes = "1"
 dashmap = "6"
 futures = "0.3"
-hashlink = "0.9"
+hashlink = "0.10"
 lazy_static = "1"
 local-ip-address = "0.6"
 log = "0.4"
@@ -30,6 +30,7 @@ tokio-stream = "0.1"
 tower-http = { version = "0.6", features = ["limit"] }
 uuid = { version = "1", features = ["v4"] }
 async-stream = "0.3"
+async-trait = "0.1"
 
 [dev-dependencies]
 # for tls example - single domain
@@ -37,6 +38,7 @@ axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 # As CryptoProvider
 rustls = { version = "0.23", default-features = false, features = ["std", "logging", "tls12", "ring"] }
 simple_logger = "5"
+axum-extra = "0.10"
 
 [lib]
 crate-type = ["lib"]

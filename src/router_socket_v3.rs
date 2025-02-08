@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64};
 use std::sync::{Arc, Weak};
 
 use async_channel::{Receiver, Sender};
-use axum::async_trait;
+use async_trait::async_trait;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::OriginalUri;
 use axum::http::{HeaderMap, Method, Response, StatusCode, Version};
@@ -578,8 +578,8 @@ pub(crate) struct RequestContext {
 
     pub tgt_res_hdr_tx: Sender<Result<String, CrankerRouterException>>,
     pub tgt_res_hdr_rx: Receiver<Result<String, CrankerRouterException>>,
-    pub tgt_res_bdy_tx: Sender<Result<Vec<u8>, CrankerRouterException>>,
-    pub tgt_res_bdy_rx: Receiver<Result<Vec<u8>, CrankerRouterException>>,
+    pub tgt_res_bdy_tx: Sender<Result<Bytes, CrankerRouterException>>,
+    pub tgt_res_bdy_rx: Receiver<Result<Bytes, CrankerRouterException>>,
 
     // client
     pub from_client_bytes: AtomicI64,
@@ -1356,7 +1356,7 @@ impl WebSocketListener for RouterSocketV3 {
         Ok(())
     }
 
-    async fn on_binary(&self, binary_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
+    async fn on_binary(&self, binary_msg: Bytes) -> Result<(), CrankerRouterException> {
         debug!("v3 on binary: {}", binary_msg.len());
         // WARNING: Here must return Ok(()).
         // We can not return Error here, otherwise the websocket listener `on_error`
@@ -1450,7 +1450,7 @@ impl WebSocketListener for RouterSocketV3 {
         Ok(())
     }
 
-    async fn on_ping(&self, ping_msg: Vec<u8>) -> Result<(), CrankerRouterException> {
+    async fn on_ping(&self, ping_msg: Bytes) -> Result<(), CrankerRouterException> {
         // FIXME: Is pong not being sent critical?
         //  Here we decide to terminate all conn (on_error) once the pong
         //  cannot even be put into the wss send task channel / queue
@@ -1465,7 +1465,7 @@ impl WebSocketListener for RouterSocketV3 {
 
     async fn on_close(
         &self,
-        close_msg: Option<CloseFrame<'static>>,
+        close_msg: Option<CloseFrame>,
     ) -> Result<(), CrankerRouterException> {
         warn!(
             "uwss get close frame: {:?}. router socket id = {}",

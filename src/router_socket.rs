@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
@@ -6,12 +5,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_channel::Receiver;
-use axum::async_trait;
+use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::OriginalUri;
 use axum::http::{HeaderMap, Method, Response, Version};
 use axum_core::body::BodyDataStream;
+use bytes::Bytes;
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, Stream, StreamExt};
 use log::{debug, error, info, trace};
@@ -97,7 +97,7 @@ pub(crate) async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessa
                     if let Some(rs) = rs_weak.upgrade() {
                         let _ = rs.send_ws_msg_to_uwss(Message::Close(Some(CloseFrame {
                             code: 1001,
-                            reason: Cow::from("timeout"),
+                            reason: "timeout".into(),
                         }))).await;
                         let _ = wss_listener_clone.on_error(
                             CrankerRouterException::new(
@@ -127,7 +127,7 @@ pub(crate) async fn pipe_underlying_wss_recv_and_send_err_to_err_chan_if_necessa
                 match msg {
                     Message::Text(txt) => {
                         trace!("31");
-                        may_ex = wss_listener.on_text(txt).await.err();
+                        may_ex = wss_listener.on_text(txt.to_string()).await.err();
                         trace!("32")
                     }
                     Message::Binary(bin) => {
@@ -216,7 +216,7 @@ pub(crate) async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
                 // 1. Shutdown the underlying wss tx
                 let mut reason_in_clo_frame = crex.reason.clone();
                 if reason_in_clo_frame.len() > 100 {
-                    // close frame should contains no more than 125 chars ?
+                    // close frame should contain no more than 125 chars ?
                     reason_in_clo_frame = reason_in_clo_frame[0..100].to_string();
                 }
                 let _ = underlying_wss_tx.send(Message::Close(Some(CloseFrame {
@@ -224,7 +224,7 @@ pub(crate) async fn pipe_and_queue_the_wss_send_task_and_handle_err_chan(
                     // it encountered an unexpected condition that prevented it from
                     // fulfilling the request.
                     code: 1011,
-                    reason: Cow::from(reason_in_clo_frame)
+                    reason: reason_in_clo_frame.into()
                 }))).await;
                 let _ = underlying_wss_tx.close();
                 // 2. Remove bad router_socket
@@ -301,7 +301,7 @@ pub(crate) fn create_request_line(method: &Method, orig_uri: &OriginalUri) -> St
 /// connected client / user, for which we will spawn two independent tasks (for
 /// receiving / sending chat messages).
 pub(crate) async fn harvest_router_socket(
-    wss: WebSocket,
+    mut wss: WebSocket,
     app_state: ACRState,
     connector_id: String,
     component_name: String,
@@ -402,9 +402,9 @@ impl Drop for TcpConnClosureGuard {
 }
 
 pub(crate) fn wrap_tgt_res_body_stream_with_guard(
-    orig_res_vec_u8_receiver: Receiver<Result<Vec<u8>, CrankerRouterException>>,
+    orig_res_vec_u8_receiver: Receiver<Result<Bytes, CrankerRouterException>>,
     fire_it_when_stream_ends: tokio::sync::oneshot::Sender<()>
-) -> impl Stream<Item=Result<Vec<u8>, CrankerRouterException>> {
+) -> impl Stream<Item=Result<Bytes, CrankerRouterException>> {
     // The async-channel receiver itself is already an impl Stream,
     // But it hasn't exposed its drop method or any hooking point
     // to add listener to tell if the stream ends.
