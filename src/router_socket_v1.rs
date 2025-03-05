@@ -539,11 +539,8 @@ impl WebSocketListener for RouterSocketV1 {
                 ));
 
                 // I think here same as asyncHandle.complete(exception) in mu cranker router
-                // FIXME: It occurs that the client browser will hang if ex sent here
-                //  240601: This change seems from the debug branch in stash???
-                //  may be due to kvm proxy issue
-                let _ = async { let _ = self.tgt_res_hdr_tx.send(Err(ex.clone())).await; };
-                let _ = async { let _ = self.tgt_res_bdy_tx.send(Err(ex.clone())).await; };
+                let _ = self.tgt_res_hdr_tx.send(Err(ex.clone())).await;
+                let _ = self.tgt_res_bdy_tx.send(Err(ex.clone())).await;
                 let may_ex = self.on_error(ex); // ?Necessary
                 total_err = exceptions::compose_ex(total_err, may_ex);
             }

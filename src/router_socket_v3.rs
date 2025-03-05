@@ -1088,15 +1088,8 @@ impl RouterSocketV3 {
                     code, reason
                 ));
                 // I think here same as asyncHandle.complete(exception) in mu cranker router
-                // FIXME: It occurs that the client browser will hang if ex sent here
-                // FIXME: 240528 what the heck is this in v1, it doesn't do anything
-                //  but defines an not invoked future!!!1
-                let _ = async {
-                    let _ = ctx.tgt_res_hdr_tx.send(Err(ex.clone())).await;
-                };
-                let _ = async {
-                    let _ = ctx.tgt_res_bdy_tx.send(Err(ex.clone())).await;
-                };
+                let _ = ctx.tgt_res_hdr_tx.send(Err(ex.clone())).await;
+                let _ = ctx.tgt_res_bdy_tx.send(Err(ex.clone())).await;
             }
             ctx.tgt_res_hdr_rx.close();
             ctx.tgt_res_bdy_rx.close();
@@ -1105,7 +1098,10 @@ impl RouterSocketV3 {
         let may_ex = self.raise_completion_event(Some(ClientRequestIdentifier {
             request_id: ctx.request_id(),
         }));
-        self.context_map.remove(&ctx.request_id());
+        // WARNING: No need to remove context explicitly. Will causing deadlock if other places
+        // are holding ref into dashmap. Let Drop to do that.
+        // REPRODUCE: The v3 + kvm-proxy + VPN reconnection scenario.
+        // self.context_map.remove(&ctx.request_id());
         return match may_ex {
             Ok(_) => Ok(()),
             Err(crex) => {
