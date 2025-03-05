@@ -1493,7 +1493,7 @@ impl WebSocketListener for RouterSocketV3 {
         }
         for i in self.context_map.iter() {
             let ctx_arc = i.value().clone();
-            let _ = self.notify_client_request_close(ctx_arc, code, reason.clone());
+            let _ = self.notify_client_request_close(ctx_arc, code, reason.clone()).await;
         }
         Ok(())
     }
@@ -1505,10 +1505,12 @@ impl WebSocketListener for RouterSocketV3 {
                 ok
             })
             .map_err(|se| {
-                CrankerRouterException::new(format!(
+                let ex = CrankerRouterException::new(format!(
                     "rare ex that failed to send error to err chan: {:?}",
                     se
-                ))
+                ));
+                error!("{:?}",ex);
+                ex
             })
     }
 
