@@ -84,13 +84,13 @@ async fn main() {
         match signal::ctrl_c().await {
             Ok(()) => {
                 eprintln!("stopping cranker router");
-                cranker_router.stop();
+                cranker_router.try_stop(false);
                 eprintln!("cranker router stopped");
             }
             Err(err) => {
                 eprintln!("Unable to listen for shutdown signal: {}", err);
                 eprintln!("stopping cranker router");
-                cranker_router.stop();
+                cranker_router.try_stop(false);
                 eprintln!("cranker router stopped");
             }
         }

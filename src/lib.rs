@@ -570,8 +570,22 @@ impl CrankerRouter {
     }
 
     /// Disconnects all sockets and cleans up.
+    ///
+    /// **WARNING: This will terminate all connections all at once.**
+    ///
+    /// To safely stop accepting new connection while leave the existing
+    /// connections open until target finishes, please use [`try_stop`].
     pub fn stop(&self) {
-        self.state.websocket_farm.clone().terminate_all()
+        self.state.websocket_farm.clone().terminate_all(true);
+    }
+
+    /// Try to stop all connections. It will remove all router sockets from the
+    /// websocket farm, so that all strong references should be gone leaving
+    /// only inflight requests keep ongoing.
+    ///
+    /// `force` - Forcefully close all connections. Same as [`stop`] if set true.
+    pub fn try_stop(&self, force: bool) {
+        self.state.websocket_farm.clone().terminate_all(force);
     }
 }
 

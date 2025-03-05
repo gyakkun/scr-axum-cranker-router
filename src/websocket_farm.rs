@@ -135,7 +135,19 @@ impl WebSocketFarm {
         false
     }
 
-    pub(crate) fn terminate_all(self: Arc<Self>) {
+    pub(crate) fn terminate_all(self: Arc<Self>, force: bool) {
+        if force {
+            self.route_to_router_socket_id_to_arc_router_socket_map.iter().for_each(|route_dashmap_rsid_rs| {
+                route_dashmap_rsid_rs.iter().for_each(|rsid_rs| {
+                    let rs = rsid_rs.value().clone();
+                    futures::executor::block_on(async move {
+                        let _ = rs.terminate_all_conn(Some(
+                            CrankerRouterException::new("process exiting".to_string()).with_status_code(500)
+                        )).await;
+                    });
+                })
+            });
+        }
         self.route_to_router_socket_id_to_arc_router_socket_map.retain(|_, _| {
             false
         })
