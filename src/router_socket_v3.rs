@@ -1098,10 +1098,7 @@ impl RouterSocketV3 {
         let may_ex = self.raise_completion_event(Some(ClientRequestIdentifier {
             request_id: ctx.request_id(),
         }));
-        // WARNING: No need to remove context explicitly. Will causing deadlock if other places
-        // are holding ref into dashmap. Let Drop to do that.
-        // REPRODUCE: The v3 + kvm-proxy + VPN reconnection scenario.
-        // self.context_map.remove(&ctx.request_id());
+        self.try_spawn_remove_req_ctx(ctx.request_id);
         return match may_ex {
             Ok(_) => Ok(()),
             Err(crex) => {
@@ -1200,7 +1197,7 @@ impl RouterSocketV3 {
         let _ = self.raise_completion_event(Some(ClientRequestIdentifier {
             request_id: ctx.request_id(),
         }));
-        self.context_map.remove(&ctx.request_id());
+        self.try_spawn_remove_req_ctx(ctx.request_id);
         warn!(
             "stream error: req id = {} , router socket id = {} , route = {}, target = {} {:?}, ex = {}",
             ctx.request_id(), ctx.router_socket_id(), ctx.route(), ctx.req_method, ctx.req_uri, crex
@@ -1610,13 +1607,26 @@ impl RouterSocketV3 {
     }
 
     pub async fn reset_stream(&self, ctx: &RequestContext, err_code: i32, msg: String) {
+        warn!("resetting stream rs id = {} , req id = {} , err code = {} , msg = {}", self.router_socket_id, ctx.request_id, err_code, msg);
         if !ctx.state.read().await.is_completed() && !ctx.is_rst_stream_sent.load(Acquire) {
             let rst_msg = rst_message(ctx.request_id(), err_code, msg);
             let _ = self.send_data(Message::Binary(rst_msg.into())).await;
             ctx.is_rst_stream_sent.store(true, SeqCst)
         }
 
-        self.context_map.remove(&ctx.request_id);
+        self.try_spawn_remove_req_ctx(ctx.request_id);
+    }
+
+    fn try_spawn_remove_req_ctx(&self, req_id: i32) {
+        let _ = self.weak_self.try_read().map(|g| {
+            if let Some(weak_self_ref) = g.as_ref() {
+                if let Some(strong_self_ref) = weak_self_ref.upgrade() {
+                    tokio::spawn(async move {
+                        strong_self_ref.context_map.remove(&req_id);
+                    });
+                }
+            }
+        });
     }
 }
 
