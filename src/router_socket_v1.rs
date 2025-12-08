@@ -72,9 +72,10 @@ pub(crate) struct RouterSocketV1 {
     wss_send_task_join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 
     really_need_on_response_body_chunk_received_from_target: bool,
+    // really_need_on_before_request_body_chunk_sent_to_target: bool,
     really_need_on_request_body_chunk_sent_to_target: bool,
 
-    is_close_msg_received: AtomicBool
+    is_close_msg_received: AtomicBool,
 }
 
 impl RouterSocketV1 {
@@ -106,6 +107,8 @@ impl RouterSocketV1 {
 
         let really_need_on_response_body_chunk_received_from_target
             = proxy_listeners.iter().any(|i| i.really_need_on_response_body_chunk_received_from_target());
+        // let really_need_on_before_request_body_chunk_sent_to_target
+        //     = proxy_listeners.iter().any(|i| i.really_need_on_before_request_body_chunk_sent_to_target());
         let really_need_on_request_body_chunk_sent_to_target
             = proxy_listeners.iter().any(|i| i.really_need_on_request_body_chunk_sent_to_target());
         let arc_rs = Arc::new(Self {
@@ -148,6 +151,7 @@ impl RouterSocketV1 {
             wss_send_task_join_handle: Arc::new(Mutex::new(None)),
 
             really_need_on_response_body_chunk_received_from_target,
+            // really_need_on_before_request_body_chunk_sent_to_target,
             really_need_on_request_body_chunk_sent_to_target,
 
             is_close_msg_received: AtomicBool::new(false),
@@ -205,14 +209,23 @@ impl RouterSocketV1 {
             trace!("5.5");
             while let Some(req_body_chunk) = body.next().await {
                 let bytes = req_body_chunk?;
+                for i in self.proxy_listeners.iter() {
+                    i.on_before_request_body_chunk_sent_to_target(self.as_ref(), &bytes)?; // fast fail
+                }
                 // fast fail
                 trace!("6");
                 trace!("8");
-                if self.really_need_on_request_body_chunk_sent_to_target {
-                    for i in self.proxy_listeners.iter() {
-                        i.on_request_body_chunk_sent_to_target(self.as_ref(), &bytes)?; // fast fail
-                    }
+                let mut opt_bytes_clone = None;
+                // if self.really_need_on_before_request_body_chunk_sent_to_target {
+                for i in self.proxy_listeners.iter() {
+                    i.on_request_body_chunk_sent_to_target(self.as_ref(), &bytes)?; // fast fail
                 }
+                // }
+
+                if self.really_need_on_request_body_chunk_sent_to_target {
+                    opt_bytes_clone.replace(bytes.clone());
+                }
+                
                 self.wss_send_task_tx.send(Message::Binary(bytes.into())).await
                     .map_err(|e| {
                         let failed_reason = format!(
@@ -221,6 +234,18 @@ impl RouterSocketV1 {
                         error!("{}", failed_reason);
                         CrankerRouterException::new(failed_reason)
                     })?; // fast fail
+                if self.really_need_on_request_body_chunk_sent_to_target {
+                    match opt_bytes_clone {
+                        None => {
+                            error!("no bytes clone found")
+                        }
+                        Some(bytes_clone) => {
+                            for i in self.proxy_listeners.iter() {
+                                i.on_request_body_chunk_sent_to_target(self.as_ref(), &bytes_clone)?; // fast fail
+                            }
+                        }
+                    }
+                }
             }
             // 10. Send body end marker (slow)
             trace!("10");

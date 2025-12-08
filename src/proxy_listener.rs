@@ -96,6 +96,17 @@ pub trait ProxyListener: Sync + Send {
         headers: Option<&HeaderMap>
     ) -> Result<(), CrankerRouterException> { Ok(()) }
 
+    /// Called before a chunk of request body data is sent to the target
+    /// This will be called many times if the body has been fragmented
+    ///
+    /// * `proxy_info` - Information about the response.
+    /// * `chunk` - Request body data which is going to be sent to target.
+    fn on_before_request_body_chunk_sent_to_target(
+        &self,
+        proxy_info: &dyn ProxyInfo,
+        chunk: &Bytes
+    ) -> Result<(), CrankerRouterException> { Ok(())}
+
     /// Called when a chunk of request body data is sent to the target
     /// This will be called many times if the body has been fragmented
     ///
@@ -133,6 +144,12 @@ pub trait ProxyListener: Sync + Send {
         error!("BOOM");
         panic!("Please ensure you implement this method! It's very important to us: do you `really_need_on_response_body_chunk_received_from_target`");
     }
+
+    // /// `on_before_request_body_chunk_sent_to_target` is expensive, we need you to tell us ahead
+    // fn really_need_on_before_request_body_chunk_sent_to_target(&self) -> bool {
+    //     error!("BOOM");
+    //     panic!("Please ensure you implement this method! It's very important to us: do you `really_need_on_before_request_body_chunk_sent_to_target`");
+    // }
 
     /// `on_request_body_chunk_sent_to_targe` is expensive in V3, we need you to tell us ahead
     fn really_need_on_request_body_chunk_sent_to_target(&self) -> bool {
