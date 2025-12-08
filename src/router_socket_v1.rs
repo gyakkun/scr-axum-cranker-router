@@ -219,7 +219,7 @@ impl RouterSocketV1 {
                 if self.really_need_on_request_body_chunk_sent_to_target {
                     opt_bytes_clone.replace(bytes.clone());
                 }
-                
+
                 self.wss_send_task_tx.send(Message::Binary(bytes.into())).await
                     .map_err(|e| {
                         let failed_reason = format!(
@@ -229,15 +229,12 @@ impl RouterSocketV1 {
                         CrankerRouterException::new(failed_reason)
                     })?; // fast fail
                 if self.really_need_on_request_body_chunk_sent_to_target {
-                    match opt_bytes_clone {
-                        None => {
-                            error!("no bytes clone found")
-                        }
-                        Some(bytes_clone) => {
-                            for i in self.proxy_listeners.iter() {
-                                i.on_request_body_chunk_sent_to_target(self.as_ref(), &bytes_clone)?; // fast fail
-                            }
-                        }
+                    let bytes_clone = opt_bytes_clone.unwrap();
+                    for i in self.proxy_listeners
+                        .iter()
+                        .filter(|i| i.really_need_on_request_body_chunk_sent_to_target())
+                    {
+                        i.on_request_body_chunk_sent_to_target(self.as_ref(), &bytes_clone)?; // fast fail
                     }
                 }
             }
@@ -471,7 +468,7 @@ impl WebSocketListener for RouterSocketV1 {
         self.cli_side_res_sender.send_target_response_body_binary_fragment_to_client(bin).await?;
 
         if self.really_need_on_response_body_chunk_received_from_target {
-            let bin_clone = Bytes::from(opt_bin_clone_for_listeners.unwrap());
+            let bin_clone = opt_bin_clone_for_listeners.unwrap();
             for i in
             self.proxy_listeners
                 .iter()

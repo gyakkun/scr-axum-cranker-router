@@ -307,7 +307,10 @@ impl RouterSocketV3 {
 
                 if self.really_need_on_request_body_chunk_sent_to_target {
                     let copy = opt_copy.unwrap();
-                    for i in self.proxy_listeners.iter() {
+                    for i in self.proxy_listeners
+                        .iter()
+                        .filter(|i| i.really_need_on_request_body_chunk_sent_to_target())
+                    {
                         i.on_request_body_chunk_sent_to_target(ctx.as_ref(), &copy)?;
                     }
                 }
@@ -919,10 +922,11 @@ impl RouterSocketV3 {
 
         if self.really_need_on_response_body_chunk_received_from_target {
             let copy = opt_copy.unwrap();
-            for i in self.proxy_listeners.iter() {
-                if let Err(crex) = i.on_response_body_chunk_received_from_target(ctx.as_ref(), &copy) {
-                    return Err(crex);
-                }
+            for i in self.proxy_listeners
+                .iter()
+                .filter(|i| i.really_need_on_response_body_chunk_received_from_target())
+            {
+                i.on_response_body_chunk_received_from_target(ctx.as_ref(), &copy)?;
             }
         }
 
