@@ -91,7 +91,6 @@ pub(crate) struct RouterSocketV3 {
     wss_send_task_join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 
     really_need_on_response_body_chunk_received_from_target: bool,
-    // really_need_on_before_request_body_chunk_sent_to_target: bool,
     really_need_on_request_body_chunk_sent_to_target: bool,
 }
 
@@ -296,11 +295,9 @@ impl RouterSocketV3 {
                 if self.really_need_on_request_body_chunk_sent_to_target {
                     opt_copy.replace(bytes.clone());
                 }
-                // if self.really_need_on_before_request_body_chunk_sent_to_target {
                 for i in self.proxy_listeners.iter() {
                     i.on_before_request_body_chunk_sent_to_target(ctx.as_ref(), &bytes)?;
                 }
-                // }
                 let data = data_messages(req_id, false, Some(bytes));
                 ctx.inc_rtr_to_tgt_pending_ack_bytes((data.len() - HEADER_LEN_IN_BYTES) as i32);
                 self.send_data(Message::Binary(data.into())).await?;
@@ -1549,8 +1546,6 @@ impl RouterSocketV3 {
         let (wss_send_task_tx, wss_send_task_rx) = async_channel::unbounded();
         let really_need_on_response_body_chunk_received_from_target
             = proxy_listeners.iter().any(|i| i.really_need_on_response_body_chunk_received_from_target());
-        // let really_need_on_before_request_body_chunk_sent_to_target
-        //     = proxy_listeners.iter().any(|i| i.really_need_on_before_request_body_chunk_sent_to_target());
         let really_need_on_request_body_chunk_sent_to_target
             = proxy_listeners.iter().any(|i| i.really_need_on_request_body_chunk_sent_to_target());
         let arc_rs = Arc::new(Self {
@@ -1583,7 +1578,6 @@ impl RouterSocketV3 {
             wss_recv_pipe_join_handle: Arc::new(Mutex::new(None)),
             wss_send_task_join_handle: Arc::new(Mutex::new(None)),
             really_need_on_response_body_chunk_received_from_target,
-            // really_need_on_before_request_body_chunk_sent_to_target,
             really_need_on_request_body_chunk_sent_to_target,
         });
         let weak_self = Arc::downgrade(&arc_rs);

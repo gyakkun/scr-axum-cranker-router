@@ -72,7 +72,6 @@ pub(crate) struct RouterSocketV1 {
     wss_send_task_join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 
     really_need_on_response_body_chunk_received_from_target: bool,
-    // really_need_on_before_request_body_chunk_sent_to_target: bool,
     really_need_on_request_body_chunk_sent_to_target: bool,
 
     is_close_msg_received: AtomicBool,
@@ -107,8 +106,6 @@ impl RouterSocketV1 {
 
         let really_need_on_response_body_chunk_received_from_target
             = proxy_listeners.iter().any(|i| i.really_need_on_response_body_chunk_received_from_target());
-        // let really_need_on_before_request_body_chunk_sent_to_target
-        //     = proxy_listeners.iter().any(|i| i.really_need_on_before_request_body_chunk_sent_to_target());
         let really_need_on_request_body_chunk_sent_to_target
             = proxy_listeners.iter().any(|i| i.really_need_on_request_body_chunk_sent_to_target());
         let arc_rs = Arc::new(Self {
@@ -151,7 +148,6 @@ impl RouterSocketV1 {
             wss_send_task_join_handle: Arc::new(Mutex::new(None)),
 
             really_need_on_response_body_chunk_received_from_target,
-            // really_need_on_before_request_body_chunk_sent_to_target,
             really_need_on_request_body_chunk_sent_to_target,
 
             is_close_msg_received: AtomicBool::new(false),
@@ -216,11 +212,9 @@ impl RouterSocketV1 {
                 trace!("6");
                 trace!("8");
                 let mut opt_bytes_clone = None;
-                // if self.really_need_on_before_request_body_chunk_sent_to_target {
                 for i in self.proxy_listeners.iter() {
                     i.on_request_body_chunk_sent_to_target(self.as_ref(), &bytes)?; // fast fail
                 }
-                // }
 
                 if self.really_need_on_request_body_chunk_sent_to_target {
                     opt_bytes_clone.replace(bytes.clone());
