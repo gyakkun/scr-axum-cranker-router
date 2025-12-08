@@ -83,11 +83,16 @@ impl RouteResolver for LongestFirstRouteResolver {
             last_index = Self::last_index_of(&vec_char, '/');
             last_index
         } >= 0 {
-            vec_char.drain((last_index as usize)..vec_char.len());
             let cur_slice = Self::vec_char_to_string(&vec_char);
             if routes.contains(&cur_slice) {
                 return cur_slice;
             }
+            vec_char.drain((last_index as usize)..vec_char.len());
+        }
+
+        let last_piece = Self::vec_char_to_string(&vec_char);
+        if routes.contains(&last_piece) {
+            return last_piece;
         }
 
         "*".to_string()
