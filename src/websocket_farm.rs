@@ -185,10 +185,22 @@ impl WebSocketFarmInterface for WebSocketFarm {
         let router_socket_sender = chan_pair.0;
         let router_socket_receiver = chan_pair.1;
         let start_ts = time_utils::current_time_millis();
+        // FIXME: Currently the implementation here cannot replicate the mu-cranker-router behaviour,
+        //  The loop will only iterate all available router socket in the chan (queue) and once
+        //  the visited set contains the one that is being iterated, the loop will break.
+        //  The expected behaviour should be if there's no available socket until the cut off time,
+        //  then stop the iteration. A simple solution here is to do time check during the loop
+        //  and this will keep the loop and the chan(queue) busy which is not elegant.
+        //  What I can think of is to add some oneshot in the registration and wait for the shot here
+        //  if there isn't one satisfied at the first loop of iteration.
+        // let cut_off_ts = start_ts + self.max_wait_in_millis;
         self.waiting_task_count.fetch_add(1, AcqRel);
         let timeout = tokio::time::timeout(Duration::from_millis(self.max_wait_in_millis as u64), async {
             let mut visited = HashSet::new();
             while let Ok(rs) = router_socket_receiver.recv().await /* @ filter loop await */ {
+                // if time_utils::current_time_millis() >= cut_off_ts {
+                //    break;
+                // }
                 if let Some(arc_rs) = rs.upgrade() {
                     let rsid = arc_rs.router_socket_id();
                     let is_visited = !visited.insert(rsid);
