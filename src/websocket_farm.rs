@@ -1,19 +1,19 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::{Arc, Weak};
-use std::sync::atomic::{AtomicBool, AtomicI32};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+use std::sync::atomic::{AtomicBool, AtomicI32};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use async_channel::{Receiver, Sender, unbounded};
+use async_channel::{unbounded, Receiver, Sender};
 use async_trait::async_trait;
 use axum::extract::OriginalUri;
 use axum::http::{HeaderMap, Method, StatusCode};
 use dashmap::{DashMap, DashSet};
 use log::{error, info, trace, warn};
 use serde::Serialize;
+use tokio::sync::broadcast;
 
-use crate::{CrankerRouterConfig, LOCAL_IP, time_utils};
 use crate::dark_host::DarkHost;
 use crate::exceptions::{CrankerRouterException, CrexKind};
 use crate::proxy_info::ProxyInfo;
@@ -22,6 +22,7 @@ use crate::route_identify::RouteIdentify;
 use crate::route_resolver::RouteResolver;
 use crate::router_socket::RouterSocket;
 use crate::router_socket_filter::RouterSocketFilter;
+use crate::{time_utils, CrankerRouterConfig, LOCAL_IP};
 
 /// Here we mimic the Java WebSocketFarm but allow adding
 /// both V1 and V3 router socket to the same farm to reduce
@@ -98,6 +99,7 @@ pub struct WebSocketFarm {
     dark_hosts: DashSet<DarkHost>,
     max_wait_in_millis: i64,
     proxy_listeners: Vec<Arc<dyn ProxyListener>>,
+    new_socket_notifier: broadcast::Sender<String>,
 }
 
 // unsafe impl<ANY> Send for WebSocketFarm<ANY>{}
@@ -109,6 +111,7 @@ impl WebSocketFarm {
         max_wait_in_millis: i64,
         proxy_listeners: Vec<Arc<dyn ProxyListener>>,
     ) -> Arc<Self> {
+        let (tx, _) = broadcast::channel(128);
         Arc::new(Self {
             route_resolver,
             // Weak<RS> passing the chan
@@ -122,6 +125,7 @@ impl WebSocketFarm {
             dark_hosts: DashSet::new(),
             max_wait_in_millis,
             proxy_listeners,
+            new_socket_notifier: tx,
         })
     }
 
@@ -184,83 +188,113 @@ impl WebSocketFarmInterface for WebSocketFarm {
         let chan_pair = opt_chan.unwrap().clone();
         let router_socket_sender = chan_pair.0;
         let router_socket_receiver = chan_pair.1;
+        let router_socket_receiver_c = router_socket_receiver.clone();
+        let cranker_router_config_c = cranker_router_config.clone();
+        let router_socket_filter_c = router_socket_filter.clone();
         let start_ts = time_utils::current_time_millis();
-        // FIXME: Currently the implementation here cannot replicate the mu-cranker-router behaviour,
-        //  The loop will only iterate all available router socket in the chan (queue) and once
-        //  the visited set contains the one that is being iterated, the loop will break.
-        //  The expected behaviour should be if there's no available socket until the cut off time,
-        //  then stop the iteration. A simple solution here is to do time check during the loop
-        //  and this will keep the loop and the chan(queue) busy which is not elegant.
-        //  What I can think of is to add some oneshot in the registration and wait for the shot here
-        //  if there isn't one satisfied at the first loop of iteration.
-        // let cut_off_ts = start_ts + self.max_wait_in_millis;
+        let mut new_socket_rx = self.new_socket_notifier.subscribe();
         self.waiting_task_count.fetch_add(1, AcqRel);
-        let timeout = tokio::time::timeout(Duration::from_millis(self.max_wait_in_millis as u64), async {
-            let mut visited = HashSet::new();
-            while let Ok(rs) = router_socket_receiver.recv().await /* @ filter loop await */ {
-                // if time_utils::current_time_millis() >= cut_off_ts {
-                //    break;
-                // }
-                if let Some(arc_rs) = rs.upgrade() {
-                    let rsid = arc_rs.router_socket_id();
-                    let is_visited = !visited.insert(rsid);
-                    if is_visited {
-                        // put it back and break
-                        let _ = router_socket_sender.send(Arc::downgrade(&arc_rs)).await;
-                        break;
-                    }
-                    // skip socket that should be removed
-                    if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs) { continue; }
-                    if router_socket_filter.should_use(
-                        target_path.clone(),
-                        method.clone(),
-                        original_uri.clone(),
-                        headers.clone(),
-                        addr.clone(),
-                        cranker_router_config.clone(),
-                        arc_rs.clone()
-                    ) {
-                        return Ok(arc_rs); // @ filter loop await
-                    }
-                    // put it back if not being chosen
-                    let _ = router_socket_sender.send(Arc::downgrade(&arc_rs)).await;
-                }
-            }
-            if router_socket_filter.should_fallback_to_first_path_matched() {
-                while let Ok(rs) = router_socket_receiver.recv().await /* @ fallback await 1 */ {
-                    if let Some(arc_rs) = rs.upgrade() {
-                        // skip socket that should be removed
-                        if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs) { continue; }
-                        return Ok(arc_rs); // @ fallback await 1
-                    }
-                }
-            }
-            if cranker_router_config.allow_catch_all && router_socket_filter.should_fallback_to_catch_all() {
-                let opt_catch_all_chan = self.route_to_socket_chan.get("*");
-                if opt_catch_all_chan.is_some() {
-                    let (_, ca_rx) = opt_catch_all_chan.unwrap().clone();
-                    while let Ok(rs) = ca_rx.recv().await /* @ fallback await 2 */ {
+        let timeout = tokio::time::timeout(
+            Duration::from_millis(self.max_wait_in_millis as u64),
+            async {
+                'main: loop {
+                    let mut visited = HashSet::new();
+                    while let Ok(rs) = router_socket_receiver.recv().await // @filter loop await
+                    {
                         if let Some(arc_rs) = rs.upgrade() {
+                            let rsid = arc_rs.router_socket_id();
+                            let is_visited = !visited.insert(rsid.clone());
+                            if is_visited {
+                                // put it back and break from this inner loop
+                                let _ = router_socket_sender.send(Arc::downgrade(&arc_rs)).await;
+                                break;
+                            }
                             // skip socket that should be removed
-                            if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs) { continue; }
-                            return Ok(arc_rs); // @ fallback await 2
+                            if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs) {
+                                visited.remove(&rsid);
+                                continue;
+                            }
+                            if router_socket_filter.should_use(
+                                target_path.clone(),
+                                method.clone(),
+                                original_uri.clone(),
+                                headers.clone(),
+                                addr.clone(),
+                                cranker_router_config.clone(),
+                                arc_rs.clone(),
+                            ) {
+                                return Ok(arc_rs); // @filter loop await
+                            }
+                            // put it back if not being chosen
+                            let _ = router_socket_sender.send(Arc::downgrade(&arc_rs)).await;
+                        }
+                    }
+                    // If we are here, it means we have iterated all sockets in the chan and none of them are suitable.
+                    // We will wait for a new socket to be added.
+                    loop {
+                        match new_socket_rx.recv().await {
+                            Ok(notified_route) => {
+                                if notified_route == resolved_route {
+                                    // A new socket for our route has been added. Continue the main loop to try again.
+                                    continue 'main;
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(_)) => {
+                                // Lagged, but we can continue listening.
+                                continue;
+                            }
+                            Err(broadcast::error::RecvError::Closed) => {
+                                // The notifier is closed. No new sockets will ever be announced.
+                                // We can't do anything else. The outer timeout will eventually fire.
+                                // A sleep prevents a hot loop.
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            }
                         }
                     }
                 }
-            }
-            Err(CrankerRouterException::new(format!(
-                "No valid cranker connector registered after filtering, target path = {} ",
-                target_path
-            )).with_err_kind(CrexKind::NoRouterSocketAvailable_0002))
-        }).await;
+            },
+        )
+        .await;
 
-        return match timeout {
-            Ok(ok_or_err) => {
+        match timeout {
+            Ok(Ok(arc_rs)) => {
                 self.waiting_task_count.fetch_add(-1, AcqRel);
-                ok_or_err
+                Ok(arc_rs)
             }
-            _ => {
+            Ok(Err(e)) => {
                 self.waiting_task_count.fetch_add(-1, AcqRel);
+                Err(e)
+            }
+            Err(_) => {
+                self.waiting_task_count.fetch_add(-1, AcqRel);
+                if router_socket_filter_c.should_fallback_to_first_path_matched() {
+                    while let Ok(rs) = router_socket_receiver_c.try_recv() {
+                        if let Some(arc_rs) = rs.upgrade() {
+                            if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs) {
+                                continue;
+                            }
+                            return Ok(arc_rs);
+                        }
+                    }
+                }
+
+                if cranker_router_config_c.allow_catch_all
+                    && router_socket_filter_c.should_fallback_to_catch_all()
+                {
+                    if let Some(opt_catch_all_chan) = self.route_to_socket_chan.get("*") {
+                        let (_, ca_rx) = opt_catch_all_chan.value().clone();
+                        while let Ok(rs) = ca_rx.try_recv() {
+                            if let Some(arc_rs) = rs.upgrade() {
+                                if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs)
+                                {
+                                    continue;
+                                }
+                                return Ok(arc_rs);
+                            }
+                        }
+                    }
+                }
+
                 let elapsed = time_utils::current_time_millis() - start_ts;
                 let epif = ErrorProxyInfo::new(resolved_route.clone(), elapsed);
                 for i in self.proxy_listeners.iter() {
@@ -347,14 +381,18 @@ impl WebSocketFarmInterface for WebSocketFarm {
                 .or_insert_with(DashMap::new)
                 .value()
                 .insert(router_socket_id, router_socket);
-            let res = another_self.route_to_socket_chan
-                .entry(route)
+            let res = another_self
+                .route_to_socket_chan
+                .entry(route.clone())
                 .or_insert_with(unbounded)
                 .value()
                 .0
                 .send(weak).await;
             if res.is_ok() {
                 another_self.idle_count.fetch_add(1, AcqRel);
+                if let Err(e) = another_self.new_socket_notifier.send(route) {
+                    warn!("Could not send notification for new socket on route: {}", e);
+                }
             }
         });
     }
