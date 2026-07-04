@@ -12,6 +12,7 @@ pub struct ConnectorConnection {
     /// The port the socket is connected on
     pub port: i32,
     /// A unique ID of this socket
+    #[serde(rename = "socketID")]
     pub router_socket_id: String,
     /// The protocol version, e.g. cranker_1.0, cranker_3.0
     pub protocol: String,

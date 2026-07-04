@@ -107,10 +107,19 @@ pub(crate) fn set_forwarded_headers(
 }
 
 pub(crate) fn set_x_forwarded_headers(hdr_to_hdr: &mut HeaderMap, fh: &ForwardedHeader) {
-    let l = [fh.proto.as_ref(), fh.host.as_ref(), fh.for_value.as_ref()];
-    for v in l {
-        if let Some(Some(p)) = v.map(|s| s.parse().ok()) {
-            hdr_to_hdr.append(http::header::FORWARDED, p);
+    if let Some(ref proto) = fh.proto {
+        if let Ok(p) = proto.parse() {
+            hdr_to_hdr.insert("x-forwarded-proto", p);
+        }
+    }
+    if let Some(ref host) = fh.host {
+        if let Ok(h) = host.parse() {
+            hdr_to_hdr.insert("x-forwarded-host", h);
+        }
+    }
+    if let Some(ref for_val) = fh.for_value {
+        if let Ok(f) = for_val.parse() {
+            hdr_to_hdr.insert("x-forwarded-for", f);
         }
     }
 }

@@ -16,6 +16,7 @@ pub struct ConnectorInstance {
     /// Dark mode status
     pub dark_mode: bool,
     /// The unique ID of the connector.
+    #[serde(rename = "connectorInstanceID")]
     pub connector_id: String,
     /// The current idle connections that this
     /// connector has registered to the router.

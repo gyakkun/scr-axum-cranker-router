@@ -106,6 +106,10 @@ impl RouteIdentify for RouterSocketV3 {
     fn service_address(&self) -> SocketAddr {
         return self.remote_address.clone();
     }
+
+    fn domain(&self) -> String {
+        return self.domain.clone();
+    }
 }
 
 
@@ -411,9 +415,9 @@ impl RouterSocket for RouterSocketV3 {
         Ok(())
     }
 
-    // Not used in V3
-    fn is_dark_mode_on(&self, _: &HashSet<DarkHost>) -> bool {
-        false
+    fn is_dark_mode_on(&self, dark_hosts: &HashSet<DarkHost>) -> bool {
+        let remote_ip_addr = self.remote_address.ip();
+        dark_hosts.iter().any(|i| i.same_host(remote_ip_addr))
     }
 
     fn inflight_count(&self) -> i32 {
