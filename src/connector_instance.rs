@@ -24,4 +24,6 @@ pub struct ConnectorInstance {
     /// The remote IP Address of the connector
     /// instance
     pub ip: IpAddr,
+    /// The component name registered by this connector
+    pub component_name: String,
 }

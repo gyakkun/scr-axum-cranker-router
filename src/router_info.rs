@@ -53,6 +53,7 @@ pub(crate) fn get_connector_service_list(
                                         connection_count: 0, // update it once connection pushed
                                         connections: Vec::new(),
                                         dark_mode: router_socket.is_dark_mode_on(&dark_hosts),
+                                        component_name: router_socket.component_name(),
                                     };
                                     instance_map.insert(connector_id.clone(), _res);
                                     instance_map.get_mut(&connector_id).unwrap()
@@ -76,10 +77,17 @@ pub(crate) fn get_connector_service_list(
                 }
             }
 
+            let mut connectors_list: Vec<ConnectorInstance> = instance_map.into_values().collect();
+            connectors_list.sort_by(|a, b| {
+                let proto_a = a.connections.first().map(|c| c.protocol.as_str()).unwrap_or("");
+                let proto_b = b.connections.first().map(|c| c.protocol.as_str()).unwrap_or("");
+                proto_a.cmp(proto_b)
+            });
+
             connector_services.push(ConnectorService {
                 route: route.clone(),
                 component_name: component_name.unwrap_or("[UNKNOWN]".to_string()),
-                connectors: instance_map.iter().map(|(_k, v)| v.clone()).collect(),
+                connectors: connectors_list,
                 is_catch_all: route == "*",
             })
         });

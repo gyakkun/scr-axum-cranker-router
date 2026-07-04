@@ -239,6 +239,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
         let router_socket_sender = chan_pair.0;
         let router_socket_receiver = chan_pair.1;
         let router_socket_receiver_c = router_socket_receiver.clone();
+        let router_socket_sender_c = router_socket_sender.clone();
         let cranker_router_config_c = cranker_router_config.clone();
         let router_socket_filter_c = router_socket_filter.clone();
         let start_ts = time_utils::current_time_millis();
@@ -320,8 +321,8 @@ impl WebSocketFarmInterface for WebSocketFarm {
                     loop {
                         match new_socket_rx.recv().await {
                             Ok(notified_route) => {
-                                if notified_route == resolved_route {
-                                    // A new socket for our route has been added. Continue the main loop to try again.
+                                if notified_route == resolved_route || notified_route == "*" {
+                                    // A new socket for our route has been added or dark mode changed. Continue the main loop to try again.
                                     continue 'main;
                                 }
                             }
@@ -355,16 +356,24 @@ impl WebSocketFarmInterface for WebSocketFarm {
                 self.waiting_task_count.fetch_add(-1, AcqRel);
                 let dark_hosts: HashSet<DarkHost> = self.dark_hosts.iter().map(|i| i.clone()).collect();
                 if router_socket_filter_c.should_fallback_to_first_path_matched() {
+                    let mut skipped = Vec::new();
                     while let Ok(rs) = router_socket_receiver_c.try_recv() {
                         if let Some(arc_rs) = rs.upgrade() {
                             if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs) {
                                 continue;
                             }
                             if arc_rs.is_dark_mode_on(&dark_hosts) {
+                                skipped.push(Arc::downgrade(&arc_rs));
                                 continue;
+                            }
+                            for s in skipped {
+                                let _ = router_socket_sender_c.send(s).await;
                             }
                             return Ok(arc_rs);
                         }
+                    }
+                    for s in skipped {
+                        let _ = router_socket_sender_c.send(s).await;
                     }
                 }
 
@@ -372,7 +381,8 @@ impl WebSocketFarmInterface for WebSocketFarm {
                     && router_socket_filter_c.should_fallback_to_catch_all()
                 {
                     if let Some(opt_catch_all_chan) = self.route_to_socket_chan.get("*") {
-                        let (_, ca_rx) = opt_catch_all_chan.value().clone();
+                        let (ca_tx, ca_rx) = opt_catch_all_chan.value().clone();
+                        let mut skipped = Vec::new();
                         while let Ok(rs) = ca_rx.try_recv() {
                             if let Some(arc_rs) = rs.upgrade() {
                                 if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs)
@@ -380,10 +390,17 @@ impl WebSocketFarmInterface for WebSocketFarm {
                                     continue;
                                 }
                                 if arc_rs.is_dark_mode_on(&dark_hosts) {
+                                    skipped.push(Arc::downgrade(&arc_rs));
                                     continue;
+                                }
+                                for s in skipped {
+                                    let _ = ca_tx.send(s).await;
                                 }
                                 return Ok(arc_rs);
                             }
+                        }
+                        for s in skipped {
+                            let _ = ca_tx.send(s).await;
                         }
                     }
                 }
@@ -563,6 +580,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
         let removed = self.dark_hosts.remove(&dark_host).is_some();
         if removed {
             info!("Disabled dark mode for {:?}", dark_host);
+            let _ = self.new_socket_notifier.send("*".to_string());
         } else {
             info!("Requested to disable dark mode for {:?} but it was not in dark mode, so doing nothing.", dark_host);
         }
