@@ -61,10 +61,19 @@ impl DomainRouterSocketFilter {
 
 impl RouterSocketFilter for DomainRouterSocketFilter {
     fn should_use(
-        &self, _: String, _: Method, original_uri: OriginalUri, _: HeaderMap, _: SocketAddr, _: CrankerRouterConfig, rs: Arc<dyn RouterSocket>,
+        &self, _: String, _: Method, original_uri: OriginalUri, headers: HeaderMap, _: SocketAddr, _: CrankerRouterConfig, rs: Arc<dyn RouterSocket>,
     ) -> bool {
-        original_uri.host().map(|host| {
-            rs.domain() == host
+        let host_opt = original_uri.host()
+            .map(|h| h.to_string())
+            .or_else(|| {
+                headers.get("host")
+                    .and_then(|h| h.to_str().ok())
+                    .map(|h| {
+                        h.split(':').next().unwrap_or(h).to_string()
+                    })
+            });
+        host_opt.map(|host| {
+            rs.domain() == "*" || rs.domain() == host
         }).unwrap_or(false)
     }
 

@@ -55,6 +55,11 @@ crate-type = ["bin"]
 name = "tls_single_domain_server"
 crate-type = ["bin"]
 
+[[example]]
+name = "router_server"
+crate-type = ["bin"]
+
+
 [profile.dev]
 panic = 'abort'
 

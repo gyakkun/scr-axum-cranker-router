@@ -170,9 +170,59 @@ impl WebSocketFarmInterface for WebSocketFarm {
         cranker_router_config: CrankerRouterConfig,
         router_socket_filter: Arc<dyn RouterSocketFilter>
     ) -> Result<Arc<dyn RouterSocket>, CrankerRouterException> {
-        // we have both maps storing <routes, xxx >, here we use route_to_chan map since it removes route earlier
-        // a little bit ( check the trace!("82") in retain )
-        let current_routes = self.route_to_socket_chan.iter().map(|e| e.key().clone()).collect::<DashSet<String>>();
+        let host_opt = original_uri.host()
+            .map(|h| h.to_string())
+            .or_else(|| {
+                headers.get("host")
+                    .and_then(|h| h.to_str().ok())
+                    .map(|h| {
+                        h.split(':').next().unwrap_or(h).to_string()
+                    })
+            });
+
+        // Check if there is any socket registered on the precise domain `host`
+        let mut has_precise_domain_sockets = false;
+        if let Some(ref host) = host_opt {
+            for entry in self.route_to_router_socket_id_to_arc_router_socket_map.iter() {
+                for sub_entry in entry.value().iter() {
+                    let rs = sub_entry.value();
+                    if !self.should_remove_from_web_socket_farm_if_is_removed(rs) {
+                        if rs.domain() == *host {
+                            has_precise_domain_sockets = true;
+                            break;
+                        }
+                    }
+                }
+                if has_precise_domain_sockets {
+                    break;
+                }
+            }
+        }
+
+        // Collect routes. If there are precise domain sockets, only collect routes that have sockets on the precise domain!
+        let current_routes = self.route_to_socket_chan.iter()
+            .filter(|e| {
+                let route = e.key();
+                if has_precise_domain_sockets {
+                    if let Some(ref host) = host_opt {
+                        if let Some(sub_map) = self.route_to_router_socket_id_to_arc_router_socket_map.get(route) {
+                            for sub_entry in sub_map.value().iter() {
+                                let rs = sub_entry.value();
+                                if !self.should_remove_from_web_socket_farm_if_is_removed(rs) {
+                                    if rs.domain() == *host {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|e| e.key().clone())
+            .collect::<DashSet<String>>();
+
         // TODO: Catch all handling
         let resolved_route = self.route_resolver.resolve(&current_routes, &target_path);
         let opt_chan = self.route_to_socket_chan.get(&resolved_route);
@@ -198,6 +248,30 @@ impl WebSocketFarmInterface for WebSocketFarm {
             Duration::from_millis(self.max_wait_in_millis as u64),
             async {
                 'main: loop {
+                    let host_opt = original_uri.host()
+                        .map(|h| h.to_string())
+                        .or_else(|| {
+                            headers.get("host")
+                                .and_then(|h| h.to_str().ok())
+                                .map(|h| {
+                                    h.split(':').next().unwrap_or(h).to_string()
+                                })
+                        });
+                    let mut has_precise_match = false;
+                    if let Some(ref host) = host_opt {
+                        if let Some(sub_map) = self.route_to_router_socket_id_to_arc_router_socket_map.get(&resolved_route) {
+                            for entry in sub_map.value().iter() {
+                                let rs = entry.value();
+                                if !self.should_remove_from_web_socket_farm_if_is_removed(rs) {
+                                    if rs.domain() == *host {
+                                        has_precise_match = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     let mut visited = HashSet::new();
                     while let Ok(rs) = router_socket_receiver.recv().await // @filter loop await
                     {
@@ -212,6 +286,18 @@ impl WebSocketFarmInterface for WebSocketFarm {
                             // skip socket that should be removed
                             if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs) {
                                 visited.remove(&rsid);
+                                continue;
+                            }
+                            // skip socket whose connector is in dark mode
+                            {
+                                let dark_hosts: HashSet<DarkHost> = self.dark_hosts.iter().map(|i| i.clone()).collect();
+                                if arc_rs.is_dark_mode_on(&dark_hosts) {
+                                    let _ = router_socket_sender.send(Arc::downgrade(&arc_rs)).await;
+                                    continue;
+                                }
+                            }
+                            if has_precise_match && arc_rs.domain() == "*" {
+                                let _ = router_socket_sender.send(Arc::downgrade(&arc_rs)).await;
                                 continue;
                             }
                             if router_socket_filter.should_use(
@@ -267,10 +353,14 @@ impl WebSocketFarmInterface for WebSocketFarm {
             }
             Err(_) => {
                 self.waiting_task_count.fetch_add(-1, AcqRel);
+                let dark_hosts: HashSet<DarkHost> = self.dark_hosts.iter().map(|i| i.clone()).collect();
                 if router_socket_filter_c.should_fallback_to_first_path_matched() {
                     while let Ok(rs) = router_socket_receiver_c.try_recv() {
                         if let Some(arc_rs) = rs.upgrade() {
                             if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs) {
+                                continue;
+                            }
+                            if arc_rs.is_dark_mode_on(&dark_hosts) {
                                 continue;
                             }
                             return Ok(arc_rs);
@@ -287,6 +377,9 @@ impl WebSocketFarmInterface for WebSocketFarm {
                             if let Some(arc_rs) = rs.upgrade() {
                                 if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs)
                                 {
+                                    continue;
+                                }
+                                if arc_rs.is_dark_mode_on(&dark_hosts) {
                                     continue;
                                 }
                                 return Ok(arc_rs);
@@ -357,7 +450,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
             another_self.route_last_removal_times.insert(route_clone, time_utils::current_time_millis());
             trace!("91");
             let success = another_self.route_to_router_socket_id_to_arc_router_socket_map.get(&route)
-                .map(|some| some.remove(&router_socket_id))
+                .and_then(|some| some.remove(&router_socket_id))
                 .is_some();
             trace!("92 success {}", success);
             if success {
@@ -404,19 +497,28 @@ impl WebSocketFarmInterface for WebSocketFarm {
             route, remote_addr, connector_id
         );
         tokio::spawn(async move {
-            another_self.route_to_router_socket_id_to_arc_router_socket_map
-                .get(&route)
-                .map(|some| {
-                    // ( router socket id , router socket )
-                    some.value()
-                        .retain(|_k, v| {
-                            let should_remove = v.connector_id().eq(&connector_id);
-                            if should_remove {
-                                warn!("De-registering router_socket_id={}", v.router_socket_id());
-                            }
-                            !should_remove
-                        });
-                })
+            let mut sockets_to_close = Vec::new();
+            if let Some(some) = another_self.route_to_router_socket_id_to_arc_router_socket_map.get(&route) {
+                for item in some.value().iter() {
+                    let v = item.value();
+                    if v.connector_id().eq(&connector_id) {
+                        sockets_to_close.push(v.clone());
+                    }
+                }
+            }
+            if let Some(some) = another_self.route_to_router_socket_id_to_arc_router_socket_map.get(&route) {
+                some.value().retain(|_k, v| {
+                    !v.connector_id().eq(&connector_id)
+                });
+            }
+            for socket in sockets_to_close {
+                warn!("De-registering and closing router_socket_id={}", socket.router_socket_id());
+                let _ = socket.clone().send_ws_msg_to_uwss(axum::extract::ws::Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1000,
+                    reason: "De-registered".into(),
+                }))).await;
+                let _ = socket.terminate_all_conn(None).await;
+            }
         });
     }
 

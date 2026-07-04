@@ -144,7 +144,7 @@ impl Error for CrankerRouterException {}
 impl IntoResponse for CrankerRouterException {
     fn into_response(self) -> Response {
         let mut body_str = self.reason.clone();
-        if let Some(err_kind) = self.opt_err_kind {
+        if let Some(ref err_kind) = self.opt_err_kind {
             body_str.push_str(
                 format!(" (error kind = {:?})", err_kind).as_str()
             )
@@ -153,7 +153,11 @@ impl IntoResponse for CrankerRouterException {
         body_str.push_str(format!(
             " (error id = {})", err_id
         ).as_str());
-        let status_code = self.opt_status_code.unwrap_or(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
+        let default_status = match self.opt_err_kind {
+            Some(CrexKind::Timeout_0001) => StatusCode::GATEWAY_TIMEOUT.as_u16(),
+            _ => StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+        };
+        let status_code = self.opt_status_code.unwrap_or(default_status);
         error!("Respond with CrankerRouterException: code = {} , body = {}", status_code, body_str);
         Response::builder()
             .status(status_code)
