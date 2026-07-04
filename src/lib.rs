@@ -1115,9 +1115,11 @@ mod lib_tests {
         });
 
         let log_file = std::fs::File::create("target/test-connector-ip.log").unwrap();
+        let jar_path = std::env::var("CRANKER_CONNECTOR_JAR")
+            .unwrap_or_else(|_| "../cranker-connector/target/cranker-connector-1.3-SNAPSHOT-uber.jar".to_string());
         let child = Command::new("java")
             .arg("-cp")
-            .arg("../cranker-connector/target/cranker-connector-1.3-SNAPSHOT-uber.jar")
+            .arg(jar_path)
             .arg("com.hsbc.cranker.connector.CommandLineConnector")
             .arg("--target")
             .arg(format!("http://127.0.0.1:{}", target_port))
@@ -1207,9 +1209,11 @@ mod lib_tests {
         });
 
         let log_file = std::fs::File::create("target/test-connector-proxy.log").unwrap();
+        let jar_path = std::env::var("CRANKER_CONNECTOR_JAR")
+            .unwrap_or_else(|_| "../cranker-connector/target/cranker-connector-1.3-SNAPSHOT-uber.jar".to_string());
         let child = Command::new("java")
             .arg("-cp")
-            .arg("../cranker-connector/target/cranker-connector-1.3-SNAPSHOT-uber.jar")
+            .arg(jar_path)
             .arg("com.hsbc.cranker.connector.CommandLineConnector")
             .arg("--target")
             .arg(format!("http://127.0.0.1:{}", target_port))

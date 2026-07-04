@@ -1,0 +1,109 @@
+#!/bin/bash
+# Exit immediately if a command exits with a non-zero status
+set -e
+
+echo "=== Starting CI Verification ==="
+
+# 1. Environment Check
+echo "Checking environment dependencies..."
+if ! command -v cargo &> /dev/null; then
+    export PATH="$PATH:$HOME/.cargo/bin"
+fi
+for cmd in git java mvn cargo; do
+    if ! command -v "$cmd" &> /dev/null; then
+        echo "Error: Required command '$cmd' is not installed or not in PATH." >&2
+        exit 1
+    fi
+done
+echo "Environment dependencies verified: git, java, mvn, cargo are available."
+
+# 2. Paths and Directories Setup
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Resolve temporary directory
+if [ -z "$CI_TMP_DIR" ]; then
+    CI_TMP_DIR="$SCRIPT_DIR/target/ci_tmp"
+fi
+
+echo "Workspace directory: $WORKSPACE_DIR"
+echo "CI Temporary directory: $CI_TMP_DIR"
+
+# Clean up any existing temp directory
+rm -rf "$CI_TMP_DIR"
+mkdir -p "$CI_TMP_DIR"
+
+# Set up trap to clean up on exit
+cleanup() {
+    echo "=== Cleaning up temporary files ==="
+    rm -rf "$CI_TMP_DIR"
+    echo "=== Cleanup completed ==="
+}
+trap cleanup EXIT
+
+# 3. Retrieve origin URLs
+echo "Retrieving git remote URLs..."
+CONNECTOR_REMOTE_URL="${CRANKER_CONNECTOR_REMOTE_URL:-https://github.com/hsbc/cranker-connector.git}"
+MU_ROUTER_REMOTE_URL="${MU_CRANKER_ROUTER_REMOTE_URL:-https://github.com/hsbc/mu-cranker-router.git}"
+
+echo "cranker-connector remote URL: $CONNECTOR_REMOTE_URL"
+echo "mu-cranker-router remote URL: $MU_ROUTER_REMOTE_URL"
+
+# 4. Clone Repositories into ci_tmp
+echo "=== Cloning repositories to ci_tmp ==="
+git clone "$CONNECTOR_REMOTE_URL" "$CI_TMP_DIR/cranker-connector"
+git clone "$MU_ROUTER_REMOTE_URL" "$CI_TMP_DIR/mu-cranker-router"
+
+# Pin specific master commits to ensure patch compatibility
+CONNECTOR_COMMIT="1dc059c11a93800b0b69172d165456d93f7dfbc3"
+MU_ROUTER_COMMIT="b45eb9df14eaf273c705b4cda6208f68f1ff57dc"
+
+echo "Checking out pinned commit $CONNECTOR_COMMIT for cranker-connector..."
+git -C "$CI_TMP_DIR/cranker-connector" checkout "$CONNECTOR_COMMIT"
+
+echo "Checking out pinned commit $MU_ROUTER_COMMIT for mu-cranker-router..."
+git -C "$CI_TMP_DIR/mu-cranker-router" checkout "$MU_ROUTER_COMMIT"
+
+# 5. Apply Patches
+echo "=== Applying patches to cloned repositories ==="
+git -C "$CI_TMP_DIR/cranker-connector" apply "$SCRIPT_DIR/patches/cranker-connector.patch"
+git -C "$CI_TMP_DIR/mu-cranker-router" apply "$SCRIPT_DIR/patches/mu-cranker-router.patch"
+
+# 6. Build Router Server Binary
+echo "=== Building scr-axum-cranker-router bin ==="
+cargo build --release --bin router_server
+
+# Locate binary extension (.exe on Windows)
+EXE_EXT=""
+if [ -f "$SCRIPT_DIR/target/release/router_server.exe" ]; then
+    EXE_EXT=".exe"
+fi
+
+# Copy built binary to temp dir
+cp "$SCRIPT_DIR/target/release/router_server${EXE_EXT}" "$CI_TMP_DIR/router_server${EXE_EXT}"
+
+# 7. Build cranker-connector Uber Jar
+echo "=== Building cranker-connector uber jar ==="
+mvn -f "$CI_TMP_DIR/cranker-connector/pom.xml" clean package -DskipTests -Dmaven.javadoc.skip=true -Dsource.skip=true
+
+# Find the built uber jar
+CONNECTOR_JAR=$(find "$CI_TMP_DIR/cranker-connector/target" -name "*uber.jar" | head -n 1)
+if [ -z "$CONNECTOR_JAR" ]; then
+    echo "Error: Failed to find built uber jar in cranker-connector/target." >&2
+    exit 1
+fi
+cp "$CONNECTOR_JAR" "$CI_TMP_DIR/connector-uber.jar"
+
+# 8. Run Java mu-cranker-router tests against Rust router_server
+echo "=== Running Java mu-cranker-router tests ==="
+export CRANKER_ROUTER_RUST=true
+export RUST_ROUTER_SERVER_EXE="$CI_TMP_DIR/router_server${EXE_EXT}"
+
+mvn -f "$CI_TMP_DIR/mu-cranker-router/pom.xml" clean test -Dcranker.router.rust=true -Dmaven.javadoc.skip=true -Dsource.skip=true
+
+# 9. Run Rust unit & integration tests
+echo "=== Running scr-axum-cranker-router tests ==="
+export CRANKER_CONNECTOR_JAR="$CI_TMP_DIR/connector-uber.jar"
+cargo test --lib -- --nocapture
+
+echo "=== CI Verification Passed Successfully! ==="
