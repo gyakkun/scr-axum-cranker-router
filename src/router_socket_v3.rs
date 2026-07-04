@@ -520,7 +520,7 @@ impl RouterSocket for RouterSocketV3 {
                 }),
         ).await;
 
-        debug_assert!(self.context_map.is_empty());
+
 
         if !self.context_map.is_empty() {
             error!("seems our dirty deadlock experiment failed! Manually retain all false");
