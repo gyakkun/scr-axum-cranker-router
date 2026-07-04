@@ -39,6 +39,7 @@ axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "logging", "tls12", "ring"] }
 simple_logger = "5"
 axum-extra = "0.10"
+reqwest = { version = "0.12", features = ["json"] }
 
 [lib]
 crate-type = ["lib"]

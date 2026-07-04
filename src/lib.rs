@@ -1009,6 +1009,264 @@ fn panic_if_less_than_zero(name: &'static str, val: i64) {
 #[cfg(test)]
 mod lib_tests {
     use crate::check_via_name;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::net::TcpListener;
+    use std::net::SocketAddr;
+    use std::process::Command;
+    use crate::{CrankerRouterBuilder, ip_validator::IPValidator, proxy_listener::ProxyListener, proxy_info::ProxyInfo};
+    use crate::exceptions::CrankerRouterException;
+    use axum::http::{HeaderMap, StatusCode, HeaderValue};
+    use axum::{Router, routing::get};
+    use std::time::Duration;
+
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+        }
+    }
+
+    struct TestIpValidator {
+        allow: Arc<AtomicBool>,
+    }
+    impl IPValidator for TestIpValidator {
+        fn allow(&self, _ip: std::net::IpAddr) -> bool {
+            self.allow.load(Ordering::SeqCst)
+        }
+    }
+
+    struct TestProxyListener {
+        completed_called: Arc<AtomicBool>,
+        failure_called: Arc<AtomicBool>,
+    }
+    impl ProxyListener for TestProxyListener {
+        fn on_before_proxy_to_target(
+            &self,
+            _info: &dyn ProxyInfo,
+            request_headers_to_target: &mut HeaderMap
+        ) -> Result<(), CrankerRouterException> {
+            request_headers_to_target.insert("x-test-request", HeaderValue::from_static("yes"));
+            Ok(())
+        }
+        fn on_before_responding_to_client(
+            &self,
+            _info: &dyn ProxyInfo
+        ) -> Result<(), CrankerRouterException> {
+            Ok(())
+        }
+        fn on_failure_to_acquire_proxy_socket(
+            &self,
+            _info: &dyn ProxyInfo
+        ) -> Result<(), CrankerRouterException> {
+            self.failure_called.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        fn on_complete(
+            &self,
+            _proxy_info: &dyn ProxyInfo
+        ) -> Result<(), CrankerRouterException> {
+            self.completed_called.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        fn really_need_on_response_body_chunk_received_from_target(&self) -> bool { false }
+        fn really_need_on_request_body_chunk_sent_to_target(&self) -> bool { false }
+    }
+
+    async fn get_free_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    #[tokio::test]
+    async fn test_ip_validator_behavior() {
+        let reg_port = get_free_port().await;
+        let visit_port = get_free_port().await;
+        let target_port = get_free_port().await;
+
+        let allow_ip = Arc::new(AtomicBool::new(false));
+        let ip_validator = Arc::new(TestIpValidator { allow: allow_ip.clone() });
+
+        let router = Arc::new(CrankerRouterBuilder::new()
+            .with_via_name("testvia".to_string())
+            .with_registration_ip_validator(ip_validator)
+            .build());
+
+        let reg_listener = TcpListener::bind(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), reg_port)).await.unwrap();
+        let visit_listener = TcpListener::bind(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), visit_port)).await.unwrap();
+
+        let reg_router = router.registration_axum_router();
+        let visit_router = router.visit_portal_axum_router();
+
+        tokio::spawn(async move {
+            let _ = axum::serve(reg_listener, reg_router).await;
+        });
+        tokio::spawn(async move {
+            let _ = axum::serve(visit_listener, visit_router).await;
+        });
+
+        let target_listener = TcpListener::bind(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), target_port)).await.unwrap();
+        tokio::spawn(async move {
+            let app = Router::new().route("/{*any}", get(|| async {
+                let stream = tokio_stream::iter(vec![Ok::<_, std::convert::Infallible>(bytes::Bytes::from("target response"))]);
+                axum::body::Body::from_stream(stream)
+            }));
+            let _ = axum::serve(target_listener, app).await;
+        });
+
+        let log_file = std::fs::File::create("target/test-connector-ip.log").unwrap();
+        let child = Command::new("java")
+            .arg("-cp")
+            .arg("../cranker-connector/target/cranker-connector-1.3-SNAPSHOT-uber.jar")
+            .arg("com.hsbc.cranker.connector.CommandLineConnector")
+            .arg("--target")
+            .arg(format!("http://127.0.0.1:{}", target_port))
+            .arg("--registration-uris")
+            .arg(format!("ws://127.0.0.1:{}", reg_port))
+            .arg("--route")
+            .arg("test-ip-route")
+            .stdout(log_file.try_clone().unwrap())
+            .stderr(log_file)
+            .spawn()
+            .unwrap();
+        let _guard = ChildGuard(child);
+
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        let client = reqwest::Client::new();
+        let resp = client.get(format!("http://127.0.0.1:{}/test-ip-route/", visit_port))
+            .send()
+            .await;
+        assert!(resp.is_err() || resp.unwrap().status().as_u16() >= 404);
+
+        allow_ip.store(true, Ordering::SeqCst);
+
+        let mut registered = false;
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if let Some(svc) = router.collect_info().services.iter().find(|s| s.route == "test-ip-route") {
+                if !svc.connectors.is_empty() {
+                    registered = true;
+                    break;
+                }
+            }
+        }
+        assert!(registered, "Connector failed to register after allowing IP!");
+
+        let resp2 = client.get(format!("http://127.0.0.1:{}/test-ip-route/", visit_port))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        assert_eq!(resp2.text().await.unwrap(), "target response");
+
+        router.stop();
+    }
+
+    #[tokio::test]
+    async fn test_proxy_listener_and_header_proxying() {
+        let reg_port = get_free_port().await;
+        let visit_port = get_free_port().await;
+        let target_port = get_free_port().await;
+
+        let completed_called = Arc::new(AtomicBool::new(false));
+        let failure_called = Arc::new(AtomicBool::new(false));
+        let listener = Arc::new(TestProxyListener {
+            completed_called: completed_called.clone(),
+            failure_called: failure_called.clone(),
+        });
+
+        let router = Arc::new(CrankerRouterBuilder::new()
+            .with_via_name("testvia".to_string())
+            .with_proxy_listeners(vec![listener])
+            .with_connector_max_wait_time_millis(100)
+            .build());
+
+        let reg_listener = TcpListener::bind(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), reg_port)).await.unwrap();
+        let visit_listener = TcpListener::bind(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), visit_port)).await.unwrap();
+
+        let reg_router = router.registration_axum_router();
+        let visit_router = router.visit_portal_axum_router();
+
+        tokio::spawn(async move {
+            let _ = axum::serve(reg_listener, reg_router).await;
+        });
+        tokio::spawn(async move {
+            let _ = axum::serve(visit_listener, visit_router).await;
+        });
+
+        let target_listener = TcpListener::bind(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), target_port)).await.unwrap();
+        tokio::spawn(async move {
+            let app = Router::new().route("/{*any}", get(|headers: HeaderMap| async move {
+                let test_header = headers.get("x-test-request")
+                    .map(|v| v.to_str().unwrap().to_string())
+                    .unwrap_or("none".to_string());
+                let stream = tokio_stream::iter(vec![Ok::<_, std::convert::Infallible>(bytes::Bytes::from(test_header))]);
+                axum::body::Body::from_stream(stream)
+            }));
+            let _ = axum::serve(target_listener, app).await;
+        });
+
+        let log_file = std::fs::File::create("target/test-connector-proxy.log").unwrap();
+        let child = Command::new("java")
+            .arg("-cp")
+            .arg("../cranker-connector/target/cranker-connector-1.3-SNAPSHOT-uber.jar")
+            .arg("com.hsbc.cranker.connector.CommandLineConnector")
+            .arg("--target")
+            .arg(format!("http://127.0.0.1:{}", target_port))
+            .arg("--registration-uris")
+            .arg(format!("ws://127.0.0.1:{}", reg_port))
+            .arg("--route")
+            .arg("test-proxy-route")
+            .stdout(log_file.try_clone().unwrap())
+            .stderr(log_file)
+            .spawn()
+            .unwrap();
+        let guard = ChildGuard(child);
+
+        let mut registered = false;
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if let Some(svc) = router.collect_info().services.iter().find(|s| s.route == "test-proxy-route") {
+                if !svc.connectors.is_empty() {
+                    registered = true;
+                    break;
+                }
+            }
+        }
+        assert!(registered, "Connector failed to register!");
+
+        let client = reqwest::Client::new();
+        let resp2 = client.get(format!("http://127.0.0.1:{}/test-proxy-route/", visit_port))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        assert_eq!(resp2.text().await.unwrap(), "yes");
+
+        let mut completed = false;
+        for _ in 0..20 {
+            if completed_called.load(Ordering::SeqCst) {
+                completed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let log_content = std::fs::read_to_string("target/test-connector-proxy.log").unwrap_or_default();
+        println!("Java Connector Log:\n{}", log_content);
+        assert!(completed, "on_complete was not called!");
+
+        // Now kill the connector to test on_failure_to_acquire_proxy_socket
+        std::mem::drop(guard);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let _resp_fail = client.get(format!("http://127.0.0.1:{}/test-proxy-route/", visit_port))
+            .send()
+            .await;
+
+        assert!(failure_called.load(Ordering::SeqCst), "on_failure_to_acquire_proxy_socket was not called!");
+
+        router.stop();
+    }
 
     #[test]
     #[should_panic]
