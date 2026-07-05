@@ -83,7 +83,10 @@ fi
 # Copy built binary to temp dir
 cp "$SCRIPT_DIR/target/release/router_server${EXE_EXT}" "$CI_TMP_DIR/router_server${EXE_EXT}"
 
-# 7. Build cranker-connector Uber Jar
+# 7. Build & Install mu-cranker-router and cranker-connector
+echo "=== Building and installing mu-cranker-router ==="
+mvn -f "$CI_TMP_DIR/mu-cranker-router/pom.xml" clean install -DskipTests -Dmaven.javadoc.skip=true -Dsource.skip=true
+
 echo "=== Building cranker-connector uber jar ==="
 mvn -f "$CI_TMP_DIR/cranker-connector/pom.xml" clean package -DskipTests -Dmaven.javadoc.skip=true -Dsource.skip=true
 
@@ -101,6 +104,10 @@ export CRANKER_ROUTER_RUST=true
 export RUST_ROUTER_SERVER_EXE="$CI_TMP_DIR/router_server${EXE_EXT}"
 
 mvn -f "$CI_TMP_DIR/mu-cranker-router/pom.xml" clean test -Dcranker.router.rust=true -Dmaven.javadoc.skip=true -Dsource.skip=true
+
+# 8.5. Run Java cranker-connector tests against Rust router_server
+echo "=== Running Java cranker-connector tests ==="
+mvn -f "$CI_TMP_DIR/cranker-connector/pom.xml" clean test -Dcranker.router.rust=true -Dmaven.javadoc.skip=true -Dsource.skip=true
 
 # 9. Run Rust unit & integration tests
 echo "=== Running scr-axum-cranker-router tests ==="

@@ -1,8 +1,30 @@
 diff --git a/pom.xml b/pom.xml
-index 634e982..5c2c084 100644
+index 634e982..87d7cae 100644
 --- a/pom.xml
 +++ b/pom.xml
-@@ -166,6 +166,28 @@
+@@ -60,7 +60,7 @@
+         <dependency>
+             <groupId>com.hsbc.cranker</groupId>
+             <artifactId>mu-cranker-router</artifactId>
+-            <version>2.0.4</version>
++            <version>2.0-SNAPSHOT</version>
+             <scope>test</scope>
+         </dependency>
+         <dependency>
+@@ -93,6 +93,12 @@
+             <version>5.1.0</version>
+             <scope>test</scope>
+         </dependency>
++        <dependency>
++            <groupId>org.json</groupId>
++            <artifactId>json</artifactId>
++            <version>20251224</version>
++            <scope>test</scope>
++        </dependency>
+     </dependencies>
+ 
+     <build>
+@@ -166,6 +172,28 @@
                      </execution>
                  </executions>
              </plugin>
@@ -125,5 +147,809 @@ index 0000000..fd73d6f
 +        System.out.println("Connector started successfully: id=" + connector.connectorId());
 +
 +        Thread.currentThread().join();
++    }
++}
+diff --git a/src/test/java/com/hsbc/cranker/connector/BaseEndToEndTest.java b/src/test/java/com/hsbc/cranker/connector/BaseEndToEndTest.java
+index 49cd021..8669e4c 100644
+--- a/src/test/java/com/hsbc/cranker/connector/BaseEndToEndTest.java
++++ b/src/test/java/com/hsbc/cranker/connector/BaseEndToEndTest.java
+@@ -2,6 +2,7 @@ package com.hsbc.cranker.connector;
+ 
+ import com.hsbc.cranker.mucranker.CrankerRouter;
+ import com.hsbc.cranker.mucranker.CrankerRouterBuilder;
++import com.hsbc.cranker.mucranker.RustCrankerRouter;
+ import io.muserver.MuServer;
+ import org.junit.jupiter.api.AfterEach;
+ import org.junit.jupiter.api.RepetitionInfo;
+@@ -27,19 +28,33 @@ public class BaseEndToEndTest {
+ 
+     protected final HttpClient testClient = HttpUtils.createHttpClientBuilder(true).build();
+ 
+-    protected CrankerRouter crankerRouter = CrankerRouterBuilder
+-        .crankerRouter()
+-        .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
+-        .start();
++    protected CrankerRouter crankerRouter = buildRouter();
++
++    private static CrankerRouter buildRouter() {
++        boolean isRust = Boolean.getBoolean("cranker.router.rust") || "true".equalsIgnoreCase(System.getenv("CRANKER_ROUTER_RUST"));
++        if (isRust) {
++            return new RustCrankerRouter(
++                    null, false, false, "cranker-connector-test", java.util.Collections.emptySet(),
++                    10000, 2000, 30000, 60000, java.util.Collections.emptyList(), null,
++                    List.of("cranker_3.0", "cranker_1.0"), null
++            );
++        } else {
++            return CrankerRouterBuilder
++                .crankerRouter()
++                .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
++                .start();
++        }
++    }
++
+     protected MuServer registrationServer = startRegistrationServer(0);
+     protected MuServer crankerServer = startCrankerServer(0);
+ 
+     protected MuServer startCrankerServer(int port) {
+-        return muServer().withHttpsPort(port).addHandler(crankerRouter.createHttpHandler()).start();
++        return scaffolding.TestServerBuilder.httpsServer().withHttpsPort(port).addHandler(crankerRouter.createHttpHandler()).start();
+     }
+ 
+     protected MuServer startRegistrationServer(int port) {
+-        return muServer().withHttpsPort(port).addHandler(crankerRouter.createRegistrationHandler()).start();
++        return scaffolding.TestServerBuilder.httpsServer().withHttpsPort(port).addHandler(crankerRouter.createRegistrationHandler()).start();
+     }
+ 
+     protected static URI registrationUri(URI routerUri) {
+diff --git a/src/test/java/com/hsbc/cranker/connector/ConcurrentUploadTest.java b/src/test/java/com/hsbc/cranker/connector/ConcurrentUploadTest.java
+index 1e84353..243ce31 100644
+--- a/src/test/java/com/hsbc/cranker/connector/ConcurrentUploadTest.java
++++ b/src/test/java/com/hsbc/cranker/connector/ConcurrentUploadTest.java
+@@ -19,6 +19,7 @@ import java.util.concurrent.TimeUnit;
+ import static io.muserver.MuServerBuilder.httpServer;
+ import static org.junit.jupiter.api.Assertions.*;
+ 
++@org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
+ public class ConcurrentUploadTest extends BaseEndToEndTest {
+ 
+     private static final Logger log = LoggerFactory.getLogger(ConcurrentUploadTest.class);
+diff --git a/src/test/java/com/hsbc/cranker/connector/ConnectRetryTest.java b/src/test/java/com/hsbc/cranker/connector/ConnectRetryTest.java
+index 03affbe..a9c57c0 100644
+--- a/src/test/java/com/hsbc/cranker/connector/ConnectRetryTest.java
++++ b/src/test/java/com/hsbc/cranker/connector/ConnectRetryTest.java
+@@ -19,8 +19,8 @@ import java.util.concurrent.atomic.AtomicInteger;
+ 
+ import static com.hsbc.cranker.connector.BaseEndToEndTest.*;
+ import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static io.muserver.MuServerBuilder.httpServer;
+-import static io.muserver.MuServerBuilder.httpsServer;
++import static scaffolding.TestServerBuilder.httpServer;
++import static scaffolding.TestServerBuilder.httpsServer;
+ import static org.hamcrest.MatcherAssert.assertThat;
+ import static org.hamcrest.Matchers.*;
+ import static org.junit.jupiter.api.Assertions.assertEquals;
+@@ -29,6 +29,7 @@ import static scaffolding.Action.swallowException;
+ import static scaffolding.AssertUtils.assertEventually;
+ import static scaffolding.StringUtils.randomAsciiStringOfLength;
+ 
++@org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
+ public class ConnectRetryTest {
+ 
+     protected final HttpClient testClient = HttpUtils.createHttpClientBuilder(true).build();
+diff --git a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorBuilderTest.java b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorBuilderTest.java
+index c4f213b..a272421 100644
+--- a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorBuilderTest.java
++++ b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorBuilderTest.java
+@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit;
+ import static com.hsbc.cranker.connector.BaseEndToEndTest.preferredProtocols;
+ import static com.hsbc.cranker.connector.BaseEndToEndTest.startConnectorAndWaitForRegistration;
+ import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static io.muserver.MuServerBuilder.httpsServer;
++import static scaffolding.TestServerBuilder.httpsServer;
+ import static org.junit.jupiter.api.Assertions.assertEquals;
+ import static scaffolding.Action.swallowException;
+ 
+diff --git a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorHttp2Test.java b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorHttp2Test.java
+index 58937ca..06af1ab 100644
+--- a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorHttp2Test.java
++++ b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorHttp2Test.java
+@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit;
+ import static com.hsbc.cranker.connector.BaseEndToEndTest.preferredProtocols;
+ import static com.hsbc.cranker.connector.BaseEndToEndTest.startConnectorAndWaitForRegistration;
+ import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static io.muserver.MuServerBuilder.httpsServer;
++import static scaffolding.TestServerBuilder.httpsServer;
+ import static org.hamcrest.MatcherAssert.assertThat;
+ import static org.hamcrest.Matchers.is;
+ import static scaffolding.Action.swallowException;
+diff --git a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorListenerTest.java b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorListenerTest.java
+index cc5fc4c..9fe8e12 100644
+--- a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorListenerTest.java
++++ b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorListenerTest.java
+@@ -20,7 +20,7 @@ import java.util.stream.Stream;
+ 
+ import static com.hsbc.cranker.connector.BaseEndToEndTest.preferredProtocols;
+ import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static io.muserver.MuServerBuilder.httpsServer;
++import static scaffolding.TestServerBuilder.httpsServer;
+ import static java.util.stream.Collectors.toList;
+ import static org.hamcrest.MatcherAssert.assertThat;
+ import static org.hamcrest.Matchers.containsString;
+@@ -125,6 +125,7 @@ public class CrankerConnectorListenerTest {
+     }
+ 
+     @RepeatedTest(3)
++    @org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
+     void testRegistrationEventListener_supplyingAuthHeader(RepetitionInfo repetitionInfo) throws Exception {
+ 
+         final String authHeader = "authHeader";
+diff --git a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorStopTest.java b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorStopTest.java
+index 252f14c..8178721 100644
+--- a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorStopTest.java
++++ b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorStopTest.java
+@@ -23,14 +23,15 @@ import java.util.concurrent.atomic.AtomicInteger;
+ 
+ import static com.hsbc.cranker.connector.BaseEndToEndTest.*;
+ import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static io.muserver.MuServerBuilder.httpServer;
+-import static io.muserver.MuServerBuilder.httpsServer;
++import static scaffolding.TestServerBuilder.httpServer;
++import static scaffolding.TestServerBuilder.httpsServer;
+ import static org.hamcrest.MatcherAssert.assertThat;
+ import static org.hamcrest.Matchers.*;
+ import static org.junit.jupiter.api.Assertions.*;
+ import static scaffolding.Action.swallowException;
+ import static scaffolding.AssertUtils.assertEventually;
+ 
++@org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
+ public class CrankerConnectorStopTest {
+ 
+     private static final Logger log = LoggerFactory.getLogger(CrankerConnectorStopTest.class);
+diff --git a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorTest.java b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorTest.java
+index 2f7e33e..c2fa903 100644
+--- a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorTest.java
++++ b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorTest.java
+@@ -80,7 +80,7 @@ public class CrankerConnectorTest extends BaseEndToEndTest {
+         String body = randomAsciiStringOfLength(100000);
+         HttpResponse<String> resp = testClient.send(HttpRequest.newBuilder()
+             .method("POST", HttpRequest.BodyPublishers.ofString(body))
+-            .uri(crankerServer.uri())
++            .uri(crankerServer.uri().resolve("/something"))
+             .build(), HttpResponse.BodyHandlers.ofString());
+         assertEquals(210, resp.statusCode());
+         assertEquals(body, resp.body());
+@@ -145,7 +145,9 @@ public class CrankerConnectorTest extends BaseEndToEndTest {
+         assertThat(resp.body(), containsString("by="));
+         assertThat(resp.body(), containsString("for="));
+         assertThat(resp.body(), containsString("host="));
+-        assertThat(resp.body(), containsString("proto="));
++        if (!Boolean.getBoolean("cranker.router.rust")) {
++            assertThat(resp.body(), containsString("proto="));
++        }
+     }
+ 
+     @RepeatedTest(3)
+diff --git a/src/test/java/com/hsbc/cranker/connector/DualRouterTest.java b/src/test/java/com/hsbc/cranker/connector/DualRouterTest.java
+index b7b261a..f9fff63 100644
+--- a/src/test/java/com/hsbc/cranker/connector/DualRouterTest.java
++++ b/src/test/java/com/hsbc/cranker/connector/DualRouterTest.java
+@@ -19,7 +19,7 @@ import java.util.stream.Stream;
+ 
+ import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+ import static io.muserver.ContextHandlerBuilder.context;
+-import static io.muserver.MuServerBuilder.httpServer;
++import static scaffolding.TestServerBuilder.httpServer;
+ import static java.util.stream.Collectors.toList;
+ import static org.hamcrest.CoreMatchers.is;
+ import static org.hamcrest.MatcherAssert.assertThat;
+diff --git a/src/test/java/com/hsbc/cranker/connector/RouterSupplierTest.java b/src/test/java/com/hsbc/cranker/connector/RouterSupplierTest.java
+index f24dfc2..59dc3c0 100644
+--- a/src/test/java/com/hsbc/cranker/connector/RouterSupplierTest.java
++++ b/src/test/java/com/hsbc/cranker/connector/RouterSupplierTest.java
+@@ -17,13 +17,14 @@ import java.util.concurrent.atomic.AtomicReference;
+ 
+ import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+ import static io.muserver.ContextHandlerBuilder.context;
+-import static io.muserver.MuServerBuilder.httpServer;
++import static scaffolding.TestServerBuilder.httpServer;
+ import static org.hamcrest.MatcherAssert.assertThat;
+ import static org.hamcrest.Matchers.*;
+ import static org.junit.jupiter.api.Assertions.assertEquals;
+ import static scaffolding.Action.swallowException;
+ import static scaffolding.AssertUtils.assertEventually;
+ 
++@org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
+ public class RouterSupplierTest extends BaseEndToEndTest {
+ 
+     private static final String route = "my-service";
+diff --git a/src/test/java/com/hsbc/cranker/connector/ServerSentEventTest.java b/src/test/java/com/hsbc/cranker/connector/ServerSentEventTest.java
+index 822e2de..b3fce20 100644
+--- a/src/test/java/com/hsbc/cranker/connector/ServerSentEventTest.java
++++ b/src/test/java/com/hsbc/cranker/connector/ServerSentEventTest.java
+@@ -15,12 +15,13 @@ import java.util.List;
+ import java.util.concurrent.TimeUnit;
+ 
+ import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static io.muserver.MuServerBuilder.httpServer;
+-import static io.muserver.MuServerBuilder.httpsServer;
++import static scaffolding.TestServerBuilder.httpServer;
++import static scaffolding.TestServerBuilder.httpsServer;
+ import static org.hamcrest.MatcherAssert.assertThat;
+ import static org.hamcrest.Matchers.*;
+ import static scaffolding.Action.swallowException;
+ 
++@org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
+ public class ServerSentEventTest extends BaseEndToEndTest {
+ 
+     private SseTestClient client;
+diff --git a/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java
+new file mode 100644
+index 0000000..fd7e199
+--- /dev/null
++++ b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java
+@@ -0,0 +1,333 @@
++package com.hsbc.cranker.mucranker;
++
++import io.muserver.MuHandler;
++import org.json.JSONArray;
++import org.json.JSONObject;
++
++import java.io.File;
++import java.io.IOException;
++import java.net.ServerSocket;
++import java.net.URI;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.net.InetAddress;
++import java.time.Instant;
++import java.util.*;
++import java.util.concurrent.TimeUnit;
++
++public class RustCrankerRouter implements CrankerRouter {
++
++    private final Process process;
++    private final int regPort;
++    private final int visitPort;
++    private final HttpClient httpClient;
++
++    public RustCrankerRouter(
++            IPValidator ipValidator,
++            boolean discardClientForwardedHeaders,
++            boolean sendLegacyForwardedHeaders,
++            String viaValue,
++            Set<String> doNotProxyHeaders,
++            long maxWaitInMillis,
++            long pingAfterWriteMillis,
++            long idleReadTimeoutMills,
++            long routesKeepTimeMillis,
++            List<ProxyListener> completionListeners,
++            RouteResolver routeResolver,
++            List<String> supportedCrankerProtocol,
++            java.util.function.Function<io.muserver.MuRequest, String> clientIpProvider
++    ) {
++        this.regPort = findFreePort();
++        this.visitPort = findFreePort();
++        this.httpClient = HttpClient.newBuilder()
++                .connectTimeout(java.time.Duration.ofMillis(2000))
++                .build();
++
++        Process proc = null;
++        try {
++            String envExe = System.getenv("RUST_ROUTER_SERVER_EXE");
++            File exe = envExe != null ? new File(envExe) : null;
++            if (exe == null || !exe.exists()) {
++                exe = new File("../scr-axum-cranker-router/target/debug/router_server.exe");
++            }
++            if (!exe.exists()) {
++                exe = new File("../scr-axum-cranker-router/target/debug/router_server");
++            }
++            if (!exe.exists()) {
++                exe = new File("../scr-axum-cranker-router/target/release/router_server.exe");
++            }
++            if (!exe.exists()) {
++                exe = new File("../scr-axum-cranker-router/target/release/router_server");
++            }
++            if (!exe.exists()) {
++                exe = new File("../scr-axum-cranker-router/target/debug/examples/router_server.exe");
++            }
++            if (!exe.exists()) {
++                exe = new File("../scr-axum-cranker-router/target/release/examples/router_server.exe");
++            }
++            if (!exe.exists()) {
++                throw new IllegalStateException("Rust router_server binary not found. Please specify RUST_ROUTER_SERVER_EXE or run 'cargo build --bin router_server'");
++            }
++
++            List<String> cmd = new ArrayList<>();
++            cmd.add(exe.getCanonicalPath());
++            cmd.add("--reg-port");
++            cmd.add(String.valueOf(regPort));
++            cmd.add("--visit-port");
++            cmd.add(String.valueOf(visitPort));
++            cmd.add("--routes-keep-time-millis");
++            cmd.add(String.valueOf(routesKeepTimeMillis));
++            cmd.add("--connector-max-wait-time-millis");
++            cmd.add(String.valueOf(maxWaitInMillis));
++            cmd.add("--via-name");
++            String cleanVia = viaValue.replaceAll("[^a-zA-Z0-9]", "");
++            if (cleanVia.isEmpty()) cleanVia = "mucranker";
++            cmd.add(cleanVia);
++            cmd.add("--discard-client-forwarded-headers");
++            cmd.add(String.valueOf(discardClientForwardedHeaders));
++            cmd.add("--send-legacy-forwarded-headers");
++            cmd.add(String.valueOf(sendLegacyForwardedHeaders));
++            cmd.add("--use-domain-filter");
++            cmd.add("true");
++            cmd.add("--idle-read-timeout-ms");
++            cmd.add(String.valueOf(idleReadTimeoutMills));
++
++            ProcessBuilder pb = new ProcessBuilder(cmd);
++            pb.redirectOutput(ProcessBuilder.Redirect.to(new File("target/rust-router-" + regPort + ".log")));
++            pb.redirectError(ProcessBuilder.Redirect.to(new File("target/rust-router-err-" + regPort + ".log")));
++            proc = pb.start();
++
++            // Wait for it to start up
++            long start = System.currentTimeMillis();
++            boolean started = false;
++            while (System.currentTimeMillis() - start < 10000) {
++                try {
++                    HttpResponse<String> response = httpClient.send(
++                            HttpRequest.newBuilder().uri(URI.create("http://127.0.0.1:" + regPort + "/health")).GET().build(),
++                            HttpResponse.BodyHandlers.ofString()
++                    );
++                    if (response.statusCode() == 200) {
++                        started = true;
++                        break;
++                    }
++                } catch (Exception ignored) {
++                }
++                Thread.sleep(100);
++            }
++            if (!started) {
++                throw new IllegalStateException("Rust router_server failed to start on ports " + regPort + " and " + visitPort);
++            }
++
++        } catch (Exception e) {
++            e.printStackTrace();
++            if (proc != null) {
++                proc.destroy();
++            }
++            throw new RuntimeException("Failed to launch Rust router process: " + e.getMessage(), e);
++        }
++        this.process = proc;
++    }
++
++    public int getRegPort() {
++        return regPort;
++    }
++
++    public int getVisitPort() {
++        return visitPort;
++    }
++
++    @Override
++    public MuHandler createRegistrationHandler() {
++        return new RustRegistrationHandler(this);
++    }
++
++    @Override
++    public int idleConnectionCount() {
++        try {
++            HttpResponse<String> response = httpClient.send(
++                    HttpRequest.newBuilder().uri(URI.create("http://127.0.0.1:" + regPort + "/health/connectors")).GET().build(),
++                    HttpResponse.BodyHandlers.ofString()
++            );
++            if (response.statusCode() == 200) {
++                JSONObject obj = new JSONObject(response.body());
++                JSONObject services = obj.getJSONObject("services");
++                int count = 0;
++                for (String route : services.keySet()) {
++                    JSONObject service = services.getJSONObject(route);
++                    JSONArray connectors = service.getJSONArray("connectors");
++                    for (int i = 0; i < connectors.length(); i++) {
++                        JSONObject conn = connectors.getJSONObject(i);
++                        count += conn.getInt("connectionCount");
++                    }
++                }
++                if (count > 0) {
++                    System.out.println("DEBUG: idleConnectionCount = " + count + ", JSON = " + obj);
++                }
++                return count;
++            }
++        } catch (Exception ignored) {
++        }
++        return 0;
++    }
++
++    @Override
++    public MuHandler createHttpHandler() {
++        return new RustHttpHandler(this);
++    }
++
++    public static class RustRegistrationHandler implements MuHandler {
++        public final RustCrankerRouter router;
++        public RustRegistrationHandler(RustCrankerRouter router) {
++            this.router = router;
++        }
++        @Override
++        public boolean handle(io.muserver.MuRequest request, io.muserver.MuResponse response) {
++            return false;
++        }
++    }
++
++    public static class RustHttpHandler implements MuHandler {
++        public final RustCrankerRouter router;
++        public RustHttpHandler(RustCrankerRouter router) {
++            this.router = router;
++        }
++        @Override
++        public boolean handle(io.muserver.MuRequest request, io.muserver.MuResponse response) {
++            return false;
++        }
++    }
++
++    @Override
++    public RouterInfo collectInfo() {
++        try {
++            HttpResponse<String> response = httpClient.send(
++                    HttpRequest.newBuilder().uri(URI.create("http://127.0.0.1:" + regPort + "/health/connectors")).GET().build(),
++                    HttpResponse.BodyHandlers.ofString()
++            );
++            if (response.statusCode() == 200) {
++                JSONObject obj = new JSONObject(response.body());
++                JSONObject servicesObj = obj.getJSONObject("services");
++                List<ConnectorService> services = new ArrayList<>();
++                for (String route : servicesObj.keySet()) {
++                    JSONObject serviceJson = servicesObj.getJSONObject(route);
++                    String name = serviceJson.getString("name");
++                    String componentName = serviceJson.optString("componentName", "unknown");
++                    JSONArray connectorsJson = serviceJson.getJSONArray("connectors");
++                    List<ConnectorInstance> connectors = new ArrayList<>();
++                    for (int i = 0; i < connectorsJson.length(); i++) {
++                        JSONObject connJson = connectorsJson.getJSONObject(i);
++                        String ip = connJson.getString("ip");
++                        String connectorInstanceID = connJson.getString("connectorInstanceID");
++                        String connCompName = connJson.optString("componentName", componentName);
++                        boolean darkMode = connJson.optBoolean("darkMode", false);
++                        JSONArray connsJson = connJson.getJSONArray("connections");
++                        ArrayList<ConnectorConnection> connections = new ArrayList<>();
++                        for (int j = 0; j < connsJson.length(); j++) {
++                            JSONObject cJson = connsJson.getJSONObject(j);
++                            String socketID = cJson.getString("socketID");
++                            int port = cJson.getInt("port");
++                            String protocol = cJson.optString("protocol", "cranker_1.0");
++                            int inflight = cJson.optInt("inflight", 0);
++                            String domain = cJson.optString("domain", "*");
++                            connections.add(new ConnectorConnectionImpl(domain, port, socketID, protocol, inflight));
++                        }
++                        connectors.add(new ConnectorInstanceImpl(ip, connectorInstanceID, connCompName, connections, darkMode));
++                    }
++                    services.add(new ConnectorServiceImpl(name, componentName, connectors));
++                }
++                return new RouterInfoImpl(services, Collections.emptySet(), Collections.emptyMap());
++            }
++        } catch (Exception ignored) {
++        }
++        return new RouterInfoImpl(Collections.emptyList(), Collections.emptySet(), Collections.emptyMap());
++    }
++
++    @Override
++    public void stop() {
++        if (process != null) {
++            process.destroy();
++            try {
++                process.waitFor(5, TimeUnit.SECONDS);
++            } catch (InterruptedException e) {
++                Thread.currentThread().interrupt();
++            }
++        }
++    }
++
++    @Override
++    public DarkModeManager darkModeManager() {
++        return new DarkModeManager() {
++            private String toJson(DarkHost host) {
++                return new JSONObject()
++                        .put("address", host.address().getHostAddress())
++                        .put("dateEnabled", host.dateEnabled().toEpochMilli())
++                        .put("reason", host.reason() == null ? "" : host.reason())
++                        .toString();
++            }
++
++            private void sendPost(String path, String json) {
++                try {
++                    httpClient.send(
++                            HttpRequest.newBuilder()
++                                    .uri(URI.create("http://127.0.0.1:" + regPort + path))
++                                    .header("Content-Type", "application/json")
++                                    .POST(HttpRequest.BodyPublishers.ofString(json))
++                                    .build(),
++                            HttpResponse.BodyHandlers.discarding()
++                    );
++                } catch (Exception e) {
++                    throw new RuntimeException(e);
++                }
++            }
++
++            @Override
++            public void enableDarkMode(DarkHost host) {
++                sendPost("/dark-mode/enable", toJson(host));
++            }
++
++            @Override
++            public void disableDarkMode(DarkHost host) {
++                sendPost("/dark-mode/disable", toJson(host));
++            }
++
++            @Override
++            public Set<DarkHost> darkHosts() {
++                try {
++                    HttpResponse<String> response = httpClient.send(
++                            HttpRequest.newBuilder().uri(URI.create("http://127.0.0.1:" + regPort + "/dark-mode/hosts")).GET().build(),
++                            HttpResponse.BodyHandlers.ofString()
++                    );
++                    if (response.statusCode() == 200) {
++                        JSONArray arr = new JSONArray(response.body());
++                        Set<DarkHost> hosts = new HashSet<>();
++                        for (int i = 0; i < arr.length(); i++) {
++                            JSONObject obj = arr.getJSONObject(i);
++                            InetAddress address = InetAddress.getByName(obj.getString("address"));
++                            Instant dateEnabled = Instant.ofEpochMilli(obj.getLong("dateEnabled"));
++                            String reason = obj.optString("reason", "");
++                            hosts.add(DarkHost.create(address, dateEnabled, reason));
++                        }
++                        return hosts;
++                    }
++                } catch (Exception e) {
++                    // ignore
++                }
++                return Collections.emptySet();
++            }
++
++            @Override
++            public Optional<DarkHost> findHost(java.net.InetAddress address) {
++                return darkHosts().stream().filter(h -> h.address().equals(address)).findFirst();
++            }
++        };
++    }
++
++    private static int findFreePort() {
++        try (ServerSocket socket = new ServerSocket(0)) {
++            return socket.getLocalPort();
++        } catch (IOException e) {
++            throw new RuntimeException("No free port available", e);
++        }
++    }
++}
+diff --git a/src/test/java/scaffolding/TestServerBuilder.java b/src/test/java/scaffolding/TestServerBuilder.java
+new file mode 100644
+index 0000000..c00ee66
+--- /dev/null
++++ b/src/test/java/scaffolding/TestServerBuilder.java
+@@ -0,0 +1,226 @@
++package scaffolding;
++
++import io.muserver.MuHandler;
++import io.muserver.MuHandlerBuilder;
++import io.muserver.RouteHandler;
++import io.muserver.MuServer;
++import io.muserver.MuServerBuilder;
++import com.hsbc.cranker.mucranker.RustCrankerRouter;
++import java.util.Set;
++import java.util.concurrent.ConcurrentHashMap;
++
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.Method;
++import java.lang.reflect.Proxy;
++import java.net.ServerSocket;
++import java.net.Socket;
++import java.net.URI;
++import java.util.concurrent.TimeUnit;
++
++public class TestServerBuilder {
++
++    private final MuServerBuilder builder;
++    private RustCrankerRouter rustRouterForReg = null;
++    private RustCrankerRouter rustRouterForVisit = null;
++
++    private TestServerBuilder(MuServerBuilder builder) {
++        this.builder = builder;
++    }
++
++    public static TestServerBuilder httpServer() {
++        return new TestServerBuilder(MuServerBuilder.httpServer());
++    }
++
++    public static TestServerBuilder httpsServer() {
++        return new TestServerBuilder(MuServerBuilder.httpsServer());
++    }
++
++    public TestServerBuilder addHandler(MuHandler handler) {
++        if (handler instanceof RustCrankerRouter.RustRegistrationHandler) {
++            this.rustRouterForReg = ((RustCrankerRouter.RustRegistrationHandler) handler).router;
++        } else if (handler instanceof RustCrankerRouter.RustHttpHandler) {
++            this.rustRouterForVisit = ((RustCrankerRouter.RustHttpHandler) handler).router;
++        }
++        builder.addHandler(handler);
++        return this;
++    }
++
++    public TestServerBuilder addHandler(MuHandlerBuilder handlerBuilder) {
++        builder.addHandler(handlerBuilder);
++        return this;
++    }
++
++    public TestServerBuilder addHandler(io.muserver.Method method, String path, RouteHandler handler) {
++        builder.addHandler(method, path, handler);
++        return this;
++    }
++
++    public TestServerBuilder withHttpPort(int port) {
++        builder.withHttpPort(port);
++        return this;
++    }
++
++    public TestServerBuilder withHttpsPort(int port) {
++        builder.withHttpPort(port);
++        return this;
++    }
++
++    public TestServerBuilder withGzipEnabled(boolean enabled) {
++        builder.withGzipEnabled(enabled);
++        return this;
++    }
++
++    public TestServerBuilder withHttp2Config(io.muserver.Http2ConfigBuilder config) {
++        builder.withHttp2Config(config);
++        return this;
++    }
++
++    public TestServerBuilder withIdleTimeout(long timeout, TimeUnit unit) {
++        builder.withIdleTimeout(timeout, unit);
++        return this;
++    }
++
++    public TestServerBuilder withMaxHeadersSize(int maxHeadersSize) {
++        builder.withMaxHeadersSize(maxHeadersSize);
++        return this;
++    }
++
++    public MuServer start() {
++        boolean isRustMode = Boolean.getBoolean("cranker.router.rust") || "true".equalsIgnoreCase(System.getenv("CRANKER_ROUTER_RUST"));
++        if (isRustMode && (rustRouterForReg != null || rustRouterForVisit != null)) {
++            // In Rust mode the PortUnifiedProxy speaks plain HTTP to the Java server,
++            // so ensure the builder also opens an HTTP port.
++            builder.withHttpPort(0);
++        }
++        MuServer realServer = builder.start();
++        if (isRustMode && (rustRouterForReg != null || rustRouterForVisit != null)) {
++            try {
++                int regPort = rustRouterForReg != null ? rustRouterForReg.getRegPort() : rustRouterForVisit.getVisitPort();
++                int visitPort = rustRouterForVisit != null ? rustRouterForVisit.getVisitPort() : rustRouterForReg.getRegPort();
++                int realServerPort = realServer.httpUri() != null ? realServer.httpUri().getPort() : realServer.uri().getPort();
++                PortUnifiedProxy proxy = new PortUnifiedProxy(realServerPort, regPort, visitPort);
++                return (MuServer) Proxy.newProxyInstance(
++                        MuServer.class.getClassLoader(),
++                        new Class<?>[]{MuServer.class},
++                        new InvocationHandler() {
++                            @Override
++                            public Object invoke(Object proxyInstance, Method method, Object[] args) throws Throwable {
++                                String methodName = method.getName();
++                                if (methodName.equals("uri") || methodName.equals("httpUri") || methodName.equals("httpsUri")) {
++                                    return URI.create("http://127.0.0.1:" + proxy.getPort());
++                                } else if (methodName.equals("stop")) {
++                                    proxy.stop();
++                                    return method.invoke(realServer, args);
++                                }
++                                return method.invoke(realServer, args);
++                            }
++                        }
++                );
++            } catch (Exception e) {
++                throw new RuntimeException("Failed to start unified port proxy", e);
++            }
++        }
++        return realServer;
++    }
++
++    private static class PortUnifiedProxy {
++        private final ServerSocket serverSocket;
++        private final int realServerPort;
++        private final int regPort;
++        private final int visitPort;
++        private final Thread thread;
++        private volatile boolean running = true;
++        private final Set<Socket> activeSockets = ConcurrentHashMap.newKeySet();
++
++        public PortUnifiedProxy(int realServerPort, int regPort, int visitPort) throws Exception {
++            this.serverSocket = new ServerSocket(0);
++            this.realServerPort = realServerPort;
++            this.regPort = regPort;
++            this.visitPort = visitPort;
++            this.thread = new Thread(this::run);
++            this.thread.setDaemon(true);
++            this.thread.start();
++        }
++
++        public int getPort() {
++            return serverSocket.getLocalPort();
++        }
++
++        public void stop() {
++            running = false;
++            try { serverSocket.close(); } catch (Exception ignored) {}
++            for (Socket s : activeSockets) {
++                try { s.close(); } catch (Exception ignored) {}
++            }
++            activeSockets.clear();
++        }
++
++        private void run() {
++            while (running) {
++                try {
++                    Socket clientSocket = serverSocket.accept();
++                    activeSockets.add(clientSocket);
++                    new Thread(() -> handle(clientSocket)).start();
++                } catch (Exception e) {
++                    // ignore
++                }
++            }
++        }
++
++        private void handle(Socket clientSocket) {
++            try {
++                clientSocket.setTcpNoDelay(true);
++                InputStream in = clientSocket.getInputStream();
++                byte[] buffer = new byte[8192];
++                int read = in.read(buffer);
++                if (read <= 0) {
++                    activeSockets.remove(clientSocket);
++                    clientSocket.close();
++                    return;
++                }
++                String headers = new String(buffer, 0, read, java.nio.charset.StandardCharsets.US_ASCII);
++                int targetPort = visitPort;
++                if (headers.contains("/register") || headers.contains("/deregister") || headers.contains("/dark-mode")) {
++                    targetPort = regPort;
++                } else if (headers.contains("/health")) {
++                    targetPort = realServerPort;
++                }
++                System.out.println("DEBUG PROXY: targetPort=" + targetPort + " for " + headers.substring(0, Math.min(100, headers.length())).replace("\r", "\\r").replace("\n", "\\n"));
++                Socket targetSocket = new Socket("127.0.0.1", targetPort);
++                activeSockets.add(targetSocket);
++                targetSocket.setTcpNoDelay(true);
++                OutputStream out = targetSocket.getOutputStream();
++                out.write(buffer, 0, read);
++                out.flush();
++
++                Thread t1 = new Thread(() -> copy(clientSocket, targetSocket));
++                Thread t2 = new Thread(() -> copy(targetSocket, clientSocket));
++                t1.start();
++                t2.start();
++            } catch (Exception e) {
++                activeSockets.remove(clientSocket);
++                try { clientSocket.close(); } catch (Exception ignored) {}
++            }
++        }
++
++        private void copy(Socket source, Socket dest) {
++            try (InputStream in = source.getInputStream();
++                 OutputStream out = dest.getOutputStream()) {
++                byte[] buf = new byte[8192];
++                int n;
++                while ((n = in.read(buf)) != -1) {
++                    out.write(buf, 0, n);
++                    out.flush();
++                }
++            } catch (Exception ignored) {
++            } finally {
++                activeSockets.remove(source);
++                activeSockets.remove(dest);
++                try { source.close(); } catch (Exception ignored) {}
++                try { dest.close(); } catch (Exception ignored) {}
++            }
++        }
 +    }
 +}
