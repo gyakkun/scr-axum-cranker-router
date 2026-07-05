@@ -117,7 +117,7 @@ cargo test --lib -- --nocapture
 
 # 9.5. Kill any leftover background unified_router_server processes to release port binds
 echo "=== Cleaning leftover unified_router_server processes ==="
-if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
+if [[ "$OSTYPE" == "cygwin" || "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
     taskkill //F //IM unified_router_server.exe 2>/dev/null || true
     taskkill //F //IM router_server.exe 2>/dev/null || true
 else
