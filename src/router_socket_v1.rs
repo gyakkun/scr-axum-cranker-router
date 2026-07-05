@@ -687,6 +687,12 @@ impl RouterSocket for RouterSocketV1 {
         -1
     }
 
+    fn is_active(&self) -> bool {
+        let start = self.client_req_start_ts.load(Acquire);
+        let dur = self.duration_millis.load(Acquire);
+        start > 0 && dur <= 0
+    }
+
 
     async fn on_client_req(self: Arc<Self>,
                            app_state: ACRState,

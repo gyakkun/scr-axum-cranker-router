@@ -136,7 +136,7 @@ pub(crate) fn create_forwarded_header_to_tgt(
         host: cli_hdr.get(http::header::HOST)
             .and_then(|i| i.to_str().ok())
             .map(|j| j.to_string()),
-        proto: cli_req_uri.scheme_str().map(|i| i.to_string()),
+        proto: Some(cli_req_uri.scheme_str().unwrap_or("http").to_string()),
         extensions: None,
     }
 }

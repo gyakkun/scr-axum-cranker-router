@@ -214,7 +214,7 @@ index 1e84353..243ce31 100644
  
      private static final Logger log = LoggerFactory.getLogger(ConcurrentUploadTest.class);
 diff --git a/src/test/java/com/hsbc/cranker/connector/ConnectRetryTest.java b/src/test/java/com/hsbc/cranker/connector/ConnectRetryTest.java
-index 03affbe..a9c57c0 100644
+index 03affbe..a19456b 100644
 --- a/src/test/java/com/hsbc/cranker/connector/ConnectRetryTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/ConnectRetryTest.java
 @@ -19,8 +19,8 @@ import java.util.concurrent.atomic.AtomicInteger;
@@ -228,14 +228,50 @@ index 03affbe..a9c57c0 100644
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.*;
  import static org.junit.jupiter.api.Assertions.assertEquals;
-@@ -29,6 +29,7 @@ import static scaffolding.Action.swallowException;
- import static scaffolding.AssertUtils.assertEventually;
- import static scaffolding.StringUtils.randomAsciiStringOfLength;
+@@ -68,14 +68,14 @@ public class ConnectRetryTest {
+         String body = randomAsciiStringOfLength(100);
+         HttpResponse<String> resp = testClient.send(HttpRequest.newBuilder()
+             .method("POST", HttpRequest.BodyPublishers.ofString(body))
+-            .uri(router.uri())
++            .uri(router.uri().resolve("/something"))
+             .build(), HttpResponse.BodyHandlers.ofString());
+         assertEquals(body, resp.body());
  
-+@org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
- public class ConnectRetryTest {
+         int originalPort = router.uri().getPort();
+         router.stop();
  
-     protected final HttpClient testClient = HttpUtils.createHttpClientBuilder(true).build();
+-        assertThrows(IOException.class, () -> testClient.send(HttpRequest.newBuilder().uri(router.uri()).build(), HttpResponse.BodyHandlers.ofString()));
++        assertThrows(IOException.class, () -> testClient.send(HttpRequest.newBuilder().uri(router.uri().resolve("/something")).build(), HttpResponse.BodyHandlers.ofString()));
+ 
+         Thread.sleep(2000);
+ 
+@@ -95,7 +95,7 @@ public class ConnectRetryTest {
+         assertEventually(() -> {
+             HttpResponse<String> newResp = testClient.send(HttpRequest.newBuilder()
+                 .method("POST", HttpRequest.BodyPublishers.ofString(newBody))
+-                .uri(router.uri())
++                .uri(router.uri().resolve("/something"))
+                 .build(), HttpResponse.BodyHandlers.ofString());
+             return newResp.body();
+         }, is(newBody));
+@@ -153,7 +153,7 @@ public class ConnectRetryTest {
+         crankerRouter.stop();
+         router.stop();
+ 
+-        assertThrows(IOException.class, () -> testClient.send(HttpRequest.newBuilder().uri(router.uri()).build(), HttpResponse.BodyHandlers.ofString()));
++        assertThrows(IOException.class, () -> testClient.send(HttpRequest.newBuilder().uri(router.uri().resolve("/something")).build(), HttpResponse.BodyHandlers.ofString()));
+ 
+         assertEventually(exceptionCount::get, greaterThan(0));
+ 
+@@ -176,7 +176,7 @@ public class ConnectRetryTest {
+         String body = "hello";
+         HttpResponse<String> resp = testClient.send(HttpRequest.newBuilder()
+             .method("POST", HttpRequest.BodyPublishers.ofString(body))
+-            .uri(router.uri())
++            .uri(router.uri().resolve("/something"))
+             .build(), HttpResponse.BodyHandlers.ofString());
+         assertEquals(200, resp.statusCode());
+         assertEquals(body, resp.body());
 diff --git a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorBuilderTest.java b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorBuilderTest.java
 index c4f213b..a272421 100644
 --- a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorBuilderTest.java
@@ -306,7 +342,7 @@ index 252f14c..8178721 100644
  
      private static final Logger log = LoggerFactory.getLogger(CrankerConnectorStopTest.class);
 diff --git a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorTest.java b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorTest.java
-index 2f7e33e..c2fa903 100644
+index 2f7e33e..c0575b3 100644
 --- a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorTest.java
 @@ -80,7 +80,7 @@ public class CrankerConnectorTest extends BaseEndToEndTest {
@@ -318,17 +354,6 @@ index 2f7e33e..c2fa903 100644
              .build(), HttpResponse.BodyHandlers.ofString());
          assertEquals(210, resp.statusCode());
          assertEquals(body, resp.body());
-@@ -145,7 +145,9 @@ public class CrankerConnectorTest extends BaseEndToEndTest {
-         assertThat(resp.body(), containsString("by="));
-         assertThat(resp.body(), containsString("for="));
-         assertThat(resp.body(), containsString("host="));
--        assertThat(resp.body(), containsString("proto="));
-+        if (!Boolean.getBoolean("cranker.router.rust")) {
-+            assertThat(resp.body(), containsString("proto="));
-+        }
-     }
- 
-     @RepeatedTest(3)
 diff --git a/src/test/java/com/hsbc/cranker/connector/DualRouterTest.java b/src/test/java/com/hsbc/cranker/connector/DualRouterTest.java
 index b7b261a..f9fff63 100644
 --- a/src/test/java/com/hsbc/cranker/connector/DualRouterTest.java
@@ -363,10 +388,10 @@ index f24dfc2..59dc3c0 100644
  
      private static final String route = "my-service";
 diff --git a/src/test/java/com/hsbc/cranker/connector/ServerSentEventTest.java b/src/test/java/com/hsbc/cranker/connector/ServerSentEventTest.java
-index 822e2de..b3fce20 100644
+index 822e2de..aa75fb0 100644
 --- a/src/test/java/com/hsbc/cranker/connector/ServerSentEventTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/ServerSentEventTest.java
-@@ -15,12 +15,13 @@ import java.util.List;
+@@ -15,8 +15,8 @@ import java.util.List;
  import java.util.concurrent.TimeUnit;
  
  import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
@@ -377,11 +402,6 @@ index 822e2de..b3fce20 100644
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.*;
  import static scaffolding.Action.swallowException;
- 
-+@org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
- public class ServerSentEventTest extends BaseEndToEndTest {
- 
-     private SseTestClient client;
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java
 new file mode 100644
 index 0000000..fd7e199
@@ -723,10 +743,10 @@ index 0000000..fd7e199
 +}
 diff --git a/src/test/java/scaffolding/TestServerBuilder.java b/src/test/java/scaffolding/TestServerBuilder.java
 new file mode 100644
-index 0000000..c00ee66
+index 0000000..8357454
 --- /dev/null
 +++ b/src/test/java/scaffolding/TestServerBuilder.java
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,230 @@
 +package scaffolding;
 +
 +import io.muserver.MuHandler;
@@ -753,6 +773,8 @@ index 0000000..c00ee66
 +    private final MuServerBuilder builder;
 +    private RustCrankerRouter rustRouterForReg = null;
 +    private RustCrankerRouter rustRouterForVisit = null;
++
++    private int requestedPort = 0;
 +
 +    private TestServerBuilder(MuServerBuilder builder) {
 +        this.builder = builder;
@@ -787,11 +809,13 @@ index 0000000..c00ee66
 +    }
 +
 +    public TestServerBuilder withHttpPort(int port) {
++        this.requestedPort = port;
 +        builder.withHttpPort(port);
 +        return this;
 +    }
 +
 +    public TestServerBuilder withHttpsPort(int port) {
++        this.requestedPort = port;
 +        builder.withHttpPort(port);
 +        return this;
 +    }
@@ -829,7 +853,7 @@ index 0000000..c00ee66
 +                int regPort = rustRouterForReg != null ? rustRouterForReg.getRegPort() : rustRouterForVisit.getVisitPort();
 +                int visitPort = rustRouterForVisit != null ? rustRouterForVisit.getVisitPort() : rustRouterForReg.getRegPort();
 +                int realServerPort = realServer.httpUri() != null ? realServer.httpUri().getPort() : realServer.uri().getPort();
-+                PortUnifiedProxy proxy = new PortUnifiedProxy(realServerPort, regPort, visitPort);
++                PortUnifiedProxy proxy = new PortUnifiedProxy(requestedPort, realServerPort, regPort, visitPort);
 +                return (MuServer) Proxy.newProxyInstance(
 +                        MuServer.class.getClassLoader(),
 +                        new Class<?>[]{MuServer.class},
@@ -863,8 +887,8 @@ index 0000000..c00ee66
 +        private volatile boolean running = true;
 +        private final Set<Socket> activeSockets = ConcurrentHashMap.newKeySet();
 +
-+        public PortUnifiedProxy(int realServerPort, int regPort, int visitPort) throws Exception {
-+            this.serverSocket = new ServerSocket(0);
++        public PortUnifiedProxy(int requestedPort, int realServerPort, int regPort, int visitPort) throws Exception {
++            this.serverSocket = new ServerSocket(requestedPort);
 +            this.realServerPort = realServerPort;
 +            this.regPort = regPort;
 +            this.visitPort = visitPort;

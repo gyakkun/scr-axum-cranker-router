@@ -65,6 +65,8 @@ pub trait RouterSocket: Send + Sync + RouteIdentify {
 
     fn try_provide_general_error(&self, opt_crex: Option<CrankerRouterException>) -> Result<(), CrankerRouterException>;
 
+    fn is_active(&self) -> bool;
+
     fn get_opt_arc_websocket_farm(&self) -> Option<Arc<WebSocketFarm>>;
 }
 

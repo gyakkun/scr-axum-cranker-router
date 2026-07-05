@@ -424,6 +424,10 @@ impl RouterSocket for RouterSocketV3 {
         self.context_map.len() as i32
     }
 
+    fn is_active(&self) -> bool {
+        self.inflight_count() > 0
+    }
+
     async fn on_client_req(
         self: Arc<Self>,
         app_state: ACRState,

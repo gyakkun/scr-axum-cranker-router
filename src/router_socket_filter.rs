@@ -183,6 +183,10 @@ mod router_socket_filter_test {
             ))
         }
 
+        fn is_active(&self) -> bool {
+            false
+        }
+
         fn get_opt_arc_websocket_farm(&self) -> Option<Arc<WebSocketFarm>> {
             None
         }

@@ -10,7 +10,7 @@ use simple_logger::SimpleLogger;
 
 use scr_axum_cranker_router::{CrankerRouter, CrankerRouterBuilder};
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::main]
 async fn main() {
     let mut reg_port = 3000;
     let mut visit_port = 3002;

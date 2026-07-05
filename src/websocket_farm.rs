@@ -529,12 +529,25 @@ impl WebSocketFarmInterface for WebSocketFarm {
                 });
             }
             for socket in sockets_to_close {
-                warn!("De-registering and closing router_socket_id={}", socket.router_socket_id());
-                let _ = socket.clone().send_ws_msg_to_uwss(axum::extract::ws::Message::Close(Some(axum::extract::ws::CloseFrame {
-                    code: 1000,
-                    reason: "De-registered".into(),
-                }))).await;
-                let _ = socket.terminate_all_conn(None).await;
+                another_self.idle_count.fetch_add(-1, AcqRel);
+                socket.get_is_removed_arc_atomic_bool().store(true, Release);
+                warn!("De-registering and draining/closing router_socket_id={}", socket.router_socket_id());
+                tokio::spawn(async move {
+                    let mut is_active = socket.is_active();
+                    if is_active {
+                        let start_time = std::time::Instant::now();
+                        while is_active && start_time.elapsed() < std::time::Duration::from_secs(15) {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            is_active = socket.is_active();
+                        }
+                    }
+                    warn!("Closing socket router_socket_id={}", socket.router_socket_id());
+                    let _ = socket.clone().send_ws_msg_to_uwss(axum::extract::ws::Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 1000,
+                        reason: "De-registered".into(),
+                    }))).await;
+                    let _ = socket.terminate_all_conn(None).await;
+                });
             }
         });
     }
