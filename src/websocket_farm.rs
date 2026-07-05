@@ -22,7 +22,7 @@ use crate::route_identify::RouteIdentify;
 use crate::route_resolver::RouteResolver;
 use crate::router_socket::RouterSocket;
 use crate::router_socket_filter::RouterSocketFilter;
-use crate::{time_utils, CrankerRouterConfig, LOCAL_IP};
+use crate::{time_utils, CrankerRouterConfig, LOCAL_IP, CRANKER_V_3_0};
 
 /// Here we mimic the Java WebSocketFarm but allow adding
 /// both V1 and V3 router socket to the same farm to reduce
@@ -310,6 +310,9 @@ impl WebSocketFarmInterface for WebSocketFarm {
                                 cranker_router_config.clone(),
                                 arc_rs.clone(),
                             ) {
+                                if arc_rs.cranker_version() == CRANKER_V_3_0 {
+                                    let _ = router_socket_sender.send(Arc::downgrade(&arc_rs)).await;
+                                }
                                 return Ok(arc_rs); // @filter loop await
                             }
                             // put it back if not being chosen
@@ -328,7 +331,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
                             }
                             Err(broadcast::error::RecvError::Lagged(_)) => {
                                 // Lagged, but we can continue listening.
-                                continue;
+                                continue 'main;
                             }
                             Err(broadcast::error::RecvError::Closed) => {
                                 // The notifier is closed. No new sockets will ever be announced.
@@ -524,6 +527,8 @@ impl WebSocketFarmInterface for WebSocketFarm {
                 }
             }
             if let Some(some) = another_self.route_to_router_socket_id_to_arc_router_socket_map.get(&route) {
+                let route_clone = route.clone();
+                another_self.route_last_removal_times.insert(route_clone, time_utils::current_time_millis());
                 some.value().retain(|_k, v| {
                     !v.connector_id().eq(&connector_id)
                 });

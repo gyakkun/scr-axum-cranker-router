@@ -161,14 +161,19 @@ impl RouterSocketV3 {
         // WARNING: Start from this line, we are dealing with network I/O
         // Be careful to handle errors. Notify client error ASAP.
 
-        tokio::select! {
-            Err(crex) = self.clone().split_part_one_send_or_err(&hdr_to_tgt, opt_body, req_id, ctx.clone(), header_text) => {
-                return Err(crex);
+        let rs_clone = self.clone();
+        let ctx_clone = ctx.clone();
+        let hdr_to_tgt_clone = hdr_to_tgt.clone();
+        tokio::spawn(async move {
+            if let Err(crex) = rs_clone.clone().split_part_one_send_or_err(hdr_to_tgt_clone, opt_body, req_id, ctx_clone.clone(), header_text).await {
+                if !ctx_clone.is_end_stream_received_from_tgt.load(Acquire) {
+                    let _ = rs_clone.notify_client_request_error(ctx_clone, crex).await;
+                }
             }
-            ok_or_err = self.split_part_two_recv_and_res(cli_req_ident, ctx)  => {
-                return ok_or_err?;
-            }
-        }
+        });
+
+        let ok_or_err = self.split_part_two_recv_and_res(cli_req_ident, ctx).await;
+        return ok_or_err?;
     }
 
     async fn split_part_two_recv_and_res(
@@ -253,7 +258,7 @@ impl RouterSocketV3 {
 
     async fn split_part_one_send_or_err(
         self: Arc<Self>,
-        hdr_to_tgt: &HeaderMap,
+        hdr_to_tgt: HeaderMap,
         opt_body: Option<BodyDataStream>,
         req_id: i32,
         ctx: Arc<RequestContext>,
@@ -320,7 +325,7 @@ impl RouterSocketV3 {
                 }
 
                 // void flowControl
-                if ctx.is_wss_writable.load(Acquire) && !ctx.is_wss_writing.load(Acquire) {
+                if ctx.is_wss_writable.load(Acquire)  {
                     continue;
                 } else {
                     let should_read_from_cli = Arc::new(AtomicBool::new(false));
@@ -363,7 +368,7 @@ impl RouterSocketV3 {
             self.send_data(Message::Binary(end_data_msg.into())).await?;
         }
         for i in self.proxy_listeners.iter() {
-            i.on_after_proxy_to_target_headers_sent(ctx.as_ref(), Some(hdr_to_tgt))?;
+            i.on_after_proxy_to_target_headers_sent(ctx.as_ref(), Some(&hdr_to_tgt))?;
             i.on_request_body_sent_to_target(ctx.as_ref())?;
         }
         Ok(())
@@ -884,16 +889,6 @@ impl RouterSocketV3 {
         }
 
         ctx.wss_on_binary_call_count.fetch_add(1, AcqRel);
-        if self.is_removed() {
-            if is_end_stream {
-                let _ = self
-                    .notify_client_request_close(ctx, 1000 /*ws status code*/, None)
-                    .await;
-            }
-            return Err(CrankerRouterException::new(format!(
-                "recv bin msg from connector but router socket already removed. req_id={}, flags={}", req_id, flags
-            )));
-        }
 
         debug!(
             "route={}, router_socket_id={}, sending {} bytes to client",

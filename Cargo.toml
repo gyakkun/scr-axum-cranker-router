@@ -56,9 +56,6 @@ crate-type = ["bin"]
 name = "tls_single_domain_server"
 crate-type = ["bin"]
 
-[[bin]]
-name = "router_server"
-path = "examples/router_server.rs"
 
 
 [profile.dev]

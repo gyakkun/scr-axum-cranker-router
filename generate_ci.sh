@@ -180,16 +180,16 @@ git -C "$CI_TMP_DIR/mu-cranker-router" apply "$SCRIPT_DIR/patches/mu-cranker-rou
 
 # 6. Build Router Server Binary
 echo "=== Building scr-axum-cranker-router bin ==="
-cargo build --release --bin router_server
+cargo build --release --bin unified_router_server
 
 # Locate binary extension (.exe on Windows)
 EXE_EXT=""
-if [ -f "$SCRIPT_DIR/target/release/router_server.exe" ]; then
+if [ -f "$SCRIPT_DIR/target/release/unified_router_server.exe" ]; then
     EXE_EXT=".exe"
 fi
 
 # Copy built binary to temp dir
-cp "$SCRIPT_DIR/target/release/router_server${EXE_EXT}" "$CI_TMP_DIR/router_server${EXE_EXT}"
+cp "$SCRIPT_DIR/target/release/unified_router_server${EXE_EXT}" "$CI_TMP_DIR/unified_router_server${EXE_EXT}"
 
 # 7. Build & Install mu-cranker-router and cranker-connector
 echo "=== Building and installing mu-cranker-router ==="
@@ -206,21 +206,32 @@ if [ -z "$CONNECTOR_JAR" ]; then
 fi
 cp "$CONNECTOR_JAR" "$CI_TMP_DIR/connector-uber.jar"
 
-# 8. Run Java mu-cranker-router tests against Rust router_server
+# 8. Run Java mu-cranker-router tests against Rust unified_router_server
 echo "=== Running Java mu-cranker-router tests ==="
 export CRANKER_ROUTER_RUST=true
-export RUST_ROUTER_SERVER_EXE="$CI_TMP_DIR/router_server${EXE_EXT}"
+export RUST_ROUTER_SERVER_EXE="$CI_TMP_DIR/unified_router_server${EXE_EXT}"
 
 mvn -f "$CI_TMP_DIR/mu-cranker-router/pom.xml" clean test -Dcranker.router.rust=true -Dmaven.javadoc.skip=true -Dsource.skip=true
 
-# 8.5. Run Java cranker-connector tests against Rust router_server
+# 8.5. Run Java cranker-connector tests against Rust unified_router_server
 echo "=== Running Java cranker-connector tests ==="
+export RUST_ROUTER_SERVER_EXE="$CI_TMP_DIR/unified_router_server${EXE_EXT}"
 mvn -f "$CI_TMP_DIR/cranker-connector/pom.xml" clean test -Dcranker.router.rust=true -Dmaven.javadoc.skip=true -Dsource.skip=true
 
 # 9. Run Rust unit & integration tests
 echo "=== Running scr-axum-cranker-router tests ==="
 export CRANKER_CONNECTOR_JAR="$CI_TMP_DIR/connector-uber.jar"
 cargo test --lib -- --nocapture
+
+# 9.5. Kill any leftover background unified_router_server processes to release port binds
+echo "=== Cleaning leftover unified_router_server processes ==="
+if [[ "$OSTYPE" == "cygwin" || "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
+    taskkill //F //IM unified_router_server.exe 2>/dev/null || true
+    taskkill //F //IM router_server.exe 2>/dev/null || true
+else
+    pkill -9 -f unified_router_server 2>/dev/null || true
+    pkill -9 -f router_server 2>/dev/null || true
+fi
 
 echo "=== CI Verification Passed Successfully! ==="
 SCRIPT_BODY

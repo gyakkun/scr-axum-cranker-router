@@ -742,14 +742,15 @@ impl RouterSocket for RouterSocketV1 {
                     .build()? // fast fail
             }
         };
-        tokio::select! {
-            Err(crex) = self.clone().split_part_one_send_or_err(opt_body, cranker_req) => {
-                return Err(crex);
+        let rs_clone = self.clone();
+        tokio::spawn(async move {
+            if let Err(crex) = rs_clone.clone().split_part_one_send_or_err(opt_body, cranker_req).await {
+                let _ = rs_clone.on_error(crex);
             }
-            ok_or_err = self.split_part_two_recv_and_res()  => {
-                return ok_or_err?;
-            }
-        }
+        });
+
+        let ok_or_err = self.split_part_two_recv_and_res().await;
+        return ok_or_err?;
     }
 
     async fn send_ws_msg_to_uwss(self: Arc<Self>, message: Message) -> Result<(), CrankerRouterException> {

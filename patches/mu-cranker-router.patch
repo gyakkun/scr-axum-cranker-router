@@ -1,3 +1,25 @@
+diff --git a/pom.xml b/pom.xml
+index 0343e27..ca372d9 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -66,7 +66,7 @@
+         <dependency>
+             <groupId>io.muserver</groupId>
+             <artifactId>mu-server</artifactId>
+-            <version>2.2.3</version>
++            <version>2.3.0</version>
+             <scope>provided</scope>
+         </dependency>
+         <dependency>
+@@ -170,7 +170,7 @@
+             <plugin>
+                 <groupId>org.apache.maven.plugins</groupId>
+                 <artifactId>maven-javadoc-plugin</artifactId>
+-                <version>3.6.3</version>
++                <version>3.11.3</version>
+                 <configuration>
+                     <source>11</source>
+                 </configuration>
 diff --git a/src/main/java/com/hsbc/cranker/mucranker/CrankerRouterBuilder.java b/src/main/java/com/hsbc/cranker/mucranker/CrankerRouterBuilder.java
 index 229a09a..7294453 100644
 --- a/src/main/java/com/hsbc/cranker/mucranker/CrankerRouterBuilder.java
@@ -465,7 +487,7 @@ index fe5e0ac..2a1019c 100644
  
      private static final Logger log = LoggerFactory.getLogger(ProxyListenerTest.class);
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/RouterInfoTest.java b/src/test/java/com/hsbc/cranker/mucranker/RouterInfoTest.java
-index 67617a7..8a832d8 100644
+index 67617a7..fd955a6 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/RouterInfoTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/RouterInfoTest.java
 @@ -19,8 +19,8 @@ import static com.hsbc.cranker.connector.CrankerConnectorBuilder.CRANKER_PROTOCO
@@ -542,7 +564,7 @@ index 67617a7..8a832d8 100644
              assertThat(resp.code(), is(200));
              assertThat(resp.body().string(), is("Got GET /another-target-server/blah%20blah and query some value"));
          }
-@@ -88,25 +96,26 @@ public class RouterInfoTest {
+@@ -88,33 +96,43 @@ public class RouterInfoTest {
      public void infoIsExposedAsAMapForSimpleHealthReporting(RepetitionInfo repetitionInfo) throws IOException {
          router = crankerRouter().withSupportedCrankerProtocols(List.of("cranker_1.0", "cranker_3.0")).start();
          routerServer = httpsServer()
@@ -586,18 +608,26 @@ index 67617a7..8a832d8 100644
  
          connector = startConnector("my-target-server", preferredProtocols(repetitionInfo));
          connector2 = startConnector("another-target-server", preferredProtocols(repetitionInfo));
-@@ -114,7 +123,9 @@ public class RouterInfoTest {
+ 
          call(request(routerServer.uri().resolve("/my-target-server/"))).close();
  
-         try (Response resp = call(request(routerServer.uri().resolve("/health")))) {
+-        try (Response resp = call(request(routerServer.uri().resolve("/health")))) {
 -            JSONObject health = new JSONObject(resp.body().string());
++        java.net.URI healthUri;
++        boolean isRustMode = Boolean.getBoolean("cranker.router.rust") || "true".equalsIgnoreCase(System.getenv("CRANKER_ROUTER_RUST"));
++        if (isRustMode) {
++            healthUri = routerServer.uri().resolve("/health/connectors");
++        } else {
++            healthUri = routerServer.uri().resolve("/health");
++        }
++        try (Response resp = call(request(healthUri))) {
 +            String resStr = resp.body().string();
 +            System.err.println("################" + resStr + "###################");
 +            JSONObject health = new JSONObject(resStr);
              JSONObject services = health.getJSONObject("services");
              assertThat(services.has("my-target-server"), is(true));
              assertThat(services.has("another-target-server"), is(true));
-@@ -140,25 +151,26 @@ public class RouterInfoTest {
+@@ -140,32 +158,39 @@ public class RouterInfoTest {
      public void infoIsExposedAsAMapForSimpleHealthReportingForBothV1AndV3() throws IOException {
          router = crankerRouter().withSupportedCrankerProtocols(List.of("cranker_1.0", "cranker_3.0")).start();
          routerServer = httpsServer()
@@ -641,7 +671,22 @@ index 67617a7..8a832d8 100644
  
          connector = startConnector("my-target-server", List.of(CRANKER_PROTOCOL_1));
          connector2 = startConnector("my-target-server", List.of(CRANKER_PROTOCOL_3));
-@@ -201,7 +213,8 @@ public class RouterInfoTest {
+ 
+         call(request(routerServer.uri().resolve("/my-target-server/"))).close();
+-
+-        try (Response resp = call(request(routerServer.uri().resolve("/health")))) {
++        java.net.URI healthUri;
++        boolean isRustMode = Boolean.getBoolean("cranker.router.rust") || "true".equalsIgnoreCase(System.getenv("CRANKER_ROUTER_RUST"));
++        if (isRustMode) {
++            healthUri = routerServer.uri().resolve("/health/connectors");
++        } else {
++            healthUri = routerServer.uri().resolve("/health");
++        }
++        try (Response resp = call(request(healthUri))) {
+             JSONObject health = new JSONObject(resp.body().string());
+             JSONObject services = health.getJSONObject("services");
+             assertThat(services.has("my-target-server"), is(true));
+@@ -201,7 +226,8 @@ public class RouterInfoTest {
      }
  
      private CrankerConnector startConnector(String targetServiceName, List<String> preferredProtocols) {
@@ -653,10 +698,10 @@ index 67617a7..8a832d8 100644
  }
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java
 new file mode 100644
-index 0000000..f403f90
+index 0000000..89411a5
 --- /dev/null
 +++ b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java
-@@ -0,0 +1,324 @@
+@@ -0,0 +1,372 @@
 +package com.hsbc.cranker.mucranker;
 +
 +import io.muserver.MuHandler;
@@ -676,6 +721,8 @@ index 0000000..f403f90
 +import java.util.concurrent.TimeUnit;
 +
 +public class RustCrankerRouter implements CrankerRouter {
++
++    private static int lastAssignedPort = 0;
 +
 +    private final Process process;
 +    private final int regPort;
@@ -697,8 +744,13 @@ index 0000000..f403f90
 +            List<String> supportedCrankerProtocol,
 +            java.util.function.Function<io.muserver.MuRequest, String> clientIpProvider
 +    ) {
-+        this.regPort = findFreePort();
-+        this.visitPort = findFreePort();
++        int portToUse = lastAssignedPort;
++        if (portToUse == 0 || !isPortFree(portToUse)) {
++            portToUse = findFreePort();
++        }
++        lastAssignedPort = portToUse;
++        this.regPort = portToUse;
++        this.visitPort = this.regPort;
 +        this.httpClient = HttpClient.newBuilder()
 +                .connectTimeout(java.time.Duration.ofMillis(2000))
 +                .build();
@@ -708,10 +760,28 @@ index 0000000..f403f90
 +            String envExe = System.getenv("RUST_ROUTER_SERVER_EXE");
 +            File exe = envExe != null ? new File(envExe) : null;
 +            if (exe == null || !exe.exists()) {
++                exe = new File("../scr-axum-cranker-router/target/debug/unified_router_server.exe");
++            }
++            if (!exe.exists()) {
++                exe = new File("../scr-axum-cranker-router/target/debug/unified_router_server");
++            }
++            if (!exe.exists()) {
++                exe = new File("../scr-axum-cranker-router/target/release/unified_router_server.exe");
++            }
++            if (!exe.exists()) {
++                exe = new File("../scr-axum-cranker-router/target/release/unified_router_server");
++            }
++            if (!exe.exists()) {
 +                exe = new File("../scr-axum-cranker-router/target/debug/router_server.exe");
 +            }
 +            if (!exe.exists()) {
++                exe = new File("../scr-axum-cranker-router/target/debug/router_server");
++            }
++            if (!exe.exists()) {
 +                exe = new File("../scr-axum-cranker-router/target/release/router_server.exe");
++            }
++            if (!exe.exists()) {
++                exe = new File("../scr-axum-cranker-router/target/release/router_server");
 +            }
 +            if (!exe.exists()) {
 +                exe = new File("../scr-axum-cranker-router/target/debug/examples/router_server.exe");
@@ -720,7 +790,7 @@ index 0000000..f403f90
 +                exe = new File("../scr-axum-cranker-router/target/release/examples/router_server.exe");
 +            }
 +            if (!exe.exists()) {
-+                throw new IllegalStateException("Rust router_server binary not found. Please specify RUST_ROUTER_SERVER_EXE or run 'cargo build --bin router_server'");
++                throw new IllegalStateException("Rust router_server/unified_router_server binary not found. Please specify RUST_ROUTER_SERVER_EXE or run 'cargo build --bin unified_router_server'");
 +            }
 +
 +            List<String> cmd = new ArrayList<>();
@@ -895,8 +965,23 @@ index 0000000..f403f90
 +
 +    @Override
 +    public void stop() {
-+        if (process != null) {
-+            process.destroy();
++        if(process != null) {
++            // 1. Handle all downstream descendant processes
++            process.descendants().forEach(handle -> {
++                if (handle.isAlive()) {
++                    handle.destroy(); // Request graceful termination
++                    // Optional: Forcefully kill if it doesn't respond quickly
++                    try {
++                        Thread.sleep(100);
++                        if (handle.isAlive()) {
++                            handle.destroyForcibly();
++                        }
++                    } catch (InterruptedException e) {
++                        Thread.currentThread().interrupt();
++                    }
++                }
++            });
++            process.destroyForcibly();
 +            try {
 +                process.waitFor(5, TimeUnit.SECONDS);
 +            } catch (InterruptedException e) {
@@ -971,6 +1056,14 @@ index 0000000..f403f90
 +                return darkHosts().stream().filter(h -> h.address().equals(address)).findFirst();
 +            }
 +        };
++    }
++
++    private static boolean isPortFree(int port) {
++        try (ServerSocket s = new ServerSocket(port)) {
++            return true;
++        } catch (IOException e) {
++            return false;
++        }
 +    }
 +
 +    private static int findFreePort() {
@@ -1090,10 +1183,10 @@ index 93a12fb..bfe66c3 100644
 +}
 diff --git a/src/test/java/scaffolding/TestServerBuilder.java b/src/test/java/scaffolding/TestServerBuilder.java
 new file mode 100644
-index 0000000..dd8b934
+index 0000000..a1e377c
 --- /dev/null
 +++ b/src/test/java/scaffolding/TestServerBuilder.java
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,130 @@
 +package scaffolding;
 +
 +import io.muserver.MuHandler;
@@ -1184,8 +1277,8 @@ index 0000000..dd8b934
 +    public MuServer start() {
 +        boolean isRustMode = Boolean.getBoolean("cranker.router.rust") || "true".equalsIgnoreCase(System.getenv("CRANKER_ROUTER_RUST"));
 +        if (isRustMode && (rustRouterForReg != null || rustRouterForVisit != null)) {
-+            // In Rust mode the PortUnifiedProxy speaks plain HTTP to the Java server,
-+            // so ensure the builder also opens an HTTP port.
++            // In Rust mode we direct traffic directly to the Rust ports
++            // without starting any JVM-side TCP proxy
 +            builder.withHttpPort(0);
 +        }
 +        MuServer realServer = builder.start();
@@ -1193,8 +1286,14 @@ index 0000000..dd8b934
 +            try {
 +                int regPort = rustRouterForReg != null ? rustRouterForReg.getRegPort() : rustRouterForVisit.getVisitPort();
 +                int visitPort = rustRouterForVisit != null ? rustRouterForVisit.getVisitPort() : rustRouterForReg.getRegPort();
-+                int realServerPort = realServer.httpUri() != null ? realServer.httpUri().getPort() : realServer.uri().getPort();
-+                PortUnifiedProxy proxy = new PortUnifiedProxy(realServerPort, regPort, visitPort);
++                final int targetRustPort;
++                if (rustRouterForReg != null && rustRouterForVisit != null) {
++                    targetRustPort = regPort;
++                } else if (rustRouterForReg != null) {
++                    targetRustPort = regPort;
++                } else {
++                    targetRustPort = visitPort;
++                }
 +                return (MuServer) Proxy.newProxyInstance(
 +                        MuServer.class.getClassLoader(),
 +                        new Class<?>[]{MuServer.class},
@@ -1203,9 +1302,8 @@ index 0000000..dd8b934
 +                            public Object invoke(Object proxyInstance, Method method, Object[] args) throws Throwable {
 +                                String methodName = method.getName();
 +                                if (methodName.equals("uri") || methodName.equals("httpUri") || methodName.equals("httpsUri")) {
-+                                    return URI.create("http://127.0.0.1:" + proxy.getPort());
++                                    return URI.create("http://127.0.0.1:" + targetRustPort);
 +                                } else if (methodName.equals("stop")) {
-+                                    proxy.stop();
 +                                    return method.invoke(realServer, args);
 +                                }
 +                                return method.invoke(realServer, args);
@@ -1213,97 +1311,9 @@ index 0000000..dd8b934
 +                        }
 +                );
 +            } catch (Exception e) {
-+                throw new RuntimeException("Failed to start unified port proxy", e);
++                throw new RuntimeException("Failed to delegate to unified rust router server", e);
 +            }
 +        }
 +        return realServer;
-+    }
-+
-+    private static class PortUnifiedProxy {
-+        private final ServerSocket serverSocket;
-+        private final int realServerPort;
-+        private final int regPort;
-+        private final int visitPort;
-+        private final Thread thread;
-+        private volatile boolean running = true;
-+
-+        public PortUnifiedProxy(int realServerPort, int regPort, int visitPort) throws Exception {
-+            this.serverSocket = new ServerSocket(0);
-+            this.realServerPort = realServerPort;
-+            this.regPort = regPort;
-+            this.visitPort = visitPort;
-+            this.thread = new Thread(this::run);
-+            this.thread.setDaemon(true);
-+            this.thread.start();
-+        }
-+
-+        public int getPort() {
-+            return serverSocket.getLocalPort();
-+        }
-+
-+        public void stop() {
-+            running = false;
-+            try { serverSocket.close(); } catch (Exception ignored) {}
-+        }
-+
-+        private void run() {
-+            while (running) {
-+                try {
-+                    Socket clientSocket = serverSocket.accept();
-+                    new Thread(() -> handle(clientSocket)).start();
-+                } catch (Exception e) {
-+                    // ignore
-+                }
-+            }
-+        }
-+
-+        private void handle(Socket clientSocket) {
-+            try {
-+                clientSocket.setTcpNoDelay(true);
-+                InputStream in = clientSocket.getInputStream();
-+                byte[] buffer = new byte[8192];
-+                int read = in.read(buffer);
-+                if (read <= 0) {
-+                    clientSocket.close();
-+                    return;
-+                }
-+                String headers = new String(buffer, 0, read, java.nio.charset.StandardCharsets.US_ASCII);
-+                int targetPort = visitPort;
-+                if (headers.contains("/register") || headers.contains("/deregister") || headers.contains("/dark-mode")) {
-+                    targetPort = regPort;
-+                } else if (headers.contains("/health")) {
-+                    targetPort = realServerPort;
-+                }
-+                System.out.println("DEBUG PROXY: targetPort=" + targetPort + " for " + headers.substring(0, Math.min(100, headers.length())).replace("\r", "\\r").replace("\n", "\\n"));
-+                Socket targetSocket = new Socket("127.0.0.1", targetPort);
-+                targetSocket.setTcpNoDelay(true);
-+                OutputStream out = targetSocket.getOutputStream();
-+                out.write(buffer, 0, read);
-+                out.flush();
-+
-+                Thread t1 = new Thread(() -> copy(clientSocket, targetSocket));
-+                Thread t2 = new Thread(() -> copy(targetSocket, clientSocket));
-+                t1.start();
-+                t2.start();
-+            } catch (Exception e) {
-+                try { clientSocket.close(); } catch (Exception ignored) {}
-+            }
-+        }
-+
-+        private void copy(Socket source, Socket dest) {
-+            try (InputStream in = source.getInputStream();
-+                 OutputStream out = dest.getOutputStream()) {
-+                byte[] buf = new byte[8192];
-+                int n;
-+                while ((n = in.read(buf)) != -1) {
-+                    out.write(buf, 0, n);
-+                    out.flush();
-+                }
-+            } catch (Exception ignored) {
-+            } finally {
-+                try { source.close(); } catch (Exception ignored) {}
-+                try { dest.close(); } catch (Exception ignored) {}
-+            }
-+        }
 +    }
 +}

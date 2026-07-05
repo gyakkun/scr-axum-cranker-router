@@ -155,10 +155,7 @@ impl CrankerRouter {
         });
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_millis(
-                    config.routes_keep_time_millis as u64
-                )
-                ).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
                 websocket_farm_clone.clone().clean_routes_in_background(config.routes_keep_time_millis);
             }
         });
@@ -173,6 +170,34 @@ impl CrankerRouter {
 
     /// Get an Arc copy of the inner state
     pub fn state(&self) -> ACRState { self.state.clone() }
+
+    /// A unified axum router that handles both registration/admin endpoints
+    /// and matches client visit requests via a wildcard fallback, all on the same port.
+    pub fn unified_axum_router(&self) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
+        let res = Router::new()
+            .route("/register", any(Self::register_handler)
+                .layer(from_fn_with_state(self.state(), Self::reg_check_and_extract)),
+            )
+            .route("/register/", any(Self::register_handler)
+                .layer(from_fn_with_state(self.state(), Self::reg_check_and_extract)),
+            )
+            .route("/deregister", any(Self::de_register_handler)
+                .layer(from_fn_with_state(self.state(), Self::de_reg_check)),
+            )
+            .route("/deregister/", any(Self::de_register_handler)
+                .layer(from_fn_with_state(self.state(), Self::de_reg_check)),
+            )
+            .route("/health/connectors", get(Self::connector_info_handler))
+            .route("/dark-mode/enable", post(Self::enable_dark_mode_handler))
+            .route("/dark-mode/disable", post(Self::disable_dark_mode_handler))
+            .route("/dark-mode/hosts", get(Self::get_dark_hosts_handler))
+            .route("/health", get(Self::health_root))
+            .route("/{*any}", any(CrankerRouter::visit_portal))
+            .with_state(self.state())
+            .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
+            .into_make_service_with_connect_info::<SocketAddr>();
+        return res;
+    }
 
     /// The registration axum router function.
     /// It registers multiple register and deregister paths
@@ -289,6 +314,7 @@ impl CrankerRouter {
         req: Request<Body>,
     ) -> Response
     {
+        println!("RUST_VISIT_ORTAL_STDOUT: received request. method={}, uri={:?}", method, original_uri);
         // Get should have no body but not required
         let http_version = req.version();
         debug!("Http version {:?}", http_version);
@@ -315,11 +341,6 @@ impl CrankerRouter {
         return match socket_fut {
             Ok(rs) => {
                 debug!("Get a socket router_socket_id={}, cranker_ver={}", rs.router_socket_id(), rs.cranker_version());
-
-                // FIXME: Put back v3 socket for reuse. Any better idea?
-                if rs.cranker_version() == CRANKER_V_3_0 {
-                    app_state.websocket_farm.clone().add_router_socket_in_background(rs.clone());
-                }
 
                 let mut opt_body = None;
                 if has_body {

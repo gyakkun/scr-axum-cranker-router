@@ -1,19 +1,19 @@
+use log::LevelFilter;
+use simple_logger::SimpleLogger;
 use std::env;
 use std::future::IntoFuture;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::{signal, try_join};
-use log::LevelFilter;
-use simple_logger::SimpleLogger;
 
-use scr_axum_cranker_router::{CrankerRouter, CrankerRouterBuilder};
+use scr_axum_cranker_router::CrankerRouterBuilder;
 
 #[tokio::main]
 async fn main() {
     let mut reg_port = 3000;
     let mut visit_port = 3002;
+    let mut single_port = None;
     let mut routes_keep_time_millis = 5000;
     let mut connector_max_wait_time_millis = 5000;
     let mut via_name = "scr-axum".to_string();
@@ -28,6 +28,10 @@ async fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--port" => {
+                single_port = Some(u16::from_str(&args[i + 1]).unwrap());
+                i += 2;
+            }
             "--reg-port" => {
                 reg_port = u16::from_str(&args[i + 1]).unwrap();
                 i += 2;
@@ -79,10 +83,7 @@ async fn main() {
         }
     }
 
-    SimpleLogger::new()
-        .with_level(log_level)
-        .init()
-        .unwrap();
+    SimpleLogger::new().with_level(log_level).init().unwrap();
 
     let mut cranker_router_builder = CrankerRouterBuilder::new()
         .with_routes_keep_time_millis(routes_keep_time_millis)
@@ -100,36 +101,30 @@ async fn main() {
     }
 
     let cranker_router = cranker_router_builder.build();
-
     let cranker_router = Arc::new(cranker_router);
+    let unified_router = cranker_router.unified_axum_router();
 
-    let reg_listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), reg_port))
-        .await
-        .unwrap();
-    let visit_listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), visit_port))
-        .await
-        .unwrap();
-
-    let reg_router = cranker_router.registration_axum_router();
-    let visit_router = cranker_router.visit_portal_axum_router();
-
-    println!("Router started: reg_port={}, visit_port={}", reg_port, visit_port);
-
-    async fn sig(cranker_router: Arc<CrankerRouter>) {
-        match signal::ctrl_c().await {
-            Ok(()) => {
-                eprintln!("Stopping cranker router");
-                cranker_router.stop();
-            }
-            Err(err) => {
-                eprintln!("Unable to listen for shutdown signal: {}", err);
-                cranker_router.stop();
-            }
+    let mut bind_ports = Vec::new();
+    if let Some(port) = single_port {
+        bind_ports.push(port);
+    } else {
+        bind_ports.push(reg_port);
+        if visit_port != reg_port {
+            bind_ports.push(visit_port);
         }
     }
 
-    let _ = try_join!(
-        axum::serve(reg_listener, reg_router).with_graceful_shutdown(sig(cranker_router.clone()).into_future()).into_future(),
-        axum::serve(visit_listener, visit_router).with_graceful_shutdown(sig(cranker_router.clone()).into_future()).into_future(),
-    );
+    let mut servers = Vec::new();
+    for port in bind_ports {
+        let listener = TcpListener::bind(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            port,
+        ))
+            .await
+            .unwrap();
+        println!("Unified router started, listening on port: {}", port);
+        servers.push(axum::serve(listener, unified_router.clone()).into_future());
+    }
+
+    let _ = futures::future::join_all(servers).await;
 }
