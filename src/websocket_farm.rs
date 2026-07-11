@@ -526,13 +526,33 @@ impl WebSocketFarmInterface for WebSocketFarm {
                     }
                 }
             }
+            // FIXME: Java implementation doesn't wait for `maxWaitInMillis` in V3.
+            //  I think it's good to keep this behaviour in V3. The bellow commented
+            //  code is to align the behaviour. Please uncommented it if necessary.
+            //  Check `canHandle()` in WebSocketFarmV3.java and the test in
+            //  CrankerRouterHandlerTest.java and CrankerRouterRetryTest.java
+            // let mut is_v3 = false;
+            // let mut is_empty = false;
             if let Some(some) = another_self.route_to_router_socket_id_to_arc_router_socket_map.get(&route) {
                 let route_clone = route.clone();
                 another_self.route_last_removal_times.insert(route_clone, time_utils::current_time_millis());
+                // for entry in some.value().iter() {
+                //     let rs = entry.value();
+                //     if rs.connector_id().eq(&connector_id) && rs.cranker_version() == CRANKER_V_3_0 {
+                //         is_v3 = true;
+                //     }
+                // }
                 some.value().retain(|_k, v| {
                     !v.connector_id().eq(&connector_id)
                 });
+                // if some.value().is_empty() {
+                //     is_empty = true;
+                // }
             }
+            // if is_empty && is_v3 {
+            //     another_self.route_to_socket_chan.remove(&route);
+            //     another_self.route_to_router_socket_id_to_arc_router_socket_map.remove(&route);
+            // }
             for socket in sockets_to_close {
                 another_self.idle_count.fetch_add(-1, AcqRel);
                 socket.get_is_removed_arc_atomic_bool().store(true, Release);
