@@ -537,25 +537,31 @@ impl WebSocketFarmInterface for WebSocketFarm {
             //     another_self.route_to_router_socket_id_to_arc_router_socket_map.remove(&route);
             // }
             for socket in sockets_to_close {
-                another_self.idle_count.fetch_add(-1, AcqRel);
-                socket.get_is_removed_arc_atomic_bool().store(true, Release);
-                warn!("De-registering and draining/closing router_socket_id={}", socket.router_socket_id());
-                tokio::spawn(async move {
-                    let mut is_active = socket.is_active();
-                    if is_active {
-                        let start_time = std::time::Instant::now();
-                        while is_active && start_time.elapsed() < std::time::Duration::from_secs(15) {
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                            is_active = socket.is_active();
-                        }
-                    }
-                    warn!("Closing socket router_socket_id={}", socket.router_socket_id());
+                // Aligns with Java behaviour:
+                // - V1 (RouterSocket.java L63-L71): socketSessionClose() always closes immediately.
+                //   This is safe because a V1 socket is removed from the idle queue the moment it
+                //   starts handling a request, so any socket still visible in the map is already idle.
+                // - V3 (RouterSocketV3.java L245-L257): socketSessionClose() only closes if
+                //   contextMap.isEmpty(). If the socket has in-flight requests, the method does
+                //   nothing — the connector is expected to finish its work and then close the
+                //   WebSocket from its side, which fires on_close on the router.
+                if !socket.is_active() {
+                    // Idle socket: mark removed, decrement idle count, close immediately (1001 "Going away").
+                    socket.get_is_removed_arc_atomic_bool().store(true, Release);
+                    another_self.idle_count.fetch_add(-1, AcqRel);
+                    warn!("De-registering idle socket, closing router_socket_id={}", socket.router_socket_id());
                     let _ = socket.clone().send_ws_msg_to_uwss(axum::extract::ws::Message::Close(Some(axum::extract::ws::CloseFrame {
                         code: 1001,
                         reason: "Going away".into(),
                     }))).await;
-                    let _ = socket.terminate_all_conn(None).await;
-                });
+                } else {
+                    // Active socket (V3 with in-flight requests): do NOT mark is_removed or decrement
+                    // idle_count here. The socket is already removed from the map (retain above), so it
+                    // won't be re-selected. When the connector finishes its work and closes the WebSocket
+                    // naturally, on_close fires and calls remove_router_socket_in_background, which will
+                    // decrement idle_count and do proper cleanup.
+                    warn!("De-registering active socket, leaving open for connector to finish: router_socket_id={}", socket.router_socket_id());
+                }
             }
         });
     }
