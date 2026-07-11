@@ -20,35 +20,6 @@ index 0343e27..ca372d9 100644
                  <configuration>
                      <source>11</source>
                  </configuration>
-diff --git a/src/main/java/com/hsbc/cranker/mucranker/CrankerRouterBuilder.java b/src/main/java/com/hsbc/cranker/mucranker/CrankerRouterBuilder.java
-index 229a09a..7294453 100644
---- a/src/main/java/com/hsbc/cranker/mucranker/CrankerRouterBuilder.java
-+++ b/src/main/java/com/hsbc/cranker/mucranker/CrankerRouterBuilder.java
-@@ -247,6 +247,24 @@ public class CrankerRouterBuilder {
-      * @return A newly created CrankerRouter object
-      */
-     public CrankerRouter start() {
-+        boolean isRust = Boolean.getBoolean("cranker.router.rust") || "true".equalsIgnoreCase(System.getenv("CRANKER_ROUTER_RUST"));
-+        if (isRust) {
-+            try {
-+                return (CrankerRouter) Class.forName("com.hsbc.cranker.mucranker.RustCrankerRouter")
-+                    .getConstructor(
-+                        IPValidator.class, boolean.class, boolean.class, String.class, Set.class,
-+                        long.class, long.class, long.class, long.class, List.class, RouteResolver.class,
-+                        List.class, java.util.function.Function.class
-+                    )
-+                    .newInstance(
-+                        ipValidator, discardClientForwardedHeaders, sendLegacyForwardedHeaders, viaValue, doNotProxyHeaders,
-+                        maxWaitInMillis, pingAfterWriteMillis, idleReadTimeoutMills, routesKeepTimeMillis,
-+                        completionListeners, routeResolver, supportedCrankerProtocol, clientIpProvider
-+                    );
-+            } catch (Exception e) {
-+                throw new RuntimeException("Failed to instantiate RustCrankerRouter via reflection", e);
-+            }
-+        }
-         Set<String> doNotProxy = new HashSet<>(CrankerMuHandler.REPRESSED);
-         doNotProxyHeaders.forEach(h -> doNotProxy.add(h.toLowerCase()));
-         if (routeResolver == null) routeResolver = new RouteResolver() {};
 diff --git a/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java b/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
 index c1fc183..8c99eb7 100644
 --- a/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
@@ -92,18 +63,20 @@ index c1fc183..8c99eb7 100644
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/BaseEndToEndTest.java b/src/test/java/com/hsbc/cranker/mucranker/BaseEndToEndTest.java
-index 5df1975..17601f8 100644
+index 5df1975..2c60cbd 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/BaseEndToEndTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/BaseEndToEndTest.java
-@@ -10,6 +10,7 @@ import org.junit.jupiter.api.RepetitionInfo;
+@@ -10,6 +10,9 @@ import org.junit.jupiter.api.RepetitionInfo;
  import org.slf4j.Logger;
  import org.slf4j.LoggerFactory;
  import scaffolding.AssertUtils;
 +import scaffolding.TestServerBuilder;
++
++import scaffolding.TestCrankerRouterBuilder;
  
  import java.io.IOException;
  import java.net.URI;
-@@ -22,7 +23,7 @@ import java.util.stream.Stream;
+@@ -22,7 +25,7 @@ import java.util.stream.Stream;
  
  import static com.hsbc.cranker.connector.CrankerConnectorBuilder.CRANKER_PROTOCOL_1;
  import static com.hsbc.cranker.connector.CrankerConnectorBuilder.CRANKER_PROTOCOL_3;
@@ -112,7 +85,16 @@ index 5df1975..17601f8 100644
  import static java.util.stream.Collectors.toList;
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.is;
-@@ -115,7 +116,7 @@ public abstract class BaseEndToEndTest {
+@@ -51,7 +54,7 @@ public abstract class BaseEndToEndTest {
+         if (router != null) swallowException(router::stop);
+     }
+ 
+-    void startRouterAndConnector(CrankerRouterBuilder crankerRouterBuilder, List<String> preferredProtocols) {
++    void startRouterAndConnector(TestCrankerRouterBuilder crankerRouterBuilder, List<String> preferredProtocols) {
+         this.crankerRouter = crankerRouterBuilder.start();
+         this.router = httpsServerForTest()
+                 .addHandler(crankerRouter.createRegistrationHandler())
+@@ -115,7 +118,7 @@ public abstract class BaseEndToEndTest {
                  .start();
      }
  
@@ -364,10 +346,17 @@ index 9423c9b..72fa39d 100644
  import static org.hamcrest.Matchers.is;
  import static scaffolding.ClientUtils.call;
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java b/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java
-index c60c904..7307f9d 100644
+index c60c904..31260de 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java
-@@ -15,15 +15,16 @@ import java.util.List;
+@@ -10,20 +10,23 @@ import org.junit.jupiter.api.Test;
+ import scaffolding.ClientUtils;
+ import scaffolding.InMemCookieJar;
+ 
++import scaffolding.TestCrankerRouterBuilder;
++
+ import java.io.IOException;
+ import java.util.List;
  import java.util.Optional;
  import java.util.stream.Stream;
  
@@ -387,7 +376,16 @@ index c60c904..7307f9d 100644
  public class HeaderProxyingTest extends BaseEndToEndTest {
  
      @RepeatedTest(3)
-@@ -315,3 +316,4 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+@@ -227,7 +230,7 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+             })
+             .start();
+ 
+-        final CrankerRouterBuilder crankerBuilder = crankerRouter()
++        final TestCrankerRouterBuilder crankerBuilder = crankerRouter()
+             .withSupportedCrankerProtocols(List.of("cranker_1.0", "cranker_3.0"))
+             .withDiscardClientForwardedHeaders(false)
+             .proxyHostHeader(false)
+@@ -315,3 +318,4 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
      }
  
  }
@@ -1325,12 +1323,167 @@ index 93a12fb..bfe66c3 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/src/test/java/scaffolding/TestCrankerRouterBuilder.java b/src/test/java/scaffolding/TestCrankerRouterBuilder.java
+new file mode 100644
+index 0000000..00f1fcc
+--- /dev/null
++++ b/src/test/java/scaffolding/TestCrankerRouterBuilder.java
+@@ -0,0 +1,149 @@
++package scaffolding;
++
++import com.hsbc.cranker.mucranker.*;
++import io.muserver.MuRequest;
++import java.util.List;
++import java.util.Set;
++import java.util.concurrent.TimeUnit;
++import java.util.function.Function;
++
++public class TestCrankerRouterBuilder {
++    private final CrankerRouterBuilder delegate = CrankerRouterBuilder.crankerRouter();
++
++    public static TestCrankerRouterBuilder crankerRouter() {
++        return new TestCrankerRouterBuilder();
++    }
++
++    public TestCrankerRouterBuilder withDiscardClientForwardedHeaders(boolean discardClientForwardedHeaders) {
++        delegate.withDiscardClientForwardedHeaders(discardClientForwardedHeaders);
++        return this;
++    }
++
++    public TestCrankerRouterBuilder withSendLegacyForwardedHeaders(boolean sendLegacyForwardedHeaders) {
++        delegate.withSendLegacyForwardedHeaders(sendLegacyForwardedHeaders);
++        return this;
++    }
++
++    public TestCrankerRouterBuilder withViaName(String viaName) {
++        delegate.withViaName(viaName);
++        return this;
++    }
++
++    public TestCrankerRouterBuilder withIdleTimeout(long duration, TimeUnit unit) {
++        delegate.withIdleTimeout(duration, unit);
++        return this;
++    }
++
++    public TestCrankerRouterBuilder withRoutesKeepTime(long duration, TimeUnit unit) {
++        delegate.withRoutesKeepTime(duration, unit);
++        return this;
++    }
++
++    public TestCrankerRouterBuilder withPingSentAfterNoWritesFor(int duration, TimeUnit unit) {
++        delegate.withPingSentAfterNoWritesFor(duration, unit);
++        return this;
++    }
++
++    public TestCrankerRouterBuilder withConnectorMaxWaitInMillis(long maxWaitInMillis) {
++        delegate.withConnectorMaxWaitInMillis(maxWaitInMillis);
++        return this;
++    }
++
++    public TestCrankerRouterBuilder proxyHostHeader(boolean sendHostToTarget) {
++        delegate.proxyHostHeader(sendHostToTarget);
++        return this;
++    }
++
++    public TestCrankerRouterBuilder withRegistrationIpValidator(IPValidator ipValidator) {
++        delegate.withRegistrationIpValidator(ipValidator);
++        return this;
++    }
++
++    public TestCrankerRouterBuilder withProxyListeners(List<ProxyListener> proxyListeners) {
++        delegate.withProxyListeners(proxyListeners);
++        return this;
++    }
++
++    public TestCrankerRouterBuilder withRouteResolver(RouteResolver routeResolver) {
++        delegate.withRouteResolver(routeResolver);
++        return this;
++    }
++
++    public TestCrankerRouterBuilder withSupportedCrankerProtocols(List<String> protocols) {
++        delegate.withSupportedCrankerProtocols(protocols);
++        return this;
++    }
++
++    public TestCrankerRouterBuilder withClientIpProvider(Function<MuRequest, String> clientIpProvider) {
++        delegate.withClientIpProvider(clientIpProvider);
++        return this;
++    }
++
++    @SuppressWarnings("unchecked")
++    public CrankerRouter start() {
++        if (RustTestHelper.isRustMode()) {
++            try {
++                var ipValidatorField = CrankerRouterBuilder.class.getDeclaredField("ipValidator");
++                ipValidatorField.setAccessible(true);
++                IPValidator ipValidator = (IPValidator) ipValidatorField.get(delegate);
++
++                var discardClientForwardedHeadersField = CrankerRouterBuilder.class.getDeclaredField("discardClientForwardedHeaders");
++                discardClientForwardedHeadersField.setAccessible(true);
++                boolean discardClientForwardedHeaders = (boolean) discardClientForwardedHeadersField.get(delegate);
++
++                var sendLegacyForwardedHeadersField = CrankerRouterBuilder.class.getDeclaredField("sendLegacyForwardedHeaders");
++                sendLegacyForwardedHeadersField.setAccessible(true);
++                boolean sendLegacyForwardedHeaders = (boolean) sendLegacyForwardedHeadersField.get(delegate);
++
++                var viaValueField = CrankerRouterBuilder.class.getDeclaredField("viaValue");
++                viaValueField.setAccessible(true);
++                String viaValue = (String) viaValueField.get(delegate);
++
++                var doNotProxyHeadersField = CrankerRouterBuilder.class.getDeclaredField("doNotProxyHeaders");
++                doNotProxyHeadersField.setAccessible(true);
++                Set<String> doNotProxyHeaders = (Set<String>) doNotProxyHeadersField.get(delegate);
++
++                var maxWaitInMillisField = CrankerRouterBuilder.class.getDeclaredField("maxWaitInMillis");
++                maxWaitInMillisField.setAccessible(true);
++                long maxWaitInMillis = (long) maxWaitInMillisField.get(delegate);
++
++                var pingAfterWriteMillisField = CrankerRouterBuilder.class.getDeclaredField("pingAfterWriteMillis");
++                pingAfterWriteMillisField.setAccessible(true);
++                long pingAfterWriteMillis = (long) pingAfterWriteMillisField.get(delegate);
++
++                var idleReadTimeoutMillsField = CrankerRouterBuilder.class.getDeclaredField("idleReadTimeoutMills");
++                idleReadTimeoutMillsField.setAccessible(true);
++                long idleReadTimeoutMills = (long) idleReadTimeoutMillsField.get(delegate);
++
++                var routesKeepTimeMillisField = CrankerRouterBuilder.class.getDeclaredField("routesKeepTimeMillis");
++                routesKeepTimeMillisField.setAccessible(true);
++                long routesKeepTimeMillis = (long) routesKeepTimeMillisField.get(delegate);
++
++                var completionListenersField = CrankerRouterBuilder.class.getDeclaredField("completionListeners");
++                completionListenersField.setAccessible(true);
++                List<ProxyListener> completionListeners = (List<ProxyListener>) completionListenersField.get(delegate);
++
++                var routeResolverField = CrankerRouterBuilder.class.getDeclaredField("routeResolver");
++                routeResolverField.setAccessible(true);
++                RouteResolver routeResolver = (RouteResolver) routeResolverField.get(delegate);
++
++                var supportedCrankerProtocolField = CrankerRouterBuilder.class.getDeclaredField("supportedCrankerProtocol");
++                supportedCrankerProtocolField.setAccessible(true);
++                List<String> supportedCrankerProtocol = (List<String>) supportedCrankerProtocolField.get(delegate);
++
++                var clientIpProviderField = CrankerRouterBuilder.class.getDeclaredField("clientIpProvider");
++                clientIpProviderField.setAccessible(true);
++                Function<MuRequest, String> clientIpProvider = (Function<MuRequest, String>) clientIpProviderField.get(delegate);
++
++                return new com.hsbc.cranker.mucranker.RustCrankerRouter(
++                    ipValidator, discardClientForwardedHeaders, sendLegacyForwardedHeaders, viaValue, doNotProxyHeaders,
++                    maxWaitInMillis, pingAfterWriteMillis, idleReadTimeoutMills, routesKeepTimeMillis,
++                    completionListeners, routeResolver, supportedCrankerProtocol, clientIpProvider
++                );
++            } catch (Exception e) {
++                throw new RuntimeException("Failed to construct RustCrankerRouter", e);
++            }
++        }
++        return delegate.start();
++    }
++}
 diff --git a/src/test/java/scaffolding/TestServerBuilder.java b/src/test/java/scaffolding/TestServerBuilder.java
 new file mode 100644
-index 0000000..31c4756
+index 0000000..2516176
 --- /dev/null
 +++ b/src/test/java/scaffolding/TestServerBuilder.java
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,158 @@
 +package scaffolding;
 +
 +import io.muserver.MuHandler;
@@ -1378,8 +1531,8 @@ index 0000000..31c4756
 +        }
 +    }
 +
-+    public static com.hsbc.cranker.mucranker.CrankerRouterBuilder crankerRouter() {
-+        return com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter();
++    public static TestCrankerRouterBuilder crankerRouter() {
++        return TestCrankerRouterBuilder.crankerRouter();
 +    }
 +
 +    public TestServerBuilder addHandler(MuHandler handler) {
@@ -1408,14 +1561,10 @@ index 0000000..31c4756
 +    }
 +
 +    public TestServerBuilder withHttpsPort(int port) {
-+        if (RustTestHelper.isTlsMode()) {
-+            if (RustTestHelper.isRustMode()) {
-+                builder.withHttpPort(port);
-+            } else {
-+                builder.withHttpsPort(port);
-+            }
-+        } else {
++        if (RustTestHelper.isRustMode()) {
 +            builder.withHttpPort(port);
++        } else {
++            builder.withHttpsPort(port);
 +        }
 +        return this;
 +    }
