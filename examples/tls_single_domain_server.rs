@@ -10,7 +10,9 @@ use axum::handler::HandlerWithoutStateExt;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::Redirect;
 use axum_core::BoxError;
-use axum_extra::extract::Host;
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
+use axum::http::uri::Authority;
 use axum_server::tls_rustls::RustlsConfig;
 use log::{debug, info, LevelFilter, warn};
 use log::LevelFilter::Debug;
@@ -26,6 +28,10 @@ use scr_axum_cranker_router::router_socket_filter::DomainRouterSocketFilter;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     // To generate self-signed certificate please install openssl
     // and run the /self_signed_certs/openssl_command.sh first.
     // Reference:
@@ -220,4 +226,68 @@ struct TestEnv {
     reg_port: u16,
     visit_port: u16,
     redirect_https: bool,
+}
+
+// Host extractor is being demised since future version of axum-extra from 0.12.6
+// The author suggest just copy and paste its original implementation if necessary
+// Ref:
+// https://github.com/tokio-rs/axum/issues/3442
+// https://github.com/tokio-rs/axum/pull/3599
+#[derive(Debug, Clone)]
+pub struct Host(pub String);
+
+impl<S> FromRequestParts<S> for Host
+where
+    S: Send + Sync,
+{
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        if let Some(host) = parse_forwarded(&parts.headers) {
+            return Ok(Host(host.to_owned()));
+        }
+
+        if let Some(host) = parts
+            .headers
+            .get("X-Forwarded-Host")
+            .and_then(|host| host.to_str().ok())
+        {
+            return Ok(Host(host.to_owned()));
+        }
+
+        if let Some(host) = parts
+            .headers
+            .get(axum::http::header::HOST)
+            .and_then(|host| host.to_str().ok())
+        {
+            return Ok(Host(host.to_owned()));
+        }
+
+        if let Some(authority) = parts.uri.authority() {
+            return Ok(Host(parse_authority(authority).to_owned()));
+        }
+
+        Err(StatusCode::BAD_REQUEST)
+    }
+}
+
+fn parse_forwarded(headers: &HeaderMap) -> Option<&str> {
+    let forwarded_values = headers.get(axum::http::header::FORWARDED)?.to_str().ok()?;
+    let first_value = forwarded_values.split(',').next()?;
+    first_value.split(';').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        key.trim()
+            .eq_ignore_ascii_case("host")
+            .then(|| value.trim().trim_matches('"'))
+    })
+}
+
+fn parse_authority(auth: &Authority) -> &str {
+    auth.as_str()
+        .rsplit('@')
+        .next()
+        .expect("split always has at least 1 item")
 }

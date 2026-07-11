@@ -49,8 +49,7 @@ impl CrankerProtocolResponse {
                 format!("failed to parse status code from target response header ({}): {:?}",
                         bits[1], pie).to_string())
         })?;
-        let headers = lines.into_iter().rev()
-            .take(lines_len - 1)
+        let headers = lines.into_iter().skip(1)
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .collect();

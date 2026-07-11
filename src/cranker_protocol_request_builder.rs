@@ -68,6 +68,7 @@ impl CrankerProtocolRequestBuilder {
     }
 
     pub(crate) fn build_header_str(header_map: &HeaderMap) -> String {
+        // if multiple cookie headers exist, they should be combined into a single cookie header as per https://tools.ietf.org/html/rfc7540#section-8.1.2.5
         let mut headers_str = String::new();
         let mut cookie_list: Vec<&str> = vec![];
 
@@ -78,8 +79,8 @@ impl CrankerProtocolRequestBuilder {
                         if k.as_str().eq_ignore_ascii_case("cookie") {
                             cookie_list.push(s)
                         } else {
-                            headers_str.push_str(format!("{}:{}", k.as_str(), s).as_str());
-                            headers_str.push('\n');
+                            headers_str.push_str(format!("{}:{}\n", k.as_str(), s).as_str());
+                            // headers_str.push('\n');
                         }
                     }
                     Err(e) => {
@@ -90,8 +91,7 @@ impl CrankerProtocolRequestBuilder {
         });
         if !cookie_list.is_empty() {
             let cookie_cat = cookie_list.join("; ");
-            headers_str.push_str(cookie_cat.as_str());
-            headers_str.push('\n');
+            headers_str.push_str(&format!("cookie:{}\n", cookie_cat));
         }
         headers_str
     }

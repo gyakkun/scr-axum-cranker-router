@@ -630,19 +630,11 @@ fn check_via_name(via_name: &String) {
             panic!("non ascii letter in via header: \"{}\"", c)
         }
     });
-    // From Dan: hyphen should only be at the beginning or the end
-    let mut idx = 0;
-    let len = via_name.len(); // given all ascii chars, string length == vec length
+    // From Dan: hyphen should only be at the beginning or the end __of a regex__
     via_name.chars().for_each(|v| {
         if !allowed.chars().any(|a| a == v) {
             panic!("not allowed character in via header: \"{}\"", char::from(v.clone()))
         }
-        if v == '-' {
-            if idx != 0 || idx != len - 1 {
-                panic!("hyphen should only be at the beginning or the end of the via header!");
-            }
-        }
-        idx += 1;
     })
 }
 

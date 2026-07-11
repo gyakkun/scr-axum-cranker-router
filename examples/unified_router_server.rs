@@ -21,6 +21,10 @@ use scr_axum_cranker_router::websocket_farm::WebSocketFarmInterface;
 
 #[tokio::main]
 async fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     let mut reg_port = 3000;
     let mut visit_port = 3002;
     let mut single_port = None;
