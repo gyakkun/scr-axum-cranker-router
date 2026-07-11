@@ -55,6 +55,7 @@ pub trait RouterSocket: Send + Sync + RouteIdentify {
                            original_uri: &OriginalUri,
                            cli_headers: &HeaderMap,
                            addr: &SocketAddr,
+                           is_tls: bool,
                            opt_body: Option<BodyDataStream>,
     ) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException>;
 

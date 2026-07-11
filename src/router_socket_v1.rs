@@ -701,6 +701,7 @@ impl RouterSocket for RouterSocketV1 {
                            original_uri: &OriginalUri,
                            cli_headers: &HeaderMap,
                            addr: &SocketAddr,
+                           is_tls: bool,
                            opt_body: Option<BodyDataStream>,
     ) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException> {
         // 0. if is removed then should not run into this method (fast)
@@ -716,7 +717,7 @@ impl RouterSocket for RouterSocketV1 {
         // 1. Cli header processing (fast)
         trace!("1");
         let mut hdr_to_tgt = HeaderMap::new();
-        set_target_request_headers(cli_headers, &mut hdr_to_tgt, &app_state, http_version, addr, original_uri);
+        set_target_request_headers(cli_headers, &mut hdr_to_tgt, &app_state, http_version, addr, original_uri, is_tls);
         // 2. Build protocol request line / protocol header frame without endmarker (fast)
         trace!("2");
         let request_line = create_request_line(method, &original_uri);

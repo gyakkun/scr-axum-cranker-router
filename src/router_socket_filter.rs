@@ -149,7 +149,7 @@ mod router_socket_filter_test {
             -1
         }
 
-        async fn on_client_req(self: Arc<Self>, _: ACRState, _: &Version, _: &Method, _: &OriginalUri, _: &HeaderMap, _: &SocketAddr, _: Option<BodyDataStream>) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException> {
+        async fn on_client_req(self: Arc<Self>, _: ACRState, _: &Version, _: &Method, _: &OriginalUri, _: &HeaderMap, _: &SocketAddr, _: bool, _: Option<BodyDataStream>) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException> {
             Err(CrankerRouterException::new(
                 "mock".to_string()
             ))

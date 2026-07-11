@@ -60,6 +60,16 @@ pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &'static str = "CrankerProtocol";
 pub const _VER_1_0: &'static str = "1.0";
 pub const _VER_3_0: &'static str = "3.0";
 
+/// Marker extension injected by the TLS server to indicate
+/// that the incoming connection arrived over TLS.  The [`visit_portal`] handler reads this
+/// extension to set the correct `proto=https` value in the forwarded headers it sends to the
+/// back-end target service.
+#[derive(Clone, Debug)]
+pub struct CrankerTlsInfo {
+    pub is_tls: bool,
+    pub sni: Option<String>,
+}
+
 pub const CRANKER_V_1_0: &'static str = "cranker_1.0";
 pub const CRANKER_V_3_0: &'static str = "cranker_3.0";
 
@@ -239,6 +249,7 @@ impl CrankerRouter {
     /// router.
     pub fn visit_portal_axum_router(&self) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
         let res = Router::new()
+            .route("/", any(CrankerRouter::visit_portal))
             .route("/{*any}", any(CrankerRouter::visit_portal))
             .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
             .with_state(self.state())
@@ -251,7 +262,7 @@ impl CrankerRouter {
     /// It will receive client requests, find valid router
     /// socket and "pipe" them together, and proxy the request
     /// to the connector on target services' side.
-    // #[debug_handler]
+    // #[axum_macros::debug_handler]
     pub async fn visit_portal(
         State(app_state): State<ACRState>,
         method: Method,
@@ -261,6 +272,7 @@ impl CrankerRouter {
         req: Request<Body>,
     ) -> Response
     {
+        let is_tls = req.extensions().get::<CrankerTlsInfo>().map_or(false, |info| info.is_tls);
         if method == Method::TRACE {
             return (StatusCode::METHOD_NOT_ALLOWED, "Method not supported.").into_response();
         }
@@ -306,6 +318,7 @@ impl CrankerRouter {
                     &original_uri,
                     &headers,
                     &addr,
+                    is_tls,
                     opt_body,
                 ).await {
                     Ok((res, _)) => {

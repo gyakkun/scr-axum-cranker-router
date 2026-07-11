@@ -21,6 +21,7 @@ pub(crate) fn set_target_request_headers(
     http_version: &Version,
     cli_remote_addr: &SocketAddr,
     orig_uri: &OriginalUri,
+    is_tls: bool,
 ) -> bool {
     let custom_hop_by_hop = get_custom_hop_by_hop_headers(cli_hdr.get(http::header::CONNECTION));
     let mut has_content_length_or_transfer_encoding = false;
@@ -34,7 +35,7 @@ pub(crate) fn set_target_request_headers(
         has_content_length_or_transfer_encoding |=
             lowercase_key.eq(http::header::CONTENT_LENGTH.as_str())
                 || lowercase_key.eq(http::header::TRANSFER_ENCODING.as_str());
-        hdr_to_tgt.insert(k, v.clone());
+        hdr_to_tgt.append(k, v.clone());
     });
     let cli_all_via = header_map_get_all_ok_to_string(cli_hdr, http::header::VIA);
 
@@ -54,6 +55,7 @@ pub(crate) fn set_target_request_headers(
         app_state.config.send_legacy_forwarded_headers,
         cli_remote_addr,
         orig_uri,
+        is_tls,
     ) {
         error!("Failed to set forwarded headers: {}", e);
     }
@@ -83,6 +85,7 @@ pub(crate) fn set_forwarded_headers(
     send_legacy_forwarded_headers: bool,
     cli_remote_addr: &SocketAddr,
     cli_req_uri: &OriginalUri,
+    is_tls: bool,
 ) -> Result<(), CrankerRouterException> {
     let mut forwarded_headers = Vec::new();
     if !discard_client_forwarded_headers {
@@ -94,7 +97,7 @@ pub(crate) fn set_forwarded_headers(
         }
     }
 
-    let new_forwarded_hdr = create_forwarded_header_to_tgt(cli_hdr, cli_remote_addr, cli_req_uri);
+    let new_forwarded_hdr = create_forwarded_header_to_tgt(cli_hdr, cli_remote_addr, cli_req_uri, is_tls);
     if let Ok(parsed) = new_forwarded_hdr.to_string().parse() {
         hdr_to_tgt.append(http::header::FORWARDED, parsed);
     }
@@ -128,15 +131,18 @@ pub(crate) fn create_forwarded_header_to_tgt(
     cli_hdr: &HeaderMap,
     cli_remote_addr: &SocketAddr,
     cli_req_uri: &OriginalUri,
+    is_tls: bool,
 ) -> ForwardedHeader {
     let server_self_ip = LOCAL_IP.to_string();
+    let host = cli_hdr.get(http::header::HOST)
+        .and_then(|i| i.to_str().ok())
+        .map(|j| j.to_string())
+        .or_else(|| cli_req_uri.authority().map(|a| a.to_string()));
     ForwardedHeader {
         by: Some(server_self_ip),
         for_value: Some(cli_remote_addr.ip().to_string()),
-        host: cli_hdr.get(http::header::HOST)
-            .and_then(|i| i.to_str().ok())
-            .map(|j| j.to_string()),
-        proto: Some(cli_req_uri.scheme_str().unwrap_or("http").to_string()),
+        host,
+        proto: Some(if is_tls { "https".to_string() } else { cli_req_uri.scheme_str().unwrap_or("http").to_string() }),
         extensions: None,
     }
 }

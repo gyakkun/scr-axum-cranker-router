@@ -1,10 +1,12 @@
-use std::future::IntoFuture;
+use std::future::{Future, IntoFuture};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::pin::Pin;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::{AcqRel, Acquire};
+use std::task::{Context, Poll};
 
 use axum::handler::HandlerWithoutStateExt;
 use axum::http::{HeaderMap, StatusCode, Uri};
@@ -13,14 +15,17 @@ use axum_core::BoxError;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::uri::Authority;
-use axum_server::tls_rustls::RustlsConfig;
+use axum_server::accept::{Accept, DefaultAcceptor};
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
+use axum_server::Server;
+use tokio_rustls::server::TlsStream;
 use log::{debug, info, LevelFilter, warn};
 use log::LevelFilter::Debug;
 use simple_logger::SimpleLogger;
 use tokio::net::TcpListener;
 use tokio::try_join;
 
-use scr_axum_cranker_router::CrankerRouterBuilder;
+use scr_axum_cranker_router::{CrankerRouterBuilder, CrankerTlsInfo};
 use scr_axum_cranker_router::exceptions::CrankerRouterException;
 use scr_axum_cranker_router::proxy_info::ProxyInfo;
 use scr_axum_cranker_router::proxy_listener::ProxyListener;
@@ -93,15 +98,22 @@ async fn main() {
     ).await.unwrap();
 
     // reg
-    let reg_https = axum_server::bind_rustls(
+    let reg_rustls_acceptor = axum_server::tls_rustls::RustlsAcceptor::new(rustls_config.clone());
+    let reg_acceptor = CrankerTlsAcceptor::new(reg_rustls_acceptor);
+    let reg_https = Server::bind(
         SocketAddr::from_str(format!("{}:{}", test_env.addr, ports_reg.https).as_str()).unwrap(),
-        rustls_config.clone(),
-    ).serve(cranker_router.registration_axum_router());
+    )
+    .acceptor(reg_acceptor)
+    .serve(cranker_router.registration_axum_router());
 
-    let visit_https = axum_server::bind_rustls(
+    // visit
+    let visit_rustls_acceptor = axum_server::tls_rustls::RustlsAcceptor::new(rustls_config.clone());
+    let visit_acceptor = CrankerTlsAcceptor::new(visit_rustls_acceptor);
+    let visit_https = Server::bind(
         SocketAddr::from_str(format!("{}:{}", test_env.addr, ports_visit.https).as_str()).unwrap(),
-        rustls_config.clone(),
-    ).serve(cranker_router.visit_portal_axum_router());
+    )
+    .acceptor(visit_acceptor)
+    .serve(cranker_router.visit_portal_axum_router());
 
     println!("trying to start simple_v1 server at - wss reg {}:{} (https {}) , visit portal {}:{} (https {})",
              test_env.addr, test_env.reg_port, ports_reg.https,
@@ -290,4 +302,75 @@ fn parse_authority(auth: &Authority) -> &str {
         .rsplit('@')
         .next()
         .expect("split always has at least 1 item")
+}
+
+#[derive(Clone)]
+pub struct TlsInfoService<S> {
+    inner: S,
+    tls_info: CrankerTlsInfo,
+}
+
+impl<S, ReqBody> tower_service::Service<axum::http::Request<ReqBody>> for TlsInfoService<S>
+where
+    S: tower_service::Service<axum::http::Request<ReqBody>>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    #[inline]
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), S::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    #[inline]
+    fn call(&mut self, mut req: axum::http::Request<ReqBody>) -> S::Future {
+        req.extensions_mut().insert(self.tls_info.clone());
+        self.inner.call(req)
+    }
+}
+
+#[derive(Clone)]
+pub struct CrankerTlsAcceptor<A = DefaultAcceptor> {
+    inner: RustlsAcceptor<A>,
+}
+
+impl<A> CrankerTlsAcceptor<A> {
+    pub fn new(inner: RustlsAcceptor<A>) -> Self {
+        Self { inner }
+    }
+}
+
+impl<A, I, S> Accept<I, S> for CrankerTlsAcceptor<A>
+where
+    A: Accept<I, S, Service = S> + Clone + Send + Sync + 'static,
+    A::Future: Send + 'static,
+    A::Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    A::Service: Send,
+    S: Send + 'static,
+{
+    type Stream = TlsStream<A::Stream>;
+    type Service = TlsInfoService<S>;
+    type Future = Pin<Box<dyn Future<Output = std::io::Result<(Self::Stream, Self::Service)>> + Send>>;
+
+    fn accept(&self, stream: I, service: S) -> Self::Future {
+        let handshake_fut = self.inner.accept(stream, service);
+        Box::pin(async move {
+            let (tls_stream, inner_service) = handshake_fut.await?;
+            let (_, session) = tls_stream.get_ref();
+            let sni = session.server_name().map(String::from);
+            
+            let tls_info = CrankerTlsInfo {
+                is_tls: true,
+                sni,
+            };
+            
+            let wrapped_service = TlsInfoService {
+                inner: inner_service,
+                tls_info,
+            };
+            
+            Ok((tls_stream, wrapped_service))
+        })
+    }
 }

@@ -20,26 +20,29 @@ axum-core = "0.5"
 bytes = "1"
 dashmap = "6"
 futures = "0.3"
-hashlink = "0.10"
+hashlink = "0.12"
 lazy_static = "1"
 local-ip-address = "0.6"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
-tower-http = { version = "0.6", features = ["limit"] }
+tower-http = { version = "0.7", features = ["limit"] }
 uuid = { version = "1", features = ["v4"] }
 async-stream = "0.3"
 async-trait = "0.1"
 simple_logger = "5"
+axum-macros = "0.5"
 
 [dev-dependencies]
 # for tls example - single domain
-axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 # As CryptoProvider
 rustls = { version = "0.23", default-features = false, features = ["std", "logging", "tls12", "ring"] }
-axum-extra = "0.10"
-reqwest = { version = "0.12", features = ["json"] }
+tokio-rustls = "0.26"
+tower-service = "0.3"
+axum-extra = "0.12"
+reqwest = { version = "0.13", features = ["json"] }
 
 [lib]
 crate-type = ["lib"]

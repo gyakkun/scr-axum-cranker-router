@@ -123,6 +123,7 @@ impl RouterSocketV3 {
         original_uri: &OriginalUri,
         headers: &HeaderMap,
         addr: &SocketAddr,
+        is_tls: bool,
         opt_body: Option<BodyDataStream>,
         req_id: i32,
         cli_req_ident: Option<ClientRequestIdentifier>,
@@ -138,6 +139,7 @@ impl RouterSocketV3 {
             http_version,
             addr,
             original_uri,
+            is_tls,
         );
         trace!("4");
 
@@ -441,6 +443,7 @@ impl RouterSocket for RouterSocketV3 {
         original_uri: &OriginalUri,
         cli_headers: &HeaderMap,
         addr: &SocketAddr,
+        is_tls: bool,
         opt_body: Option<BodyDataStream>,
     ) -> Result<(Response<Body>, Option<ClientRequestIdentifier>), CrankerRouterException>
     {
@@ -472,6 +475,7 @@ impl RouterSocket for RouterSocketV3 {
             original_uri,
             cli_headers,
             addr,
+            is_tls,
             opt_body,
             req_id,
             cli_req_ident,

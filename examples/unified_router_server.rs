@@ -1,10 +1,12 @@
 use log::LevelFilter;
 use simple_logger::SimpleLogger;
 use std::env;
-use std::future::IntoFuture;
+use std::future::{Future, IntoFuture};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::net::TcpListener;
 use std::path::PathBuf;
 use axum::extract::State;
@@ -13,9 +15,12 @@ use axum::middleware::from_fn_with_state;
 use axum::{Json, Router};
 use axum::routing::{any, get, post};
 use axum_core::response::{IntoResponse, Response};
-use axum_server::tls_rustls::RustlsConfig;
+use axum_server::accept::{Accept, DefaultAcceptor};
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
+use axum_server::Server;
+use tokio_rustls::server::TlsStream;
 use tower_http::limit;
-use scr_axum_cranker_router::{CrankerRouter, CrankerRouterBuilder, CrankerRouterState};
+use scr_axum_cranker_router::{CrankerRouter, CrankerRouterBuilder, CrankerRouterState, CrankerTlsInfo};
 use scr_axum_cranker_router::dark_host::DarkHost;
 use scr_axum_cranker_router::websocket_farm::WebSocketFarmInterface;
 
@@ -38,6 +43,7 @@ async fn main() {
     let mut use_domain_filter = false;
     let mut idle_read_timeout_ms = 60000;
     let mut use_tls = false;
+    let mut proxy_host_header = true;
 
     let args: Vec<String> = env::args().collect();
     let mut i = 1;
@@ -95,6 +101,10 @@ async fn main() {
                 use_tls = bool::from_str(&args[i + 1]).unwrap();
                 i += 2;
             }
+            "--proxy-host-header" => {
+                proxy_host_header = bool::from_str(&args[i + 1]).unwrap();
+                i += 2;
+            }
             _ => {
                 eprintln!("Unknown argument: {}", args[i]);
                 i += 1;
@@ -111,7 +121,8 @@ async fn main() {
         .with_discard_client_forwarded_headers(discard_client_forwarded_headers)
         .with_send_legacy_forwarded_headers(send_legacy_forwarded_headers)
         .should_allow_catch_all(allow_catch_all)
-        .with_idle_read_timeout_ms(idle_read_timeout_ms);
+        .with_idle_read_timeout_ms(idle_read_timeout_ms)
+        .should_proxy_host_header(proxy_host_header);
 
     if use_domain_filter {
         cranker_router_builder = cranker_router_builder.with_router_socket_filter(Arc::new(
@@ -139,6 +150,7 @@ async fn main() {
         .route("/dark-mode/disable", post(disable_dark_mode_handler))
         .route("/dark-mode/hosts", get(get_dark_hosts_handler))
         .route("/health", get(CrankerRouter::health_root))
+        .route("/", any(CrankerRouter::visit_portal))
         .route("/{*any}", any(CrankerRouter::visit_portal))
         .with_state(cranker_router.state())
         .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
@@ -183,7 +195,11 @@ async fn main() {
             let tls_port = if *port > 50000 { *port - 10000 } else { *port + 10000 };
             let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), tls_port);
             println!("Unified HTTPS router listening on port: {}", tls_port);
-            let srv = axum_server::bind_rustls(addr, rustls_config.clone())
+            
+            let rustls_acceptor = axum_server::tls_rustls::RustlsAcceptor::new(rustls_config.clone());
+            let acceptor = CrankerTlsAcceptor::new(rustls_acceptor);
+            let srv = Server::bind(addr)
+                .acceptor(acceptor)
                 .serve(unified_router.clone());
             servers.push(tokio::spawn(srv.into_future()));
         }
@@ -214,4 +230,75 @@ async fn get_dark_hosts_handler(
     let hosts = app_state.websocket_farm.get_dark_hosts();
     let list: Vec<DarkHost> = hosts.into_iter().collect();
     (StatusCode::OK, Json(list)).into_response()
+}
+
+#[derive(Clone)]
+pub struct TlsInfoService<S> {
+    inner: S,
+    tls_info: CrankerTlsInfo,
+}
+
+impl<S, ReqBody> tower_service::Service<axum::http::Request<ReqBody>> for TlsInfoService<S>
+where
+    S: tower_service::Service<axum::http::Request<ReqBody>>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    #[inline]
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), S::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    #[inline]
+    fn call(&mut self, mut req: axum::http::Request<ReqBody>) -> S::Future {
+        req.extensions_mut().insert(self.tls_info.clone());
+        self.inner.call(req)
+    }
+}
+
+#[derive(Clone)]
+pub struct CrankerTlsAcceptor<A = DefaultAcceptor> {
+    inner: RustlsAcceptor<A>,
+}
+
+impl<A> CrankerTlsAcceptor<A> {
+    pub fn new(inner: RustlsAcceptor<A>) -> Self {
+        Self { inner }
+    }
+}
+
+impl<A, I, S> Accept<I, S> for CrankerTlsAcceptor<A>
+where
+    A: Accept<I, S, Service = S> + Clone + Send + Sync + 'static,
+    A::Future: Send + 'static,
+    A::Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    A::Service: Send,
+    S: Send + 'static,
+{
+    type Stream = TlsStream<A::Stream>;
+    type Service = TlsInfoService<S>;
+    type Future = Pin<Box<dyn Future<Output = std::io::Result<(Self::Stream, Self::Service)>> + Send>>;
+
+    fn accept(&self, stream: I, service: S) -> Self::Future {
+        let handshake_fut = self.inner.accept(stream, service);
+        Box::pin(async move {
+            let (tls_stream, inner_service) = handshake_fut.await?;
+            let (_, session) = tls_stream.get_ref();
+            let sni = session.server_name().map(String::from);
+            
+            let tls_info = CrankerTlsInfo {
+                is_tls: true,
+                sni,
+            };
+            
+            let wrapped_service = TlsInfoService {
+                inner: inner_service,
+                tls_info,
+            };
+            
+            Ok((tls_stream, wrapped_service))
+        })
+    }
 }
