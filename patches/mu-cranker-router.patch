@@ -147,7 +147,7 @@ index ca98bc5..5f14caa 100644
                  List<String> componentNames = IntStream.range(0, connectors.length()).mapToObj(i -> connectors.getJSONObject(i).getString("componentName")).collect(Collectors.toList());
                  return componentNames.size() == 2 && componentNames.containsAll(List.of("service-a", "service-b"));
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/CrankerDomainTest.java b/src/test/java/com/hsbc/cranker/mucranker/CrankerDomainTest.java
-index 9c118ca..b6970cc 100644
+index 9c118ca..0bdfad9 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/CrankerDomainTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/CrankerDomainTest.java
 @@ -15,8 +15,8 @@ import java.util.concurrent.TimeUnit;
@@ -167,8 +167,8 @@ index 9c118ca..b6970cc 100644
  
 -        final HashMap<String, AtomicInteger> localhostResult = callAndGroupByBody(URI.create("https://localhost:%s/hello".replace("%s", String.valueOf(router.uri().getPort()))), 20);
 -        final HashMap<String, AtomicInteger> loopbackIpResult = callAndGroupByBody(URI.create("https://127.0.0.1:%s/hello".replace("%s", String.valueOf(router.uri().getPort()))), 20);
-+        final HashMap<String, AtomicInteger> localhostResult = callAndGroupByBody(URI.create("http://localhost:%s/hello".replace("%s", String.valueOf(router.uri().getPort()))), 20);
-+        final HashMap<String, AtomicInteger> loopbackIpResult = callAndGroupByBody(URI.create("http://127.0.0.1:%s/hello".replace("%s", String.valueOf(router.uri().getPort()))), 20);
++        final HashMap<String, AtomicInteger> localhostResult = callAndGroupByBody(URI.create((router.uri().getScheme() + "://localhost:%s/hello").replace("%s", String.valueOf(router.uri().getPort()))), 20);
++        final HashMap<String, AtomicInteger> loopbackIpResult = callAndGroupByBody(URI.create((router.uri().getScheme() + "://127.0.0.1:%s/hello").replace("%s", String.valueOf(router.uri().getPort()))), 20);
  
          final int localTotal = localhostResult.values().stream().mapToInt(AtomicInteger::get).sum();
          assertThat(localTotal, is(20));
@@ -498,7 +498,7 @@ index 420f193..20ec354 100644
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/MultiConnectorTest.java b/src/test/java/com/hsbc/cranker/mucranker/MultiConnectorTest.java
-index 550a908..344ab2f 100644
+index 550a908..620337a 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/MultiConnectorTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/MultiConnectorTest.java
 @@ -18,8 +18,8 @@ import java.util.concurrent.atomic.AtomicInteger;
@@ -517,7 +517,7 @@ index 550a908..344ab2f 100644
          // all proxied to v3 as it's registered with domain "127.0.0.1" take higher priority
          final HashMap<String, AtomicInteger> bodyMap = callAndGroupByBody(
 -            URI.create("https://127.0.0.1:{port}/my-service/hello"
-+            URI.create("http://127.0.0.1:{port}/my-service/hello"
++            URI.create((router.uri().getScheme() + "://127.0.0.1:{port}/my-service/hello")
                  .replace("{port}", String.valueOf(router.uri().getPort()))),
              20);
          assertThat(bodyMap.get("targetV3_1").get(), is(20));
@@ -526,7 +526,7 @@ index 550a908..344ab2f 100644
          // all proxied to v3 as it's registered with domain "127.0.0.1" take higher priority
          final HashMap<String, AtomicInteger> bodyMap = callAndGroupByBody(
 -            URI.create("https://127.0.0.1:{port}/my-service/hello"
-+            URI.create("http://127.0.0.1:{port}/my-service/hello"
++            URI.create((router.uri().getScheme() + "://127.0.0.1:{port}/my-service/hello")
                  .replace("{port}", String.valueOf(router.uri().getPort()))),
              20);
          assertThat(bodyMap.get("targetV3_1").get(), is(20));
@@ -1327,10 +1327,10 @@ index 93a12fb..bfe66c3 100644
 +}
 diff --git a/src/test/java/scaffolding/TestServerBuilder.java b/src/test/java/scaffolding/TestServerBuilder.java
 new file mode 100644
-index 0000000..e0225f4
+index 0000000..31c4756
 --- /dev/null
 +++ b/src/test/java/scaffolding/TestServerBuilder.java
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,162 @@
 +package scaffolding;
 +
 +import io.muserver.MuHandler;
@@ -1359,7 +1359,7 @@ index 0000000..e0225f4
 +
 +    private TestServerBuilder(MuServerBuilder builder, boolean isHttps) {
 +        this.builder = builder;
-+        this.isHttps = isHttps && RustTestHelper.isTlsMode();
++        this.isHttps = isHttps;
 +    }
 +
 +    public static TestServerBuilder httpServer() {
@@ -1367,10 +1367,14 @@ index 0000000..e0225f4
 +    }
 +
 +    public static TestServerBuilder httpsServer() {
-+        if (RustTestHelper.isTlsMode()) {
-+            return new TestServerBuilder(MuServerBuilder.httpsServer(), true);
++        if (RustTestHelper.isRustMode()) {
++            if (RustTestHelper.isTlsMode()) {
++                return new TestServerBuilder(MuServerBuilder.httpsServer(), true);
++            } else {
++                return new TestServerBuilder(MuServerBuilder.httpServer(), false);
++            }
 +        } else {
-+            return new TestServerBuilder(MuServerBuilder.httpServer(), false);
++            return new TestServerBuilder(MuServerBuilder.httpsServer(), true);
 +        }
 +    }
 +

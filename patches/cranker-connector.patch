@@ -1903,10 +1903,10 @@ index 0000000..e53ff93
 +}
 diff --git a/src/test/java/scaffolding/TestServerBuilder.java b/src/test/java/scaffolding/TestServerBuilder.java
 new file mode 100644
-index 0000000..1010d6c
+index 0000000..75c3886
 --- /dev/null
 +++ b/src/test/java/scaffolding/TestServerBuilder.java
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,161 @@
 +package scaffolding;
 +
 +import com.hsbc.cranker.mucranker.RustCrankerRouter;
@@ -1933,7 +1933,7 @@ index 0000000..1010d6c
 +
 +    private TestServerBuilder(MuServerBuilder builder, boolean isHttps) {
 +        this.builder = builder;
-+        this.isHttps = isHttps && RustTestHelper.isTlsMode();
++        this.isHttps = isHttps;
 +    }
 +
 +    public static TestServerBuilder httpServer() {
@@ -1941,10 +1941,14 @@ index 0000000..1010d6c
 +    }
 +
 +    public static TestServerBuilder httpsServer() {
-+        if (RustTestHelper.isTlsMode()) {
-+            return new TestServerBuilder(MuServerBuilder.httpsServer(), true);
++        if (RustTestHelper.isRustMode()) {
++            if (RustTestHelper.isTlsMode()) {
++                return new TestServerBuilder(MuServerBuilder.httpsServer(), true);
++            } else {
++                return new TestServerBuilder(MuServerBuilder.httpServer(), false);
++            }
 +        } else {
-+            return new TestServerBuilder(MuServerBuilder.httpServer(), false);
++            return new TestServerBuilder(MuServerBuilder.httpsServer(), true);
 +        }
 +    }
 +
