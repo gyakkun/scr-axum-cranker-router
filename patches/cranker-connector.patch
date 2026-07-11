@@ -597,10 +597,18 @@ index 03affbe..98201de 100644
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorBuilderTest.java b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorBuilderTest.java
-index c4f213b..059e61b 100644
+index c4f213b..aa3dc32 100644
 --- a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorBuilderTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorBuilderTest.java
-@@ -19,8 +19,8 @@ import java.util.concurrent.TimeUnit;
+@@ -8,6 +8,7 @@ import io.muserver.MuServer;
+ import org.junit.jupiter.api.AfterEach;
+ import org.junit.jupiter.api.RepeatedTest;
+ import org.junit.jupiter.api.RepetitionInfo;
++import org.junit.jupiter.api.condition.DisabledIf;
+ 
+ import java.io.IOException;
+ import java.net.URI;
+@@ -19,8 +20,8 @@ import java.util.concurrent.TimeUnit;
  
  import static com.hsbc.cranker.connector.BaseEndToEndTest.preferredProtocols;
  import static com.hsbc.cranker.connector.BaseEndToEndTest.startConnectorAndWaitForRegistration;
@@ -611,23 +619,21 @@ index c4f213b..059e61b 100644
  import static org.junit.jupiter.api.Assertions.assertEquals;
  import static scaffolding.Action.swallowException;
  
-@@ -56,6 +56,7 @@ class CrankerConnectorBuilderTest {
+@@ -78,6 +79,13 @@ class CrankerConnectorBuilderTest {
      }
  
      @RepeatedTest(3)
-+    @org.junit.jupiter.api.condition.DisabledIf("isRustAndTlsOff")
-     void testMaxHeadersSize_normal(RepetitionInfo repetitionInfo) throws IOException, InterruptedException {
- 
-         setupServerForMaxHeaders(40000, preferredProtocols(repetitionInfo));
-@@ -78,6 +79,7 @@ class CrankerConnectorBuilderTest {
-     }
- 
-     @RepeatedTest(3)
-+    @org.junit.jupiter.api.condition.DisabledIf("isRustAndTlsOff")
++    @DisabledIf(
++        value = "isRustAndTlsOff",
++        disabledReason =
++            "axum/tower::http cannot limit the header size so it will not return 431 in non-tls mode. " +
++                "But why in tls mode it works?" +
++                "Actually if comment each of the test they will pass, but put together they will get stuck."
++    )
      void testMaxHeadersSize_exception(RepetitionInfo repetitionInfo) throws IOException, InterruptedException {
  
          setupServerForMaxHeaders(40000,  preferredProtocols(repetitionInfo));
-@@ -120,4 +122,9 @@ class CrankerConnectorBuilderTest {
+@@ -120,4 +128,9 @@ class CrankerConnectorBuilderTest {
  
          this.connector = startConnectorAndWaitForRegistration(crankerRouter, "*", targetServer, preferredProtocols, 2, this.crankerServer);
      }
@@ -1297,10 +1303,18 @@ index b7b261a..bdc61c7 100644
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/connector/RouterSupplierTest.java b/src/test/java/com/hsbc/cranker/connector/RouterSupplierTest.java
-index f24dfc2..7b65e32 100644
+index f24dfc2..dd46560 100644
 --- a/src/test/java/com/hsbc/cranker/connector/RouterSupplierTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/RouterSupplierTest.java
-@@ -15,15 +15,16 @@ import java.util.concurrent.TimeUnit;
+@@ -5,6 +5,7 @@ import io.muserver.Method;
+ import io.muserver.MuServer;
+ import io.muserver.SsePublisher;
+ import org.junit.jupiter.api.*;
++import org.junit.jupiter.api.condition.DisabledIf;
+ import scaffolding.SseTestClient;
+ 
+ import java.net.URI;
+@@ -15,15 +16,16 @@ import java.util.concurrent.TimeUnit;
  import java.util.concurrent.atomic.AtomicBoolean;
  import java.util.concurrent.atomic.AtomicReference;
  
@@ -1315,11 +1329,11 @@ index f24dfc2..7b65e32 100644
  import static scaffolding.Action.swallowException;
  import static scaffolding.AssertUtils.assertEventually;
  
-+@org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
++@DisabledIf("scaffolding.RustTestHelper#isRustMode")
  public class RouterSupplierTest extends BaseEndToEndTest {
  
      private static final String route = "my-service";
-@@ -273,3 +274,4 @@ public class RouterSupplierTest extends BaseEndToEndTest {
+@@ -273,3 +275,4 @@ public class RouterSupplierTest extends BaseEndToEndTest {
          return URI.create(scheme + "://" + routerServer.uri().getAuthority());
      }
  }

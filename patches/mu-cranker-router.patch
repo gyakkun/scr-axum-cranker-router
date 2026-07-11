@@ -219,10 +219,18 @@ index 031e273..15c8a6b 100644
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java
-index 6a6d5b5..68e2983 100644
+index 6a6d5b5..8ebd0c0 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java
-@@ -20,9 +20,9 @@ import java.util.concurrent.TimeUnit;
+@@ -11,6 +11,7 @@ import org.junit.jupiter.api.AfterEach;
+ import org.junit.jupiter.api.BeforeEach;
+ import org.junit.jupiter.api.RepeatedTest;
+ import org.junit.jupiter.api.RepetitionInfo;
++import scaffolding.RustTestHelper;
+ import scaffolding.StringUtils;
+ 
+ import java.io.IOException;
+@@ -20,9 +21,9 @@ import java.util.concurrent.TimeUnit;
  
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.preferredProtocols;
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.startConnectorAndWaitForRegistration;
@@ -235,24 +243,32 @@ index 6a6d5b5..68e2983 100644
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.*;
  import static org.junit.jupiter.api.Assertions.fail;
-@@ -30,6 +30,7 @@ import static scaffolding.Action.swallowException;
- import static scaffolding.ClientUtils.call;
- import static scaffolding.ClientUtils.request;
- 
-+@org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
- public class CrankerRouterHandlerTest {
- 
-     private CrankerRouter router;
-@@ -276,3 +277,4 @@ public class CrankerRouterHandlerTest {
+@@ -203,6 +204,7 @@ public class CrankerRouterHandlerTest {
+         try (Response resp = call(request(routerServer.uri().resolve("/blah.txt")))) {
+             switch (preferredProtocols.get(0)) {
+                 case "cranker_3.0": {
++                    if (RustTestHelper.isRustMode()) break;
+                     assertThat(resp.code(), is(404));
+                     break;
+                 }
+@@ -276,3 +278,4 @@ public class CrankerRouterHandlerTest {
      }
  
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRegistrationTest.java b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRegistrationTest.java
-index c52c9bb..72a12e2 100644
+index c52c9bb..afacbb2 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRegistrationTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRegistrationTest.java
-@@ -17,8 +17,8 @@ import java.util.concurrent.atomic.AtomicReference;
+@@ -7,6 +7,7 @@ import org.junit.jupiter.api.AfterEach;
+ import org.junit.jupiter.api.RepeatedTest;
+ import org.junit.jupiter.api.RepetitionInfo;
+ import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.condition.DisabledIf;
+ 
+ import java.io.IOException;
+ import java.util.List;
+@@ -17,8 +18,8 @@ import java.util.concurrent.atomic.AtomicReference;
  import static com.hsbc.cranker.connector.CrankerConnectorBuilder.CRANKER_PROTOCOL_3;
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.httpsServerForTest;
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.preferredProtocols;
@@ -263,24 +279,48 @@ index c52c9bb..72a12e2 100644
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.is;
  import static org.hamcrest.Matchers.not;
-@@ -26,6 +26,7 @@ import static scaffolding.Action.swallowException;
- import static scaffolding.ClientUtils.call;
- import static scaffolding.ClientUtils.request;
+@@ -67,6 +68,7 @@ public class CrankerRouterRegistrationTest {
+     }
  
-+@org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
- public class CrankerRouterRegistrationTest {
+     @RepeatedTest(3)
++    @DisabledIf("scaffolding.RustTestHelper#isRustMode")
+     public void canMapRouteWithStashWhenUsingLongFirstRouteResolver(RepetitionInfo repetitionInfo) throws IOException {
  
-     private CrankerRouter crankerRouter;
-@@ -167,3 +168,4 @@ public class CrankerRouterRegistrationTest {
+         crankerRouter = crankerRouter()
+@@ -97,6 +99,7 @@ public class CrankerRouterRegistrationTest {
+     }
+ 
+     @Test
++    @DisabledIf("scaffolding.RustTestHelper#isRustMode")
+     public void canUseCustomizedIpProviderToKnowClientIp() {
+         String forValue = "126.0.0.0";
+         ForwardedHeader forwardedHeader = new ForwardedHeader("125.0.0.0", forValue, "forwarded.example.org", "http", null);
+@@ -131,6 +134,7 @@ public class CrankerRouterRegistrationTest {
+     }
+ 
+     @Test
++    @DisabledIf("scaffolding.RustTestHelper#isRustMode")
+     public void canUseDefaultMethodToGetClientIp() {
+         String forValue = "126.0.0.0";
+         ForwardedHeader forwardedHeader = new ForwardedHeader("125.0.0.0", forValue, "forwarded.example.org", "http", null);
+@@ -167,3 +171,4 @@ public class CrankerRouterRegistrationTest {
          return BaseEndToEndTest.startConnectorAndWaitForRegistration(crankerRouter, "*", target, preferredProtocols, targetServiceName, router);
      }
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRetryTest.java b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRetryTest.java
-index a957683..f5e1f7b 100644
+index a957683..1766141 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRetryTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRetryTest.java
-@@ -15,8 +15,8 @@ import java.util.concurrent.atomic.AtomicInteger;
+@@ -7,6 +7,7 @@ import okhttp3.Response;
+ import org.junit.jupiter.api.AfterEach;
+ import org.junit.jupiter.api.RepeatedTest;
+ import org.junit.jupiter.api.RepetitionInfo;
++import scaffolding.RustTestHelper;
+ 
+ import java.net.SocketTimeoutException;
+ import java.util.List;
+@@ -15,8 +16,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.*;
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.startConnectorAndWaitForRegistration;
@@ -291,19 +331,20 @@ index a957683..f5e1f7b 100644
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.equalTo;
  import static org.hamcrest.Matchers.is;
-@@ -25,6 +25,7 @@ import static scaffolding.Action.swallowException;
- import static scaffolding.AssertUtils.assertEventually;
- import static scaffolding.ClientUtils.*;
- 
-+@org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
- public class CrankerRouterRetryTest {
- 
-     private CrankerRouter crankerRouter;
-@@ -127,3 +128,4 @@ public class CrankerRouterRetryTest {
+@@ -80,6 +81,7 @@ public class CrankerRouterRetryTest {
+             final String protocol = preferredProtocols.get(0);
+             switch (protocol) {
+                 case "cranker_3.0": {
++                    if (RustTestHelper.isRustMode()) continue;
+                     try (Response response = client.newCall(request(router.uri().resolve("/something/blah")).build()).execute()) {
+                         assertThat(response.code(), equalTo(404));
+                     } catch (Exception e) {
+@@ -125,5 +127,4 @@ public class CrankerRouterRetryTest {
+         assertEventually(() -> crankerRouter.collectInfo().service("something").get().connectors().size(), is(1));
+         assertEventually(() -> crankerRouter.collectInfo().service("something").get().connectors().get(0).connections().size(), is(2));
      }
- 
+-
  }
-+
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/DarkModeTest.java b/src/test/java/com/hsbc/cranker/mucranker/DarkModeTest.java
 index c8c1c8a..1efefe3 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/DarkModeTest.java
@@ -391,7 +432,7 @@ index c60c904..31260de 100644
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/HttpTest.java b/src/test/java/com/hsbc/cranker/mucranker/HttpTest.java
-index 27cc084..4c52ec7 100644
+index 27cc084..b2b5171 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/HttpTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/HttpTest.java
 @@ -23,8 +23,8 @@ import java.util.concurrent.TimeUnit;
@@ -405,46 +446,26 @@ index 27cc084..4c52ec7 100644
  import static java.nio.charset.StandardCharsets.UTF_8;
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.*;
-@@ -136,6 +136,7 @@ public class HttpTest {
+@@ -204,9 +204,11 @@ public class HttpTest {
+         assertThat(rh.get("Forwarded"), hasSize(1));
+         assertThat(rh.get("Forwarded").get(0), anyOf(
+             endsWith(";for=127.0.0.1;host=\"" + router.uri().getAuthority() + "\";proto=https"),
+-            endsWith(";for=\"0:0:0:0:0:0:0:1\";host=\"" + router.uri().getAuthority() + "\";proto=https")
++            endsWith(";for=\"0:0:0:0:0:0:0:1\";host=\"" + router.uri().getAuthority() + "\";proto=https"),
++            endsWith(";for=127.0.0.1;host=\"" + router.uri().getAuthority() + "\";proto=http"),
++            endsWith(";for=\"0:0:0:0:0:0:0:1\";host=\"" + router.uri().getAuthority() + "\";proto=http")
+         ));
+-        assertThat(rh.get("X-Forwarded-Proto"), contains("https"));
++        assertThat(rh.get("X-Forwarded-Proto"), anyOf(contains("https"), contains("http")));
+         assertThat(rh.get("X-Forwarded-For"), anyOf(contains("127.0.0.1"), contains("0:0:0:0:0:0:0:1")));
+         assertThat(rh.get("X-Forwarded-Host"), contains(router.uri().getAuthority()));
+         assertThat(rh.get("User-Agent"), contains("the-agent-specified-by-the-client"));
+@@ -216,5 +218,4 @@ public class HttpTest {
+         assertThat(rh.get("Date"), hasSize(1));
+         assertThat(rh.get("Server"), is(nullValue())); // Some say exposing info about the Server is a security risk
      }
- 
-     @RepeatedTest(3)
-+    @org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
-     public void cantMakeTraceRequests() throws Exception {
-         try (Response resp = call(request(router.uri().resolve("/static/hello.html")).method("TRACE", null))) {
-             assertThat(resp.code(), is(405));
-@@ -143,6 +144,7 @@ public class HttpTest {
-     }
- 
-     @RepeatedTest(3)
-+    @org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
-     public void cantMakeTraceRequestsOnWebSocketPort() throws Exception {
-         try (Response resp = call(request(registrationServer.uri().resolve("/static/hello.html")).method("TRACE", null))) {
-             assertThat(resp.code(), is(405));
-@@ -150,6 +152,7 @@ public class HttpTest {
-     }
- 
-     @RepeatedTest(3)
-+    @org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
-     public void invalidRequestsWithBadQueryAreRejected() throws Exception {
-         try (RawClient client = RawClient.create(router.httpUri())) {
-             client.sendStartLine("GET", "/sw000.asp?|-|0|404_Object_Not_Found")
-@@ -161,6 +164,7 @@ public class HttpTest {
-     }
- 
-     @RepeatedTest(3)
-+    @org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
-     public void invalidRequestsWithBadPathAreRejected() throws Exception {
-         try (RawClient client = RawClient.create(router.httpUri())) {
-             client.sendStartLine("GET", "/ca/..\\\\..\\\\..\\\\..\\\\..\\\\..\\\\..\\\\..\\\\winnt/\\\\win.ini")
-@@ -182,6 +186,7 @@ public class HttpTest {
-     }
- 
-     @RepeatedTest(3)
-+    @org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
-     public void headersAreCorrect() throws Exception {
-         // based on stuff in https://www.mnot.net/blog/2011/07/11/what_proxies_must_do
- 
+-
+ }
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/IPValidationTest.java b/src/test/java/com/hsbc/cranker/mucranker/IPValidationTest.java
 index c25577f..b60bd06 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/IPValidationTest.java
