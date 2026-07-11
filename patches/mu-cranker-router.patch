@@ -21,10 +21,18 @@ index 0343e27..ca372d9 100644
                      <source>11</source>
                  </configuration>
 diff --git a/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java b/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
-index c1fc183..8c99eb7 100644
+index c1fc183..8f95239 100644
 --- a/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
-@@ -32,9 +32,9 @@ import java.util.concurrent.atomic.AtomicReference;
+@@ -17,6 +17,7 @@ import okhttp3.Response;
+ import org.junit.jupiter.api.AfterEach;
+ import org.junit.jupiter.api.RepeatedTest;
+ import org.junit.jupiter.api.RepetitionInfo;
++import org.junit.jupiter.api.condition.DisabledIf;
+ 
+ import java.io.EOFException;
+ import java.io.IOException;
+@@ -32,9 +33,9 @@ import java.util.concurrent.atomic.AtomicReference;
  
  import static com.hsbc.cranker.connector.ConnectorSocket.State.IDLE;
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.preferredProtocols;
@@ -37,7 +45,7 @@ index c1fc183..8c99eb7 100644
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.*;
  import static org.junit.jupiter.api.Assertions.fail;
-@@ -80,11 +80,6 @@ public class TimeoutTest {
+@@ -80,11 +81,6 @@ public class TimeoutTest {
          connector = startConnector("my-app",  preferredProtocols(repetitionInfo));
          try (Response resp = call(request(routerServer.uri().resolve("/my-app/sleep-without-response")))) {
              assertThat(resp.code(), is(504));
@@ -49,15 +57,15 @@ index c1fc183..8c99eb7 100644
          }
      }
  
-@@ -184,6 +179,7 @@ public class TimeoutTest {
+@@ -184,6 +180,7 @@ public class TimeoutTest {
      }
  
      @RepeatedTest(3)
-+    @org.junit.jupiter.api.condition.DisabledIfSystemProperty(named = "cranker.router.rust", matches = "true")
++    @DisabledIf("scaffolding.RustTestHelper#isRustMode")
      public void ifClientDisconnectedBeforeResponseStartThenProxyListenersShouldInvoke(RepetitionInfo repetitionInfo) throws InterruptedException {
          AtomicReference<ProxyInfo> ref = new AtomicReference<>();
          CountDownLatch countDownLatch = new CountDownLatch(1);
-@@ -229,3 +225,4 @@ public class TimeoutTest {
+@@ -229,3 +226,4 @@ public class TimeoutTest {
      }
  
  }
