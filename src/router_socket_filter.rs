@@ -4,7 +4,7 @@ use std::sync::Arc;
 use axum::extract::OriginalUri;
 use axum::http::{HeaderMap, Method};
 
-use crate::CrankerRouterConfig;
+use crate::{http_utils, CrankerRouterConfig};
 use crate::router_socket::RouterSocket;
 
 /// With this trait, library users can implement their own logic to filter out
@@ -63,16 +63,8 @@ impl RouterSocketFilter for DomainRouterSocketFilter {
     fn should_use(
         &self, _: String, _: Method, original_uri: OriginalUri, headers: HeaderMap, _: SocketAddr, _: CrankerRouterConfig, rs: Arc<dyn RouterSocket>,
     ) -> bool {
-        let host_opt = original_uri.host()
-            .map(|h| h.to_string())
-            .or_else(|| {
-                headers.get("host")
-                    .and_then(|h| h.to_str().ok())
-                    .map(|h| {
-                        h.split(':').next().unwrap_or(h).to_string()
-                    })
-            });
-        host_opt.map(|host| {
+        let opt_host = http_utils::get_opt_host_from_uri_and_headers(&original_uri, &headers);
+        opt_host.map(|host| {
             rs.domain() == "*" || rs.domain() == host
         }).unwrap_or(false)
     }

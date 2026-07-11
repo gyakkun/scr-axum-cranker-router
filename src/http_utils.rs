@@ -508,3 +508,15 @@ fn get_new_via_value(this_server_via: String, prev_via_list: Vec<String>) -> Str
     res.push_str(this_server_via.as_str());
     return res;
 }
+
+pub(crate) fn get_opt_host_from_uri_and_headers(original_uri: &OriginalUri, headers: &HeaderMap) -> Option<String> {
+    original_uri.host()
+        .map(|h| h.to_string())
+        .or_else(|| {
+            headers.get("host")
+                .and_then(|h| h.to_str().ok())
+                .map(|h| {
+                    h.split(':').next().unwrap_or(h).to_string()
+                })
+        })
+}

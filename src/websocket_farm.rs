@@ -22,7 +22,7 @@ use crate::route_identify::RouteIdentify;
 use crate::route_resolver::RouteResolver;
 use crate::router_socket::RouterSocket;
 use crate::router_socket_filter::RouterSocketFilter;
-use crate::{time_utils, CrankerRouterConfig, LOCAL_IP, CRANKER_V_3_0};
+use crate::{time_utils, CrankerRouterConfig, LOCAL_IP, CRANKER_V_3_0, http_utils};
 
 /// Here we mimic the Java WebSocketFarm but allow adding
 /// both V1 and V3 router socket to the same farm to reduce
@@ -170,19 +170,10 @@ impl WebSocketFarmInterface for WebSocketFarm {
         cranker_router_config: CrankerRouterConfig,
         router_socket_filter: Arc<dyn RouterSocketFilter>
     ) -> Result<Arc<dyn RouterSocket>, CrankerRouterException> {
-        let host_opt = original_uri.host()
-            .map(|h| h.to_string())
-            .or_else(|| {
-                headers.get("host")
-                    .and_then(|h| h.to_str().ok())
-                    .map(|h| {
-                        h.split(':').next().unwrap_or(h).to_string()
-                    })
-            });
-
+        let opt_host = http_utils::get_opt_host_from_uri_and_headers(&original_uri, &headers);
         // Check if there is any socket registered on the precise domain `host`
         let mut has_precise_domain_sockets = false;
-        if let Some(ref host) = host_opt {
+        if let Some(ref host) = opt_host {
             for entry in self.route_to_router_socket_id_to_arc_router_socket_map.iter() {
                 for sub_entry in entry.value().iter() {
                     let rs = sub_entry.value();
@@ -204,7 +195,7 @@ impl WebSocketFarmInterface for WebSocketFarm {
             .filter(|e| {
                 let route = e.key();
                 if has_precise_domain_sockets {
-                    if let Some(ref host) = host_opt {
+                    if let Some(ref host) = opt_host {
                         if let Some(sub_map) = self.route_to_router_socket_id_to_arc_router_socket_map.get(route) {
                             for sub_entry in sub_map.value().iter() {
                                 let rs = sub_entry.value();
@@ -249,17 +240,9 @@ impl WebSocketFarmInterface for WebSocketFarm {
             Duration::from_millis(self.max_wait_in_millis as u64),
             async {
                 'main: loop {
-                    let host_opt = original_uri.host()
-                        .map(|h| h.to_string())
-                        .or_else(|| {
-                            headers.get("host")
-                                .and_then(|h| h.to_str().ok())
-                                .map(|h| {
-                                    h.split(':').next().unwrap_or(h).to_string()
-                                })
-                        });
+                    let opt_host = http_utils::get_opt_host_from_uri_and_headers(&original_uri, &headers);
                     let mut has_precise_match = false;
-                    if let Some(ref host) = host_opt {
+                    if let Some(ref host) = opt_host {
                         if let Some(sub_map) = self.route_to_router_socket_id_to_arc_router_socket_map.get(&resolved_route) {
                             for entry in sub_map.value().iter() {
                                 let rs = entry.value();
