@@ -37,10 +37,8 @@ cleanup_rust_processes() {
     echo "=== Cleaning leftover unified_router_server processes ==="
     if [[ "$OSTYPE" == "cygwin" || "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
         taskkill //F //IM unified_router_server.exe 2>/dev/null || true
-        taskkill //F //IM router_server.exe 2>/dev/null || true
     else
         pkill -9 -f unified_router_server 2>/dev/null || true
-        pkill -9 -f router_server 2>/dev/null || true
     fi
 }
 trap cleanup_rust_processes EXIT
@@ -106,24 +104,29 @@ cp "$CONNECTOR_JAR" "$CI_TMP_DIR/connector-uber.jar"
 # 8. Run Java mu-cranker-router tests in all 3 modes
 echo "=== Running Java mu-cranker-router tests (Java Mode) ==="
 mvn -f "$CI_TMP_DIR/mu-cranker-router/pom.xml" clean test -Dmaven.javadoc.skip=true -Dsource.skip=true
+cleanup_rust_processes
 
 echo "=== Running Java mu-cranker-router tests (Rust Mode, TLS off) ==="
-export CRANKER_ROUTER_RUST=true
 export RUST_ROUTER_SERVER_EXE="$CI_TMP_DIR/unified_router_server${EXE_EXT}"
 mvn -f "$CI_TMP_DIR/mu-cranker-router/pom.xml" clean test -Dcranker.router.rust=true -Dmaven.javadoc.skip=true -Dsource.skip=true
+cleanup_rust_processes
 
 echo "=== Running Java mu-cranker-router tests (Rust Mode, TLS on) ==="
 mvn -f "$CI_TMP_DIR/mu-cranker-router/pom.xml" clean test -Dcranker.router.rust=true -Dcranker.router.tls=true -Dmaven.javadoc.skip=true -Dsource.skip=true
+cleanup_rust_processes
 
 # 8.5. Run Java cranker-connector tests in all 3 modes
 echo "=== Running Java cranker-connector tests (Java Mode) ==="
 mvn -f "$CI_TMP_DIR/cranker-connector/pom.xml" clean test -Dmaven.javadoc.skip=true -Dsource.skip=true
+cleanup_rust_processes
 
 echo "=== Running Java cranker-connector tests (Rust Mode, TLS off) ==="
 mvn -f "$CI_TMP_DIR/cranker-connector/pom.xml" clean test -Dcranker.router.rust=true -Dmaven.javadoc.skip=true -Dsource.skip=true
+cleanup_rust_processes
 
 echo "=== Running Java cranker-connector tests (Rust Mode, TLS on) ==="
 mvn -f "$CI_TMP_DIR/cranker-connector/pom.xml" clean test -Dcranker.router.rust=true -Dcranker.router.tls=true -Dmaven.javadoc.skip=true -Dsource.skip=true
+cleanup_rust_processes
 
 # 9. Run Rust unit & integration tests
 echo "=== Running scr-axum-cranker-router tests ==="
