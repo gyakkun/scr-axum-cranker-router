@@ -50,15 +50,17 @@ index 229a09a..7294453 100644
          doNotProxyHeaders.forEach(h -> doNotProxy.add(h.toLowerCase()));
          if (routeResolver == null) routeResolver = new RouteResolver() {};
 diff --git a/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java b/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
-index c1fc183..ca05dcf 100644
+index c1fc183..8c99eb7 100644
 --- a/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
-@@ -33,8 +33,8 @@ import java.util.concurrent.atomic.AtomicReference;
+@@ -32,9 +32,9 @@ import java.util.concurrent.atomic.AtomicReference;
+ 
  import static com.hsbc.cranker.connector.ConnectorSocket.State.IDLE;
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.preferredProtocols;
- import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
 -import static io.muserver.MuServerBuilder.httpServer;
 -import static io.muserver.MuServerBuilder.httpsServer;
++import static scaffolding.TestServerBuilder.crankerRouter;
 +import static scaffolding.TestServerBuilder.httpServer;
 +import static scaffolding.TestServerBuilder.httpsServer;
  import static org.hamcrest.MatcherAssert.assertThat;
@@ -84,6 +86,11 @@ index c1fc183..ca05dcf 100644
      public void ifClientDisconnectedBeforeResponseStartThenProxyListenersShouldInvoke(RepetitionInfo repetitionInfo) throws InterruptedException {
          AtomicReference<ProxyInfo> ref = new AtomicReference<>();
          CountDownLatch countDownLatch = new CountDownLatch(1);
+@@ -229,3 +225,4 @@ public class TimeoutTest {
+     }
+ 
+ }
++
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/BaseEndToEndTest.java b/src/test/java/com/hsbc/cranker/mucranker/BaseEndToEndTest.java
 index 5df1975..17601f8 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/BaseEndToEndTest.java
@@ -166,14 +173,16 @@ index 9c118ca..b6970cc 100644
          final int localTotal = localhostResult.values().stream().mapToInt(AtomicInteger::get).sum();
          assertThat(localTotal, is(20));
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterCleanTest.java b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterCleanTest.java
-index 031e273..3875f87 100644
+index 031e273..15c8a6b 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterCleanTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterCleanTest.java
-@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit;
+@@ -14,8 +14,8 @@ import java.util.List;
+ import java.util.concurrent.TimeUnit;
  
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.*;
- import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
 -import static io.muserver.MuServerBuilder.httpServer;
++import static scaffolding.TestServerBuilder.crankerRouter;
 +import static scaffolding.TestServerBuilder.httpServer;
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.is;
@@ -187,7 +196,7 @@ index 031e273..3875f87 100644
 -                assert resp.body() != null;
 -                final JSONObject servicesJson = new JSONObject(resp.body().string()).getJSONObject("services");
 -                return servicesJson.has("something");
-+            boolean isRustMode = Boolean.getBoolean("cranker.router.rust") || "true".equalsIgnoreCase(System.getenv("CRANKER_ROUTER_RUST"));
++            boolean isRustMode = scaffolding.RustTestHelper.isRustMode();
 +            if (isRustMode) {
 +                return crankerRouter.collectInfo().service("something").isPresent();
 +            } else {
@@ -209,7 +218,7 @@ index 031e273..3875f87 100644
 -                assert resp.body() != null;
 -                final JSONObject servicesJson = new JSONObject(resp.body().string()).getJSONObject("services");
 -                return servicesJson.has("something");
-+            boolean isRustMode = Boolean.getBoolean("cranker.router.rust") || "true".equalsIgnoreCase(System.getenv("CRANKER_ROUTER_RUST"));
++            boolean isRustMode = scaffolding.RustTestHelper.isRustMode();
 +            if (isRustMode) {
 +                return crankerRouter.collectInfo().service("something").isPresent();
 +            } else {
@@ -222,16 +231,23 @@ index 031e273..3875f87 100644
              }
          }, is(false));
  
+@@ -108,3 +118,4 @@ public class CrankerRouterCleanTest {
+     }
+ 
+ }
++
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java
-index 6a6d5b5..20152fe 100644
+index 6a6d5b5..68e2983 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java
-@@ -21,8 +21,8 @@ import java.util.concurrent.TimeUnit;
+@@ -20,9 +20,9 @@ import java.util.concurrent.TimeUnit;
+ 
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.preferredProtocols;
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.startConnectorAndWaitForRegistration;
- import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
 -import static io.muserver.MuServerBuilder.httpServer;
 -import static io.muserver.MuServerBuilder.httpsServer;
++import static scaffolding.TestServerBuilder.crankerRouter;
 +import static scaffolding.TestServerBuilder.httpServer;
 +import static scaffolding.TestServerBuilder.httpsServer;
  import static org.hamcrest.MatcherAssert.assertThat;
@@ -245,15 +261,22 @@ index 6a6d5b5..20152fe 100644
  public class CrankerRouterHandlerTest {
  
      private CrankerRouter router;
+@@ -276,3 +277,4 @@ public class CrankerRouterHandlerTest {
+     }
+ 
+ }
++
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRegistrationTest.java b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRegistrationTest.java
-index c52c9bb..4211938 100644
+index c52c9bb..72a12e2 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRegistrationTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRegistrationTest.java
-@@ -18,7 +18,7 @@ import static com.hsbc.cranker.connector.CrankerConnectorBuilder.CRANKER_PROTOCO
+@@ -17,8 +17,8 @@ import java.util.concurrent.atomic.AtomicReference;
+ import static com.hsbc.cranker.connector.CrankerConnectorBuilder.CRANKER_PROTOCOL_3;
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.httpsServerForTest;
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.preferredProtocols;
- import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
 -import static io.muserver.MuServerBuilder.httpServer;
++import static scaffolding.TestServerBuilder.crankerRouter;
 +import static scaffolding.TestServerBuilder.httpServer;
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.is;
@@ -266,15 +289,22 @@ index c52c9bb..4211938 100644
  public class CrankerRouterRegistrationTest {
  
      private CrankerRouter crankerRouter;
+@@ -167,3 +168,4 @@ public class CrankerRouterRegistrationTest {
+         return BaseEndToEndTest.startConnectorAndWaitForRegistration(crankerRouter, "*", target, preferredProtocols, targetServiceName, router);
+     }
+ }
++
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRetryTest.java b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRetryTest.java
-index a957683..b6cb1a9 100644
+index a957683..f5e1f7b 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRetryTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRetryTest.java
-@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicInteger;
+@@ -15,8 +15,8 @@ import java.util.concurrent.atomic.AtomicInteger;
+ 
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.*;
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.startConnectorAndWaitForRegistration;
- import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
 -import static io.muserver.MuServerBuilder.httpServer;
++import static scaffolding.TestServerBuilder.crankerRouter;
 +import static scaffolding.TestServerBuilder.httpServer;
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.equalTo;
@@ -287,15 +317,22 @@ index a957683..b6cb1a9 100644
  public class CrankerRouterRetryTest {
  
      private CrankerRouter crankerRouter;
+@@ -127,3 +128,4 @@ public class CrankerRouterRetryTest {
+     }
+ 
+ }
++
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/DarkModeTest.java b/src/test/java/com/hsbc/cranker/mucranker/DarkModeTest.java
-index c8c1c8a..e168dfe 100644
+index c8c1c8a..1efefe3 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/DarkModeTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/DarkModeTest.java
-@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit;
+@@ -20,8 +20,8 @@ import java.util.concurrent.TimeUnit;
+ 
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.httpsServerForTest;
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.preferredProtocols;
- import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
 -import static io.muserver.MuServerBuilder.httpServer;
++import static scaffolding.TestServerBuilder.crankerRouter;
 +import static scaffolding.TestServerBuilder.httpServer;
  import static org.hamcrest.CoreMatchers.containsString;
  import static org.hamcrest.CoreMatchers.is;
@@ -308,6 +345,11 @@ index c8c1c8a..e168dfe 100644
          }
          darkModeManager.disableDarkMode(darkHost("127.0.0.1"));
          try (Response response = call(request(crankerServer.uri().resolve("/static/hello.html")))) {
+@@ -137,3 +136,4 @@ public class DarkModeTest {
+     }
+ 
+ }
++
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/FavIconHandlerTest.java b/src/test/java/com/hsbc/cranker/mucranker/FavIconHandlerTest.java
 index 9423c9b..72fa39d 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/FavIconHandlerTest.java
@@ -322,15 +364,17 @@ index 9423c9b..72fa39d 100644
  import static org.hamcrest.Matchers.is;
  import static scaffolding.ClientUtils.call;
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java b/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java
-index c60c904..c4a9a26 100644
+index c60c904..7307f9d 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java
-@@ -16,14 +16,15 @@ import java.util.Optional;
+@@ -15,15 +15,16 @@ import java.util.List;
+ import java.util.Optional;
  import java.util.stream.Stream;
  
- import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
 -import static io.muserver.MuServerBuilder.httpServer;
 -import static io.muserver.MuServerBuilder.httpsServer;
++import static scaffolding.TestServerBuilder.crankerRouter;
 +import static scaffolding.TestServerBuilder.httpServer;
 +import static scaffolding.TestServerBuilder.httpsServer;
  import static org.hamcrest.MatcherAssert.assertThat;
@@ -343,6 +387,11 @@ index c60c904..c4a9a26 100644
  public class HeaderProxyingTest extends BaseEndToEndTest {
  
      @RepeatedTest(3)
+@@ -315,3 +316,4 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+     }
+ 
+ }
++
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/HttpTest.java b/src/test/java/com/hsbc/cranker/mucranker/HttpTest.java
 index 27cc084..4c52ec7 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/HttpTest.java
@@ -399,14 +448,16 @@ index 27cc084..4c52ec7 100644
          // based on stuff in https://www.mnot.net/blog/2011/07/11/what_proxies_must_do
  
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/IPValidationTest.java b/src/test/java/com/hsbc/cranker/mucranker/IPValidationTest.java
-index c25577f..de9c926 100644
+index c25577f..b60bd06 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/IPValidationTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/IPValidationTest.java
-@@ -9,12 +9,13 @@ import java.util.List;
+@@ -8,13 +8,14 @@ import org.junit.jupiter.api.RepetitionInfo;
+ import java.util.List;
  import java.util.concurrent.atomic.AtomicBoolean;
  
- import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
 -import static io.muserver.MuServerBuilder.httpServer;
++import static scaffolding.TestServerBuilder.crankerRouter;
 +import static scaffolding.TestServerBuilder.httpServer;
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.is;
@@ -417,15 +468,22 @@ index c25577f..de9c926 100644
  public class IPValidationTest extends BaseEndToEndTest {
  
      @RepeatedTest(3)
+@@ -48,3 +49,4 @@ public class IPValidationTest extends BaseEndToEndTest {
+     }
+ 
+ }
++
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/LongestFirstRouteResolverTest.java b/src/test/java/com/hsbc/cranker/mucranker/LongestFirstRouteResolverTest.java
-index 420f193..c699556 100644
+index 420f193..20ec354 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/LongestFirstRouteResolverTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/LongestFirstRouteResolverTest.java
-@@ -20,10 +20,11 @@ import java.util.concurrent.TimeUnit;
+@@ -19,11 +19,12 @@ import java.util.Set;
+ import java.util.concurrent.TimeUnit;
  
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.*;
- import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
 -import static io.muserver.MuServerBuilder.httpServer;
++import static scaffolding.TestServerBuilder.crankerRouter;
 +import static scaffolding.TestServerBuilder.httpServer;
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.is;
@@ -434,15 +492,22 @@ index 420f193..c699556 100644
  public class LongestFirstRouteResolverTest {
  
      private HttpClient client = CrankerConnectorBuilder.createHttpClient(true).build();
+@@ -145,3 +146,4 @@ public class LongestFirstRouteResolverTest {
+ 
+     }
+ }
++
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/MultiConnectorTest.java b/src/test/java/com/hsbc/cranker/mucranker/MultiConnectorTest.java
-index 550a908..eaa4069 100644
+index 550a908..344ab2f 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/MultiConnectorTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/MultiConnectorTest.java
-@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger;
+@@ -18,8 +18,8 @@ import java.util.concurrent.atomic.AtomicInteger;
+ 
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.callAndGroupByBody;
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.httpsServerForTest;
- import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
 -import static io.muserver.MuServerBuilder.httpServer;
++import static scaffolding.TestServerBuilder.crankerRouter;
 +import static scaffolding.TestServerBuilder.httpServer;
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.greaterThan;
@@ -465,15 +530,22 @@ index 550a908..eaa4069 100644
                  .replace("{port}", String.valueOf(router.uri().getPort()))),
              20);
          assertThat(bodyMap.get("targetV3_1").get(), is(20));
+@@ -333,3 +333,4 @@ public class MultiConnectorTest {
+         return BaseEndToEndTest.startConnectorAndWaitForRegistration(crankerRouter, domain, target, preferredProtocols, route, router);
+     }
+ }
++
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/ProxyListenerTest.java b/src/test/java/com/hsbc/cranker/mucranker/ProxyListenerTest.java
-index fe5e0ac..2a1019c 100644
+index fe5e0ac..f7c3e5e 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/ProxyListenerTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/ProxyListenerTest.java
-@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit;
+@@ -23,8 +23,8 @@ import java.util.concurrent.CountDownLatch;
+ import java.util.concurrent.TimeUnit;
  import java.util.concurrent.atomic.AtomicBoolean;
  
- import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
 -import static io.muserver.MuServerBuilder.httpServer;
++import static scaffolding.TestServerBuilder.crankerRouter;
 +import static scaffolding.TestServerBuilder.httpServer;
  import static java.util.Collections.singletonList;
  import static org.hamcrest.MatcherAssert.assertThat;
@@ -486,16 +558,23 @@ index fe5e0ac..2a1019c 100644
  public class ProxyListenerTest extends BaseEndToEndTest {
  
      private static final Logger log = LoggerFactory.getLogger(ProxyListenerTest.class);
+@@ -403,3 +404,4 @@ public class ProxyListenerTest extends BaseEndToEndTest {
+     }
+ 
+ }
++
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/RouterInfoTest.java b/src/test/java/com/hsbc/cranker/mucranker/RouterInfoTest.java
-index 67617a7..fd955a6 100644
+index 67617a7..11576bb 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/RouterInfoTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/RouterInfoTest.java
-@@ -19,8 +19,8 @@ import static com.hsbc.cranker.connector.CrankerConnectorBuilder.CRANKER_PROTOCO
+@@ -18,9 +18,9 @@ import java.util.concurrent.TimeUnit;
+ import static com.hsbc.cranker.connector.CrankerConnectorBuilder.CRANKER_PROTOCOL_1;
  import static com.hsbc.cranker.connector.CrankerConnectorBuilder.CRANKER_PROTOCOL_3;
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.preferredProtocols;
- import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
 -import static io.muserver.MuServerBuilder.httpServer;
 -import static io.muserver.MuServerBuilder.httpsServer;
++import static scaffolding.TestServerBuilder.crankerRouter;
 +import static scaffolding.TestServerBuilder.httpServer;
 +import static scaffolding.TestServerBuilder.httpsServer;
  import static org.hamcrest.MatcherAssert.assertThat;
@@ -614,7 +693,7 @@ index 67617a7..fd955a6 100644
 -        try (Response resp = call(request(routerServer.uri().resolve("/health")))) {
 -            JSONObject health = new JSONObject(resp.body().string());
 +        java.net.URI healthUri;
-+        boolean isRustMode = Boolean.getBoolean("cranker.router.rust") || "true".equalsIgnoreCase(System.getenv("CRANKER_ROUTER_RUST"));
++        boolean isRustMode = scaffolding.RustTestHelper.isRustMode();
 +        if (isRustMode) {
 +            healthUri = routerServer.uri().resolve("/health/connectors");
 +        } else {
@@ -676,7 +755,7 @@ index 67617a7..fd955a6 100644
 -
 -        try (Response resp = call(request(routerServer.uri().resolve("/health")))) {
 +        java.net.URI healthUri;
-+        boolean isRustMode = Boolean.getBoolean("cranker.router.rust") || "true".equalsIgnoreCase(System.getenv("CRANKER_ROUTER_RUST"));
++        boolean isRustMode = scaffolding.RustTestHelper.isRustMode();
 +        if (isRustMode) {
 +            healthUri = routerServer.uri().resolve("/health/connectors");
 +        } else {
@@ -686,7 +765,7 @@ index 67617a7..fd955a6 100644
              JSONObject health = new JSONObject(resp.body().string());
              JSONObject services = health.getJSONObject("services");
              assertThat(services.has("my-target-server"), is(true));
-@@ -201,7 +226,8 @@ public class RouterInfoTest {
+@@ -201,7 +226,9 @@ public class RouterInfoTest {
      }
  
      private CrankerConnector startConnector(String targetServiceName, List<String> preferredProtocols) {
@@ -696,15 +775,17 @@ index 67617a7..fd955a6 100644
      }
  
  }
++
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java
 new file mode 100644
-index 0000000..89411a5
+index 0000000..b548390
 --- /dev/null
 +++ b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java
-@@ -0,0 +1,372 @@
+@@ -0,0 +1,406 @@
 +package com.hsbc.cranker.mucranker;
 +
 +import io.muserver.MuHandler;
++import scaffolding.RustTestHelper;
 +import org.json.JSONArray;
 +import org.json.JSONObject;
 +
@@ -751,15 +832,46 @@ index 0000000..89411a5
 +        lastAssignedPort = portToUse;
 +        this.regPort = portToUse;
 +        this.visitPort = this.regPort;
-+        this.httpClient = HttpClient.newBuilder()
-+                .connectTimeout(java.time.Duration.ofMillis(2000))
-+                .build();
++
++        HttpClient client = null;
++        try {
++            javax.net.ssl.TrustManager[] trustAllCerts = new javax.net.ssl.TrustManager[]{
++                new javax.net.ssl.X509TrustManager() {
++                    public java.security.cert.X509Certificate[] getAcceptedIssuers() { return null; }
++                    public void checkClientTrusted(java.security.cert.X509Certificate[] certs, String authType) {}
++                    public void checkServerTrusted(java.security.cert.X509Certificate[] certs, String authType) {}
++                }
++            };
++            javax.net.ssl.SSLContext sc = javax.net.ssl.SSLContext.getInstance("SSL");
++            sc.init(null, trustAllCerts, new java.security.SecureRandom());
++            client = HttpClient.newBuilder()
++                    .sslContext(sc)
++                    .connectTimeout(java.time.Duration.ofMillis(2000))
++                    .build();
++        } catch (Exception e) {
++            client = HttpClient.newBuilder()
++                    .connectTimeout(java.time.Duration.ofMillis(2000))
++                    .build();
++        }
++        this.httpClient = client;
 +
 +        Process proc = null;
 +        try {
 +            String envExe = System.getenv("RUST_ROUTER_SERVER_EXE");
 +            File exe = envExe != null ? new File(envExe) : null;
 +            if (exe == null || !exe.exists()) {
++                exe = new File("../scr-axum-cranker-router/target/debug/examples/unified_router_server.exe");
++            }
++            if (!exe.exists()) {
++                exe = new File("../scr-axum-cranker-router/target/debug/examples/unified_router_server");
++            }
++            if (!exe.exists()) {
++                exe = new File("../scr-axum-cranker-router/target/release/examples/unified_router_server.exe");
++            }
++            if (!exe.exists()) {
++                exe = new File("../scr-axum-cranker-router/target/release/examples/unified_router_server");
++            }
++            if (!exe.exists()) {
 +                exe = new File("../scr-axum-cranker-router/target/debug/unified_router_server.exe");
 +            }
 +            if (!exe.exists()) {
@@ -790,7 +902,7 @@ index 0000000..89411a5
 +                exe = new File("../scr-axum-cranker-router/target/release/examples/router_server.exe");
 +            }
 +            if (!exe.exists()) {
-+                throw new IllegalStateException("Rust router_server/unified_router_server binary not found. Please specify RUST_ROUTER_SERVER_EXE or run 'cargo build --bin unified_router_server'");
++                throw new IllegalStateException("Rust router_server/unified_router_server binary not found. Please specify RUST_ROUTER_SERVER_EXE or run 'cargo build --example unified_router_server'");
 +            }
 +
 +            List<String> cmd = new ArrayList<>();
@@ -813,6 +925,8 @@ index 0000000..89411a5
 +            cmd.add("true");
 +            cmd.add("--idle-read-timeout-ms");
 +            cmd.add(String.valueOf(idleReadTimeoutMills));
++            cmd.add("--tls");
++            cmd.add(String.valueOf(RustTestHelper.isTlsMode()));
 +
 +            ProcessBuilder pb = new ProcessBuilder(cmd);
 +            pb.redirectOutput(ProcessBuilder.Redirect.to(new File("target/rust-router.log")));
@@ -1076,10 +1190,10 @@ index 0000000..89411a5
 +}
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouterPoCTest.java b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouterPoCTest.java
 new file mode 100644
-index 0000000..f99f1e8
+index 0000000..a677e2e
 --- /dev/null
 +++ b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouterPoCTest.java
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,60 @@
 +package com.hsbc.cranker.mucranker;
 +
 +import com.hsbc.cranker.connector.CrankerConnector;
@@ -1087,7 +1201,7 @@ index 0000000..f99f1e8
 +import okhttp3.Response;
 +import org.junit.jupiter.api.Test;
 +import java.util.List;
-+import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
++import static scaffolding.TestServerBuilder.crankerRouter;
 +import static scaffolding.TestServerBuilder.httpServer;
 +import static scaffolding.TestServerBuilder.httpsServer;
 +import static org.hamcrest.MatcherAssert.assertThat;
@@ -1139,21 +1253,29 @@ index 0000000..f99f1e8
 +        }
 +    }
 +}
++
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/ServerSentEventTest.java b/src/test/java/com/hsbc/cranker/mucranker/ServerSentEventTest.java
-index b800035..6b329bb 100644
+index b800035..d884059 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/ServerSentEventTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/ServerSentEventTest.java
-@@ -13,7 +13,7 @@ import java.util.List;
+@@ -12,8 +12,8 @@ import scaffolding.SseTestClient;
+ import java.util.List;
  import java.util.concurrent.TimeUnit;
  
- import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
+-import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
 -import static io.muserver.MuServerBuilder.httpServer;
++import static scaffolding.TestServerBuilder.crankerRouter;
 +import static scaffolding.TestServerBuilder.httpServer;
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.contains;
  import static scaffolding.Action.swallowException;
+@@ -129,3 +129,4 @@ public class ServerSentEventTest extends BaseEndToEndTest {
+     }
+ 
+ }
++
 diff --git a/src/test/java/scaffolding/ClientUtils.java b/src/test/java/scaffolding/ClientUtils.java
-index 5cb7c68..a3829ce 100644
+index 5cb7c68..88a3e8c 100644
 --- a/src/test/java/scaffolding/ClientUtils.java
 +++ b/src/test/java/scaffolding/ClientUtils.java
 @@ -60,7 +60,12 @@ public class ClientUtils {
@@ -1162,7 +1284,7 @@ index 5cb7c68..a3829ce 100644
      public static Request.Builder request() {
 -        return new Request.Builder();
 +        Request.Builder builder = new Request.Builder();
-+        boolean isRustMode = Boolean.getBoolean("cranker.router.rust") || "true".equalsIgnoreCase(System.getenv("CRANKER_ROUTER_RUST"));
++        boolean isRustMode = scaffolding.RustTestHelper.isRustMode();
 +        if (isRustMode) {
 +            builder.header("Connection", "close");
 +        }
@@ -1170,6 +1292,28 @@ index 5cb7c68..a3829ce 100644
      }
      public static Request.Builder request(URI uri) {
          return request().url(uri.toString());
+@@ -122,3 +127,4 @@ public class ClientUtils {
+         }
+     }
+ }
++
+diff --git a/src/test/java/scaffolding/RustTestHelper.java b/src/test/java/scaffolding/RustTestHelper.java
+new file mode 100644
+index 0000000..e53ff93
+--- /dev/null
++++ b/src/test/java/scaffolding/RustTestHelper.java
+@@ -0,0 +1,11 @@
++package scaffolding;
++
++public class RustTestHelper {
++    public static boolean isRustMode() {
++        return Boolean.getBoolean("cranker.router.rust") || "true".equalsIgnoreCase(System.getenv("CRANKER_ROUTER_RUST"));
++    }
++
++    public static boolean isTlsMode() {
++        return Boolean.getBoolean("cranker.router.tls") || "true".equalsIgnoreCase(System.getenv("CRANKER_TLS")) || "true".equalsIgnoreCase(System.getenv("CRANKER_ROUTER_TLS"));
++    }
++}
 diff --git a/src/test/java/scaffolding/StringUtils.java b/src/test/java/scaffolding/StringUtils.java
 index 93a12fb..bfe66c3 100644
 --- a/src/test/java/scaffolding/StringUtils.java
@@ -1183,10 +1327,10 @@ index 93a12fb..bfe66c3 100644
 +}
 diff --git a/src/test/java/scaffolding/TestServerBuilder.java b/src/test/java/scaffolding/TestServerBuilder.java
 new file mode 100644
-index 0000000..a1e377c
+index 0000000..e0225f4
 --- /dev/null
 +++ b/src/test/java/scaffolding/TestServerBuilder.java
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,158 @@
 +package scaffolding;
 +
 +import io.muserver.MuHandler;
@@ -1209,19 +1353,29 @@ index 0000000..a1e377c
 +public class TestServerBuilder {
 +
 +    private final MuServerBuilder builder;
++    private final boolean isHttps;
 +    private RustCrankerRouter rustRouterForReg = null;
 +    private RustCrankerRouter rustRouterForVisit = null;
 +
-+    private TestServerBuilder(MuServerBuilder builder) {
++    private TestServerBuilder(MuServerBuilder builder, boolean isHttps) {
 +        this.builder = builder;
++        this.isHttps = isHttps && RustTestHelper.isTlsMode();
 +    }
 +
 +    public static TestServerBuilder httpServer() {
-+        return new TestServerBuilder(MuServerBuilder.httpServer());
++        return new TestServerBuilder(MuServerBuilder.httpServer(), false);
 +    }
 +
 +    public static TestServerBuilder httpsServer() {
-+        return new TestServerBuilder(MuServerBuilder.httpsServer());
++        if (RustTestHelper.isTlsMode()) {
++            return new TestServerBuilder(MuServerBuilder.httpsServer(), true);
++        } else {
++            return new TestServerBuilder(MuServerBuilder.httpServer(), false);
++        }
++    }
++
++    public static com.hsbc.cranker.mucranker.CrankerRouterBuilder crankerRouter() {
++        return com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter();
 +    }
 +
 +    public TestServerBuilder addHandler(MuHandler handler) {
@@ -1250,7 +1404,15 @@ index 0000000..a1e377c
 +    }
 +
 +    public TestServerBuilder withHttpsPort(int port) {
-+        builder.withHttpPort(port);
++        if (RustTestHelper.isTlsMode()) {
++            if (RustTestHelper.isRustMode()) {
++                builder.withHttpPort(port);
++            } else {
++                builder.withHttpsPort(port);
++            }
++        } else {
++            builder.withHttpPort(port);
++        }
 +        return this;
 +    }
 +
@@ -1275,7 +1437,7 @@ index 0000000..a1e377c
 +    }
 +
 +    public MuServer start() {
-+        boolean isRustMode = Boolean.getBoolean("cranker.router.rust") || "true".equalsIgnoreCase(System.getenv("CRANKER_ROUTER_RUST"));
++        boolean isRustMode = scaffolding.RustTestHelper.isRustMode();
 +        if (isRustMode && (rustRouterForReg != null || rustRouterForVisit != null)) {
 +            // In Rust mode we direct traffic directly to the Rust ports
 +            // without starting any JVM-side TCP proxy
@@ -1302,7 +1464,16 @@ index 0000000..a1e377c
 +                            public Object invoke(Object proxyInstance, Method method, Object[] args) throws Throwable {
 +                                String methodName = method.getName();
 +                                if (methodName.equals("uri") || methodName.equals("httpUri") || methodName.equals("httpsUri")) {
-+                                    return URI.create("http://127.0.0.1:" + targetRustPort);
++                                    if (isHttps) {
++                                        if (methodName.equals("httpsUri")) {
++                                            int tlsPort = targetRustPort > 50000 ? targetRustPort - 10000 : targetRustPort + 10000;
++                                            return URI.create("https://127.0.0.1:" + tlsPort);
++                                        } else {
++                                            return URI.create("http://127.0.0.1:" + targetRustPort);
++                                        }
++                                    } else {
++                                        return URI.create("http://127.0.0.1:" + targetRustPort);
++                                    }
 +                                } else if (methodName.equals("stop")) {
 +                                    return method.invoke(realServer, args);
 +                                }
@@ -1317,3 +1488,4 @@ index 0000000..a1e377c
 +        return realServer;
 +    }
 +}
++
