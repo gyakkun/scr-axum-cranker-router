@@ -314,7 +314,9 @@ impl CrankerRouter {
         req: Request<Body>,
     ) -> Response
     {
-        println!("RUST_VISIT_ORTAL_STDOUT: received request. method={}, uri={:?}", method, original_uri);
+        if method == Method::TRACE {
+            return (StatusCode::METHOD_NOT_ALLOWED, "Method not supported.").into_response();
+        }
         // Get should have no body but not required
         let http_version = req.version();
         debug!("Http version {:?}", http_version);
