@@ -154,7 +154,7 @@ impl CrankerRouter {
         });
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(config.routes_keep_time_millis as u64)).await;
                 websocket_farm_clone.clone().clean_routes_in_background(config.routes_keep_time_millis);
             }
         });
