@@ -7,9 +7,17 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use std::path::PathBuf;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::middleware::from_fn_with_state;
+use axum::{Json, Router};
+use axum::routing::{any, get, post};
+use axum_core::response::{IntoResponse, Response};
 use axum_server::tls_rustls::RustlsConfig;
-
-use scr_axum_cranker_router::CrankerRouterBuilder;
+use tower_http::limit;
+use scr_axum_cranker_router::{CrankerRouter, CrankerRouterBuilder, CrankerRouterState};
+use scr_axum_cranker_router::dark_host::DarkHost;
+use scr_axum_cranker_router::websocket_farm::WebSocketFarmInterface;
 
 #[tokio::main]
 async fn main() {
@@ -109,7 +117,28 @@ async fn main() {
 
     let cranker_router = cranker_router_builder.build();
     let cranker_router = Arc::new(cranker_router);
-    let unified_router = cranker_router.unified_axum_router();
+    let unified_router = Router::new()
+        .route("/register", any(CrankerRouter::register_handler)
+            .layer(from_fn_with_state(cranker_router.state(), CrankerRouter::reg_check_and_extract)),
+        )
+        .route("/register/", any(CrankerRouter::register_handler)
+            .layer(from_fn_with_state(cranker_router.state(), CrankerRouter::reg_check_and_extract)),
+        )
+        .route("/deregister", any(CrankerRouter::de_register_handler)
+            .layer(from_fn_with_state(cranker_router.state(), CrankerRouter::de_reg_check)),
+        )
+        .route("/deregister/", any(CrankerRouter::de_register_handler)
+            .layer(from_fn_with_state(cranker_router.state(), CrankerRouter::de_reg_check)),
+        )
+        .route("/health/connectors", get(CrankerRouter::connector_info_handler))
+        .route("/dark-mode/enable", post(enable_dark_mode_handler))
+        .route("/dark-mode/disable", post(disable_dark_mode_handler))
+        .route("/dark-mode/hosts", get(get_dark_hosts_handler))
+        .route("/health", get(CrankerRouter::health_root))
+        .route("/{*any}", any(CrankerRouter::visit_portal))
+        .with_state(cranker_router.state())
+        .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
+        .into_make_service_with_connect_info::<SocketAddr>();
 
     let mut bind_ports = Vec::new();
     if let Some(port) = single_port {
@@ -157,4 +186,28 @@ async fn main() {
     }
 
     let _ = futures::future::join_all(servers).await;
+}
+
+async fn enable_dark_mode_handler(
+    State(app_state): State<Arc<CrankerRouterState>>,
+    axum::Json(dark_host): axum::Json<DarkHost>,
+) -> Response {
+    app_state.websocket_farm.enable_dark_mode(dark_host);
+    (StatusCode::OK, "").into_response()
+}
+
+async fn disable_dark_mode_handler(
+    State(app_state): State<Arc<CrankerRouterState>>,
+    axum::Json(dark_host): axum::Json<DarkHost>,
+) -> Response {
+    app_state.websocket_farm.disable_dark_mode(dark_host);
+    (StatusCode::OK, "").into_response()
+}
+
+async fn get_dark_hosts_handler(
+    State(app_state): State<Arc<CrankerRouterState>>,
+) -> Response {
+    let hosts = app_state.websocket_farm.get_dark_hosts();
+    let list: Vec<DarkHost> = hosts.into_iter().collect();
+    (StatusCode::OK, Json(list)).into_response()
 }

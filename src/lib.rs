@@ -12,7 +12,7 @@ use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get, post};
+use axum::routing::{any, get};
 use axum::{http, BoxError, Extension, Json, Router};
 use futures::SinkExt;
 use lazy_static::lazy_static;
@@ -21,7 +21,6 @@ use tower_http::limit;
 use uuid::Uuid;
 
 use crate::dark_mode_manager::DarkModeManager;
-use crate::dark_host::DarkHost;
 use crate::exceptions::{CrankerRouterException, CrexKind};
 use crate::ip_validator::{AllowAll, IPValidator};
 use crate::proxy_listener::ProxyListener;
@@ -171,34 +170,6 @@ impl CrankerRouter {
     /// Get an Arc copy of the inner state
     pub fn state(&self) -> ACRState { self.state.clone() }
 
-    /// A unified axum router that handles both registration/admin endpoints
-    /// and matches client visit requests via a wildcard fallback, all on the same port.
-    pub fn unified_axum_router(&self) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
-        let res = Router::new()
-            .route("/register", any(Self::register_handler)
-                .layer(from_fn_with_state(self.state(), Self::reg_check_and_extract)),
-            )
-            .route("/register/", any(Self::register_handler)
-                .layer(from_fn_with_state(self.state(), Self::reg_check_and_extract)),
-            )
-            .route("/deregister", any(Self::de_register_handler)
-                .layer(from_fn_with_state(self.state(), Self::de_reg_check)),
-            )
-            .route("/deregister/", any(Self::de_register_handler)
-                .layer(from_fn_with_state(self.state(), Self::de_reg_check)),
-            )
-            .route("/health/connectors", get(Self::connector_info_handler))
-            .route("/dark-mode/enable", post(Self::enable_dark_mode_handler))
-            .route("/dark-mode/disable", post(Self::disable_dark_mode_handler))
-            .route("/dark-mode/hosts", get(Self::get_dark_hosts_handler))
-            .route("/health", get(Self::health_root))
-            .route("/{*any}", any(CrankerRouter::visit_portal))
-            .with_state(self.state())
-            .layer(limit::RequestBodyLimitLayer::new(usize::MAX - 1))
-            .into_make_service_with_connect_info::<SocketAddr>();
-        return res;
-    }
-
     /// The registration axum router function.
     /// It registers multiple register and deregister paths
     /// for compatibility of node.js connector implementations
@@ -220,9 +191,9 @@ impl CrankerRouter {
             )
             // .with_state(self.state())
             .route("/health/connectors", get(Self::connector_info_handler))
-            .route("/dark-mode/enable", post(Self::enable_dark_mode_handler))
-            .route("/dark-mode/disable", post(Self::disable_dark_mode_handler))
-            .route("/dark-mode/hosts", get(Self::get_dark_hosts_handler))
+            // .route("/dark-mode/enable", post(Self::enable_dark_mode_handler))
+            // .route("/dark-mode/disable", post(Self::disable_dark_mode_handler))
+            // .route("/dark-mode/hosts", get(Self::get_dark_hosts_handler))
             // .with_state(self.state())
             // .route("/health/connections", get(???)) // how to get all conn of the server
             .route("/health", get(Self::health_root))
@@ -258,30 +229,6 @@ impl CrankerRouter {
         let mut res_map = HashMap::new();
         res_map.insert("services", res_map_inner);
         (StatusCode::OK, Json(res_map)).into_response()
-    }
-
-    pub async fn enable_dark_mode_handler(
-        State(app_state): State<ACRState>,
-        axum::Json(dark_host): axum::Json<DarkHost>,
-    ) -> Response {
-        app_state.websocket_farm.enable_dark_mode(dark_host);
-        (StatusCode::OK, "").into_response()
-    }
-
-    pub async fn disable_dark_mode_handler(
-        State(app_state): State<ACRState>,
-        axum::Json(dark_host): axum::Json<DarkHost>,
-    ) -> Response {
-        app_state.websocket_farm.disable_dark_mode(dark_host);
-        (StatusCode::OK, "").into_response()
-    }
-
-    pub async fn get_dark_hosts_handler(
-        State(app_state): State<ACRState>,
-    ) -> Response {
-        let hosts = app_state.websocket_farm.get_dark_hosts();
-        let list: Vec<DarkHost> = hosts.into_iter().collect();
-        (StatusCode::OK, Json(list)).into_response()
     }
 
     /// The client oriented visit portal router function
