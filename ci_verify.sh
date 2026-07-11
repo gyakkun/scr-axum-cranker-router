@@ -32,13 +32,18 @@ echo "CI Temporary directory: $CI_TMP_DIR"
 rm -rf "$CI_TMP_DIR"
 mkdir -p "$CI_TMP_DIR"
 
-# Set up trap to clean up on exit
-cleanup() {
-    echo "=== Cleaning up temporary files ==="
-    rm -rf "$CI_TMP_DIR"
-    echo "=== Cleanup completed ==="
+# Set up trap to kill leftover Rust processes on exit
+cleanup_rust_processes() {
+    echo "=== Cleaning leftover unified_router_server processes ==="
+    if [[ "$OSTYPE" == "cygwin" || "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
+        taskkill //F //IM unified_router_server.exe 2>/dev/null || true
+        taskkill //F //IM router_server.exe 2>/dev/null || true
+    else
+        pkill -9 -f unified_router_server 2>/dev/null || true
+        pkill -9 -f router_server 2>/dev/null || true
+    fi
 }
-trap cleanup EXIT
+trap cleanup_rust_processes EXIT
 
 # 3. Retrieve origin URLs
 echo "Retrieving git remote URLs..."
@@ -98,31 +103,36 @@ if [ -z "$CONNECTOR_JAR" ]; then
 fi
 cp "$CONNECTOR_JAR" "$CI_TMP_DIR/connector-uber.jar"
 
-# 8. Run Java mu-cranker-router tests against Rust unified_router_server
-echo "=== Running Java mu-cranker-router tests ==="
+# 8. Run Java mu-cranker-router tests in all 3 modes
+echo "=== Running Java mu-cranker-router tests (Java Mode) ==="
+mvn -f "$CI_TMP_DIR/mu-cranker-router/pom.xml" clean test -Dmaven.javadoc.skip=true -Dsource.skip=true
+
+echo "=== Running Java mu-cranker-router tests (Rust Mode, TLS off) ==="
 export CRANKER_ROUTER_RUST=true
 export RUST_ROUTER_SERVER_EXE="$CI_TMP_DIR/unified_router_server${EXE_EXT}"
-
 mvn -f "$CI_TMP_DIR/mu-cranker-router/pom.xml" clean test -Dcranker.router.rust=true -Dmaven.javadoc.skip=true -Dsource.skip=true
 
-# 8.5. Run Java cranker-connector tests against Rust unified_router_server
-echo "=== Running Java cranker-connector tests ==="
-export RUST_ROUTER_SERVER_EXE="$CI_TMP_DIR/unified_router_server${EXE_EXT}"
+echo "=== Running Java mu-cranker-router tests (Rust Mode, TLS on) ==="
+mvn -f "$CI_TMP_DIR/mu-cranker-router/pom.xml" clean test -Dcranker.router.rust=true -Dcranker.router.tls=true -Dmaven.javadoc.skip=true -Dsource.skip=true
+
+# 8.5. Run Java cranker-connector tests in all 3 modes
+echo "=== Running Java cranker-connector tests (Java Mode) ==="
+mvn -f "$CI_TMP_DIR/cranker-connector/pom.xml" clean test -Dmaven.javadoc.skip=true -Dsource.skip=true
+
+echo "=== Running Java cranker-connector tests (Rust Mode, TLS off) ==="
 mvn -f "$CI_TMP_DIR/cranker-connector/pom.xml" clean test -Dcranker.router.rust=true -Dmaven.javadoc.skip=true -Dsource.skip=true
+
+echo "=== Running Java cranker-connector tests (Rust Mode, TLS on) ==="
+mvn -f "$CI_TMP_DIR/cranker-connector/pom.xml" clean test -Dcranker.router.rust=true -Dcranker.router.tls=true -Dmaven.javadoc.skip=true -Dsource.skip=true
 
 # 9. Run Rust unit & integration tests
 echo "=== Running scr-axum-cranker-router tests ==="
 export CRANKER_CONNECTOR_JAR="$CI_TMP_DIR/connector-uber.jar"
 cargo test --lib -- --nocapture
 
-# 9.5. Kill any leftover background unified_router_server processes to release port binds
-echo "=== Cleaning leftover unified_router_server processes ==="
-if [[ "$OSTYPE" == "cygwin" || "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
-    taskkill //F //IM unified_router_server.exe 2>/dev/null || true
-    taskkill //F //IM router_server.exe 2>/dev/null || true
-else
-    pkill -9 -f unified_router_server 2>/dev/null || true
-    pkill -9 -f router_server 2>/dev/null || true
-fi
+# 9.5. Clean up temporary files after all tests passed successfully
+echo "=== Cleaning up temporary files ==="
+rm -rf "$CI_TMP_DIR"
+echo "=== Cleanup completed ==="
 
 echo "=== CI Verification Passed Successfully! ==="
