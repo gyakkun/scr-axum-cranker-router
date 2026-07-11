@@ -551,8 +551,8 @@ impl WebSocketFarmInterface for WebSocketFarm {
                     }
                     warn!("Closing socket router_socket_id={}", socket.router_socket_id());
                     let _ = socket.clone().send_ws_msg_to_uwss(axum::extract::ws::Message::Close(Some(axum::extract::ws::CloseFrame {
-                        code: 1000,
-                        reason: "De-registered".into(),
+                        code: 1001,
+                        reason: "Going away".into(),
                     }))).await;
                     let _ = socket.terminate_all_conn(None).await;
                 });
