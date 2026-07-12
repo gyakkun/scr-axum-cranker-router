@@ -308,9 +308,9 @@ impl CrankerRouter {
 
         // Log TLS session fields to showcase mTLS / session metadata extraction.
         if let Some(tls) = conn_info.as_ref().and_then(|i| i.tls_info.as_ref()) {
-            #[cfg(any(feature = "tls-rustls", feature = "http3-quinn"))]
+            #[cfg(any(feature = "tls-rustls", feature = "axum-server-tls", feature = "http3-quinn"))]
             let certs_len = tls.peer_certs.as_ref().map(|c| c.len()).unwrap_or(0);
-            #[cfg(not(any(feature = "tls-rustls", feature = "http3-quinn")))]
+            #[cfg(not(any(feature = "tls-rustls", feature = "axum-server-tls", feature = "http3-quinn")))]
             let certs_len = 0;
 
             debug!(
@@ -523,9 +523,9 @@ impl CrankerRouter {
             .get::<CrankerConnectInfo>()
             .and_then(|i| i.tls_info.as_ref())
         {
-            #[cfg(any(feature = "tls-rustls", feature = "http3-quinn"))]
+            #[cfg(any(feature = "tls-rustls", feature = "axum-server-tls", feature = "http3-quinn"))]
             let certs_len = tls.peer_certs.as_ref().map(|c| c.len()).unwrap_or(0);
-            #[cfg(not(any(feature = "tls-rustls", feature = "http3-quinn")))]
+            #[cfg(not(any(feature = "tls-rustls", feature = "axum-server-tls", feature = "http3-quinn")))]
             let certs_len = 0;
 
             debug!(
