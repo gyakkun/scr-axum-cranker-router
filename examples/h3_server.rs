@@ -4,8 +4,10 @@ use simple_logger::SimpleLogger;
 use log::LevelFilter;
 use axum::response::IntoResponse;
 use tokio_stream::StreamExt;
+use axum_server::tls_rustls::RustlsConfig;
 use scr_axum_cranker_router::{CrankerRouter, CrankerRouterBuilder, CrankerConnectInfo};
 use scr_axum_cranker_router::http3_quinn::QuinnListener;
+use scr_axum_cranker_router::axum_server_tls::CrankerTlsAcceptor;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,51 +16,76 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Initialize our Cranker Router
     let cranker_router = Arc::new(
         CrankerRouterBuilder::new()
-            .with_via_name("cranker-h3-demo".to_string())
+            .with_via_name("cranker-dual-demo".to_string())
             .build()
     );
 
-    // 2. Load TLS credentials for QUIC
-    let cert_pem = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])?;
+    // 2. Generate self-signed credentials for both H3 (UDP) and TCP HTTPS
+    let cert_pem = rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])?;
     let cert_der = cert_pem.cert.der().to_vec();
     let private_key = cert_pem.key_pair.serialize_der();
 
-    let certs = vec![rustls::pki_types::CertificateDer::from(cert_der)];
-    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(private_key));
+    let certs = vec![rustls::pki_types::CertificateDer::from(cert_der.clone())];
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(private_key.clone()));
 
-    // Create standard rustls ServerConfig supporting HTTP/3 ALPN ("h3")
-    let mut tls_config = rustls::ServerConfig::builder()
+    // Define a single port for both TCP and UDP listening
+    let port = 4443;
+    let tcp_addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let udp_addr = SocketAddr::from(([127, 0, 0, 1], port));
+
+    // ─── A. START HTTP/3 SERVER (UDP) ───
+    let mut h3_tls_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(certs, key)?;
-    tls_config.alpn_protocols = vec![b"h3".to_vec()];
+        .with_single_cert(certs.clone(), key.clone_key())?;
+    h3_tls_config.alpn_protocols = vec![b"h3".to_vec()];
 
-    // 3. Bind our QuinnListener to run HTTP/3
-    let addr: SocketAddr = "127.0.0.1:4433".parse()?;
-    let listener = QuinnListener::bind(addr, tls_config).await?;
-    println!("Cranker H3 Router listening on udp://{}", addr);
+    let h3_listener = QuinnListener::bind(udp_addr, h3_tls_config).await?;
+    println!("Cranker HTTP/3 (UDP) listening on: {}", udp_addr);
 
-    // 4. Accept incoming QUIC connections in a loop
-    while let Some((conn, cranker_info)) = listener.accept().await {
-        println!("Accepted new QUIC connection from {}", conn.remote_address());
-        
-        // Retrieve and inspect our newly populated quic_transport_parameters!
-        if let Some(ref tls) = cranker_info.tls_info {
-            if let Some(ref params) = tls.quic_transport_parameters {
-                println!(
-                    "  [QUIC Params Snapshot] len={}, bytes={:?}", 
-                    params.len(), 
-                    params
-                );
-            }
+    let h3_router = cranker_router.clone();
+    tokio::spawn(async move {
+        while let Some((conn, cranker_info)) = h3_listener.accept().await {
+            let h3_router_clone = h3_router.clone();
+            tokio::spawn(async move {
+                if let Err(e) = handle_quic_connection(conn, cranker_info, h3_router_clone).await {
+                    eprintln!("Error handling H3 connection: {:?}", e);
+                }
+            });
         }
+    });
 
-        let cranker_router = cranker_router.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_quic_connection(conn, cranker_info, cranker_router).await {
-                eprintln!("Error handling connection: {:?}", e);
-            }
-        });
-    }
+    // ─── B. START HTTPS (TCP) SERVER ───
+    let rustls_config = RustlsConfig::from_der(vec![cert_der], private_key).await?;
+    let rustls_acceptor = axum_server::tls_rustls::RustlsAcceptor::new(rustls_config);
+    let acceptor = CrankerTlsAcceptor::new(rustls_acceptor);
+
+    // Standard Axum Router mapping for the TCP/HTTPS port
+    let app = axum::Router::new()
+        .route("/register", axum::routing::any(CrankerRouter::register_handler)
+            .layer(axum::middleware::from_fn_with_state(cranker_router.state(), CrankerRouter::reg_check_and_extract)),
+        )
+        .route("/register/", axum::routing::any(CrankerRouter::register_handler)
+            .layer(axum::middleware::from_fn_with_state(cranker_router.state(), CrankerRouter::reg_check_and_extract)),
+        )
+        .route("/deregister", axum::routing::any(CrankerRouter::de_register_handler)
+            .layer(axum::middleware::from_fn_with_state(cranker_router.state(), CrankerRouter::de_reg_check)),
+        )
+        .route("/deregister/", axum::routing::any(CrankerRouter::de_register_handler)
+            .layer(axum::middleware::from_fn_with_state(cranker_router.state(), CrankerRouter::de_reg_check)),
+        )
+        .route("/health/connectors", axum::routing::get(CrankerRouter::connector_info_handler))
+        .route("/health", axum::routing::get(CrankerRouter::health_root))
+        .route("/", axum::routing::any(CrankerRouter::visit_portal))
+        .route("/{*any}", axum::routing::any(CrankerRouter::visit_portal))
+        .with_state(cranker_router.state())
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(usize::MAX - 1))
+        .into_make_service_with_connect_info::<SocketAddr>();
+
+    println!("Cranker HTTPS (TCP) listening on: {}", tcp_addr);
+    axum_server::bind(tcp_addr)
+        .acceptor(acceptor)
+        .serve(app)
+        .await?;
 
     Ok(())
 }
