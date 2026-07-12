@@ -48,12 +48,19 @@ where
         Box::pin(async move {
             let (tls_stream, inner_service) = handshake_fut.await?;
             let (raw_stream, session) = tls_stream.get_ref();
-            
+
             let remote_addr = raw_stream.peer_addr().unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
             let sni = session.server_name().map(String::from);
             let alpn = session.alpn_protocol().map(|p| p.to_vec());
-            let protocol_version = session.protocol_version().map(|v| format!("{:?}", v));
-            let cipher_suite = session.negotiated_cipher_suite().map(|c| format!("{:?}", c.suite()));
+            let protocol_version = session.protocol_version();
+            let cipher_suite = session.negotiated_cipher_suite();
+            let peer_certs = session
+                .peer_certificates()
+                .map(|certs| certs.iter().map(|c| c.clone().into_owned()).collect());
+            // quic_transport_parameters() is only available via rustls's QUIC API
+            // (rustls::quic::Connection), not on a TCP ServerConnection. This field
+            // is reserved for future HTTP/3 (QUIC) integration.
+            let quic_transport_parameters = None;
 
             let conn_info = CrankerConnectInfo {
                 remote_addr,
@@ -62,6 +69,8 @@ where
                     alpn,
                     protocol_version,
                     cipher_suite,
+                    peer_certs,
+                    quic_transport_parameters,
                 }),
             };
 

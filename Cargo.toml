@@ -37,12 +37,13 @@ axum-macros = "0.5"
 # Optional dependencies for TLS / Axum Server features
 tokio-rustls = { version = "0.26", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["std"], optional = true }
+rustls-webpki = { version = "0.103", package = "rustls-webpki", optional = true }
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"], optional = true }
 tower-service = { version = "0.3", optional = true }
 
 [features]
-tls-rustls = ["dep:tokio-rustls", "dep:rustls"]
-axum-server-tls = ["dep:axum-server", "dep:tokio-rustls", "dep:rustls", "dep:tower-service"]
+tls-rustls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-webpki"]
+axum-server-tls = ["dep:axum-server", "dep:tokio-rustls", "dep:rustls", "dep:rustls-webpki", "dep:tower-service"]
 
 [dev-dependencies]
 # for tls example - single domain

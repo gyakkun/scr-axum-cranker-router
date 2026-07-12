@@ -65,6 +65,16 @@ pub use connect_info::RustlsListener;
 #[cfg(feature = "axum-server-tls")]
 pub use axum_server_tls::{CrankerTlsAcceptor, TlsInfoService};
 
+// Re-export the rustls crate and webpki so downstream users can access
+// native TLS session types (ProtocolVersion, SupportedCipherSuite,
+// CertificateDer, EndEntityCert, etc.) without adding their own
+// dependency declarations.
+#[cfg(any(feature = "tls-rustls", feature = "axum-server-tls"))]
+pub use rustls;
+
+#[cfg(any(feature = "tls-rustls", feature = "axum-server-tls"))]
+pub use rustls_webpki as webpki;
+
 pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &'static str = "CrankerProtocol";
 // should be CrankerProtocol, but axum convert all header key to lowercase when reading req from client and sending res
 // e.g. cli req with header[("hi","l"), ("HI","U"), ("Hi","Ca")], then you need header_map.get_all()
