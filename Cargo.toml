@@ -34,6 +34,16 @@ async-trait = "0.1"
 simple_logger = "5"
 axum-macros = "0.5"
 
+# Optional dependencies for TLS / Axum Server features
+tokio-rustls = { version = "0.26", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std"], optional = true }
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"], optional = true }
+tower-service = { version = "0.3", optional = true }
+
+[features]
+tls-rustls = ["dep:tokio-rustls", "dep:rustls"]
+axum-server-tls = ["dep:axum-server", "dep:tokio-rustls", "dep:rustls", "dep:tower-service"]
+
 [dev-dependencies]
 # for tls example - single domain
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
@@ -43,6 +53,7 @@ tokio-rustls = "0.26"
 tower-service = "0.3"
 axum-extra = "0.12"
 reqwest = { version = "0.13", features = ["json"] }
+rustls-pemfile = "2.1"
 
 [lib]
 crate-type = ["lib"]
@@ -61,6 +72,11 @@ crate-type = ["bin"]
 
 [[example]]
 name = "unified_router_server"
+crate-type = ["bin"]
+
+[[example]]
+name = "native_axum_tls"
+required-features = ["tls-rustls"]
 crate-type = ["bin"]
 
 

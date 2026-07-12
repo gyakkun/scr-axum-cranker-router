@@ -44,6 +44,11 @@ pub mod connector_service;
 pub mod dark_mode_manager;
 pub mod dark_host;
 pub mod router_info;
+pub mod connect_info;
+
+#[cfg(feature = "axum-server-tls")]
+pub mod axum_server_tls;
+
 mod cranker_protocol_response;
 mod cranker_protocol_request_builder;
 mod router_socket_v3;
@@ -51,6 +56,14 @@ mod time_utils;
 mod http_utils;
 mod router_socket_v1;
 mod websocket_listener;
+
+pub use connect_info::{CrankerConnectInfo, TlsSessionInfo};
+
+#[cfg(feature = "tls-rustls")]
+pub use connect_info::RustlsListener;
+
+#[cfg(feature = "axum-server-tls")]
+pub use axum_server_tls::{CrankerTlsAcceptor, TlsInfoService};
 
 pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &'static str = "CrankerProtocol";
 // should be CrankerProtocol, but axum convert all header key to lowercase when reading req from client and sending res
@@ -60,15 +73,7 @@ pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &'static str = "CrankerProtocol";
 pub const _VER_1_0: &'static str = "1.0";
 pub const _VER_3_0: &'static str = "3.0";
 
-/// Marker extension injected by the TLS server to indicate
-/// that the incoming connection arrived over TLS.  The [`visit_portal`] handler reads this
-/// extension to set the correct `proto=https` value in the forwarded headers it sends to the
-/// back-end target service.
-#[derive(Clone, Debug)]
-pub struct CrankerTlsInfo {
-    pub is_tls: bool,
-    pub sni: Option<String>,
-}
+
 
 pub const CRANKER_V_1_0: &'static str = "cranker_1.0";
 pub const CRANKER_V_3_0: &'static str = "cranker_3.0";
@@ -268,11 +273,18 @@ impl CrankerRouter {
         method: Method,
         original_uri: OriginalUri,
         headers: HeaderMap,
-        ConnectInfo(addr): ConnectInfo<SocketAddr>,
         req: Request<Body>,
     ) -> Response
     {
-        let is_tls = req.extensions().get::<CrankerTlsInfo>().map_or(false, |info| info.is_tls);
+        let conn_info = req.extensions().get::<ConnectInfo<CrankerConnectInfo>>()
+            .map(|c| c.0.clone())
+            .or_else(|| req.extensions().get::<CrankerConnectInfo>().cloned());
+        let addr = conn_info.as_ref()
+            .map(|info| info.remote_addr)
+            .or_else(|| req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0))
+            .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
+        let is_tls = conn_info.as_ref().map_or(false, |info| info.tls_info.is_some());
+        // StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
         if method == Method::TRACE {
             return (StatusCode::METHOD_NOT_ALLOWED, "Method not supported.").into_response();
         }
