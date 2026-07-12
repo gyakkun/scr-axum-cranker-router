@@ -40,10 +40,14 @@ rustls = { version = "0.23", default-features = false, features = ["std"], optio
 rustls-webpki = { version = "0.103", package = "rustls-webpki", optional = true }
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"], optional = true }
 tower-service = { version = "0.3", optional = true }
+quinn = { version = "0.11", features = ["runtime-tokio", "rustls-ring"], optional = true }
+h3 = { version = "0.0.8", optional = true }
+h3-quinn = { version = "0.0.10", optional = true }
 
 [features]
 tls-rustls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-webpki"]
 axum-server-tls = ["dep:axum-server", "dep:tokio-rustls", "dep:rustls", "dep:rustls-webpki", "dep:tower-service"]
+http3-quinn = ["dep:quinn", "dep:rustls", "dep:rustls-webpki", "dep:h3", "dep:h3-quinn"]
 
 [dev-dependencies]
 # for tls example - single domain
@@ -55,6 +59,8 @@ tower-service = "0.3"
 axum-extra = "0.12"
 reqwest = { version = "0.13", features = ["json"] }
 rustls-pemfile = "2.1"
+rcgen = "0.13"
+tower = "0.5.3"
 
 [lib]
 crate-type = ["lib"]
@@ -78,6 +84,11 @@ crate-type = ["bin"]
 [[example]]
 name = "native_axum_tls"
 required-features = ["tls-rustls"]
+crate-type = ["bin"]
+
+[[example]]
+name = "h3_server"
+required-features = ["http3-quinn"]
 crate-type = ["bin"]
 
 

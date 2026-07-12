@@ -49,6 +49,9 @@ pub mod connect_info;
 #[cfg(feature = "axum-server-tls")]
 pub mod axum_server_tls;
 
+#[cfg(feature = "http3-quinn")]
+pub mod http3_quinn;
+
 mod cranker_protocol_response;
 mod cranker_protocol_request_builder;
 mod router_socket_v3;
@@ -65,15 +68,23 @@ pub use connect_info::RustlsListener;
 #[cfg(feature = "axum-server-tls")]
 pub use axum_server_tls::{CrankerTlsAcceptor, TlsInfoService};
 
+#[cfg(feature = "http3-quinn")]
+pub use http3_quinn::QuinnListener;
+
 // Re-export the rustls crate and webpki so downstream users can access
 // native TLS session types (ProtocolVersion, SupportedCipherSuite,
 // CertificateDer, EndEntityCert, etc.) without adding their own
 // dependency declarations.
-#[cfg(any(feature = "tls-rustls", feature = "axum-server-tls"))]
+#[cfg(any(feature = "tls-rustls", feature = "axum-server-tls", feature = "http3-quinn"))]
 pub use rustls;
 
-#[cfg(any(feature = "tls-rustls", feature = "axum-server-tls"))]
+#[cfg(any(feature = "tls-rustls", feature = "axum-server-tls", feature = "http3-quinn"))]
 pub use rustls_webpki as webpki;
+
+// Re-export quinn so downstream code can use quinn::Connection, quinn::VarInt,
+// etc. without needing a direct quinn dependency.
+#[cfg(feature = "http3-quinn")]
+pub use quinn;
 
 pub(crate) const CRANKER_PROTOCOL_HEADER_KEY: &'static str = "CrankerProtocol";
 // should be CrankerProtocol, but axum convert all header key to lowercase when reading req from client and sending res
@@ -294,10 +305,32 @@ impl CrankerRouter {
             .or_else(|| req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0))
             .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
         let is_tls = conn_info.as_ref().map_or(false, |info| info.tls_info.is_some());
+
+        // Log TLS session fields to showcase mTLS / session metadata extraction.
+        if let Some(tls) = conn_info.as_ref().and_then(|i| i.tls_info.as_ref()) {
+            #[cfg(any(feature = "tls-rustls", feature = "http3-quinn"))]
+            let certs_len = tls.peer_certs.as_ref().map(|c| c.len()).unwrap_or(0);
+            #[cfg(not(any(feature = "tls-rustls", feature = "http3-quinn")))]
+            let certs_len = 0;
+
+            debug!(
+                "[visit-portal] TLS session from {}  sni={:?}  alpn={:?}  version={:?}  \
+                 cipher={:?}  peer_certs={}  transport_snapshot_bytes={}",
+                addr,
+                tls.sni,
+                tls.alpn.as_deref().map(|b| String::from_utf8_lossy(b).into_owned()),
+                tls.protocol_version,
+                tls.cipher_suite,
+                certs_len,
+                tls.quic_transport_parameters.as_ref().map(|b| b.len()).unwrap_or(0),
+            );
+        }
+
         // StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
         if method == Method::TRACE {
             return (StatusCode::METHOD_NOT_ALLOWED, "Method not supported.").into_response();
         }
+
         // Get should have no body but not required
         let http_version = req.version();
         debug!("Http version {:?}", http_version);
@@ -483,6 +516,31 @@ impl CrankerRouter {
         if request.method() == Method::TRACE {
             return (StatusCode::METHOD_NOT_ALLOWED, "Method not allowed.").into_response();
         }
+
+        // Log TLS session fields for every connector registration attempt.
+        if let Some(tls) = request
+            .extensions()
+            .get::<CrankerConnectInfo>()
+            .and_then(|i| i.tls_info.as_ref())
+        {
+            #[cfg(any(feature = "tls-rustls", feature = "http3-quinn"))]
+            let certs_len = tls.peer_certs.as_ref().map(|c| c.len()).unwrap_or(0);
+            #[cfg(not(any(feature = "tls-rustls", feature = "http3-quinn")))]
+            let certs_len = 0;
+
+            debug!(
+                "[reg-portal] TLS session from {}  sni={:?}  alpn={:?}  version={:?}  \
+                 cipher={:?}  peer_certs={}  transport_snapshot_bytes={}",
+                addr,
+                tls.sni,
+                tls.alpn.as_deref().map(|b| String::from_utf8_lossy(b).into_owned()),
+                tls.protocol_version,
+                tls.cipher_suite,
+                certs_len,
+                tls.quic_transport_parameters.as_ref().map(|b| b.len()).unwrap_or(0),
+            );
+        }
+
         debug!("We got someone registering. Let's examine its info: headers={:?}", &headers);
 
         // Extract component name and connector id

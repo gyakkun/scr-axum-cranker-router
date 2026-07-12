@@ -16,15 +16,15 @@ pub struct TlsSessionInfo {
     pub alpn: Option<Vec<u8>>,
 
     /// The TLS protocol version (TLS 1.2 or TLS 1.3), using the native `rustls` enum.
-    #[cfg(feature = "tls-rustls")]
+    #[cfg(any(feature = "tls-rustls", feature = "axum-server-tls", feature = "http3-quinn"))]
     pub protocol_version: Option<rustls::ProtocolVersion>,
-    #[cfg(not(feature = "tls-rustls"))]
+    #[cfg(not(any(feature = "tls-rustls", feature = "axum-server-tls", feature = "http3-quinn")))]
     pub protocol_version: Option<String>,
 
     /// The cipher suite that was selected for this connection.
-    #[cfg(feature = "tls-rustls")]
+    #[cfg(any(feature = "tls-rustls", feature = "axum-server-tls", feature = "http3-quinn"))]
     pub cipher_suite: Option<rustls::SupportedCipherSuite>,
-    #[cfg(not(feature = "tls-rustls"))]
+    #[cfg(not(any(feature = "tls-rustls", feature = "axum-server-tls", feature = "http3-quinn")))]
     pub cipher_suite: Option<String>,
 
     /// The client's certificate chain (mTLS), as owned DER bytes.
@@ -35,7 +35,7 @@ pub struct TlsSessionInfo {
     ///
     /// Use [`TlsSessionInfo::parse_peer_certs`] to decode these into
     /// `webpki::EndEntityCert` for subject / SAN inspection.
-    #[cfg(feature = "tls-rustls")]
+    #[cfg(any(feature = "tls-rustls", feature = "axum-server-tls", feature = "http3-quinn"))]
     pub peer_certs: Option<Vec<rustls::pki_types::CertificateDer<'static>>>,
 
     /// Raw QUIC transport parameters, present only when the underlying
@@ -47,7 +47,7 @@ pub struct TlsSessionInfo {
     pub quic_transport_parameters: Option<Vec<u8>>,
 }
 
-#[cfg(feature = "tls-rustls")]
+#[cfg(any(feature = "tls-rustls", feature = "axum-server-tls", feature = "http3-quinn"))]
 impl TlsSessionInfo {
     /// Parse the client certificate chain into `EndEntityCert` structures
     /// using `rustls-webpki`.
