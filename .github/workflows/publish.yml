@@ -36,7 +36,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run CI Verify
-        run: ./ci_verify.sh
+        run: |
+          chmod +x ci_verify.sh
+          ./ci_verify.sh
 
       - name: Install cargo-edit
         run: cargo install cargo-edit
