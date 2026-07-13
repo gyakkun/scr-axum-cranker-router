@@ -16,6 +16,7 @@ use axum_core::response::{IntoResponse, Response};
 use axum_server::tls_rustls::RustlsConfig;
 use axum_server::Server;
 use tower_http::limit;
+use scr_axum_cranker_router::rustls::pki_types::pem::PemObject;
 use scr_axum_cranker_router::{CrankerRouter, CrankerRouterBuilder, CrankerRouterState};
 use scr_axum_cranker_router::axum_server_tls::CrankerTlsAcceptor;
 use scr_axum_cranker_router::dark_host::DarkHost;
@@ -40,6 +41,7 @@ async fn main() {
     let mut use_domain_filter = false;
     let mut idle_read_timeout_ms = 60000;
     let mut use_tls = false;
+    let mut use_http2 = true;
     let mut proxy_host_header = true;
 
     let args: Vec<String> = env::args().collect();
@@ -96,6 +98,10 @@ async fn main() {
             }
             "--tls" => {
                 use_tls = bool::from_str(&args[i + 1]).unwrap();
+                i += 2;
+            }
+            "--http2" => {
+                use_http2 = bool::from_str(&args[i + 1]).unwrap();
                 i += 2;
             }
             "--proxy-host-header" => {
@@ -179,14 +185,37 @@ async fn main() {
 
     // 2. HTTPS Listeners (if --tls true)
     if use_tls {
-        let rustls_config = RustlsConfig::from_pem_file(
+        let cert_bytes = std::fs::read(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("self_signed_certs")
                 .join("cert.bin"),
+        ).unwrap();
+        let key_bytes = std::fs::read(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("self_signed_certs")
                 .join("key.bin"),
-        ).await.unwrap();
+        ).unwrap();
+
+        let cert: Vec<rustls::pki_types::CertificateDer> =
+            rustls::pki_types::CertificateDer::pem_slice_iter(&cert_bytes[..])
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+
+        let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_bytes[..])
+            .unwrap();
+
+        let mut config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(cert, key)
+            .unwrap();
+
+        if use_http2 {
+            config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        } else {
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        }
+
+        let rustls_config = RustlsConfig::from_config(Arc::new(config));
 
         for port in &bind_ports {
             let tls_port = if *port > 50000 { *port - 10000 } else { *port + 10000 };
@@ -201,10 +230,12 @@ async fn main() {
             // so we hardcode a reasonable large limit
             // to just pass the tests
             let mut srv = Server::bind(addr);
-            srv.http_builder()
-                .http2()
-                .max_frame_size(Some(131072))
-                .max_header_list_size(131072);
+            if use_http2 {
+                srv.http_builder()
+                    .http2()
+                    .max_frame_size(Some(131072))
+                    .max_header_list_size(131072);
+            }
             let srv = srv.acceptor(acceptor)
                 .serve(unified_router.clone());
             servers.push(tokio::spawn(srv.into_future()));
