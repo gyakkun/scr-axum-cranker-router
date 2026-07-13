@@ -161,6 +161,7 @@ impl IntoResponse for CrankerRouterException {
         error!("Respond with CrankerRouterException: code = {} , body = {}", status_code, body_str);
         Response::builder()
             .status(status_code)
+            .header(axum::http::header::CONNECTION, "close")
             .body(Body::new(body_str))
             .unwrap()
     }

@@ -158,6 +158,22 @@ impl WebSocketFarm {
     }
 }
 
+struct SocketGuard {
+    socket: Option<Weak<dyn RouterSocket>>,
+    sender: Sender<Weak<dyn RouterSocket>>,
+}
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        if let Some(socket) = self.socket.take() {
+            let sender = self.sender.clone();
+            tokio::spawn(async move {
+                let _ = sender.send(socket).await;
+            });
+        }
+    }
+}
+
 #[async_trait]
 impl WebSocketFarmInterface for WebSocketFarm {
     async fn get_router_socket_by_target_path_and_apply_filter(
@@ -259,17 +275,23 @@ impl WebSocketFarmInterface for WebSocketFarm {
                     let mut visited = HashSet::new();
                     while let Ok(rs) = router_socket_receiver.recv().await // @filter loop await
                     {
+                        let mut guard = SocketGuard {
+                            socket: Some(rs.clone()),
+                            sender: router_socket_sender.clone(),
+                        };
                         if let Some(arc_rs) = rs.upgrade() {
                             let rsid = arc_rs.router_socket_id();
                             let is_visited = !visited.insert(rsid.clone());
                             if is_visited {
                                 // put it back and break from this inner loop
                                 let _ = router_socket_sender.send(Arc::downgrade(&arc_rs)).await;
+                                guard.socket = None;
                                 break;
                             }
                             // skip socket that should be removed
                             if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs) {
                                 visited.remove(&rsid);
+                                guard.socket = None;
                                 continue;
                             }
                             // skip socket whose connector is in dark mode
@@ -277,11 +299,13 @@ impl WebSocketFarmInterface for WebSocketFarm {
                                 let dark_hosts: HashSet<DarkHost> = self.dark_hosts.iter().map(|i| i.clone()).collect();
                                 if arc_rs.is_dark_mode_on(&dark_hosts) {
                                     let _ = router_socket_sender.send(Arc::downgrade(&arc_rs)).await;
+                                    guard.socket = None;
                                     continue;
                                 }
                             }
                             if has_precise_match && arc_rs.domain() == "*" {
                                 let _ = router_socket_sender.send(Arc::downgrade(&arc_rs)).await;
+                                guard.socket = None;
                                 continue;
                             }
                             if router_socket_filter.should_use(
@@ -296,10 +320,14 @@ impl WebSocketFarmInterface for WebSocketFarm {
                                 if arc_rs.cranker_version() == CRANKER_V_3_0 {
                                     let _ = router_socket_sender.send(Arc::downgrade(&arc_rs)).await;
                                 }
+                                guard.socket = None;
                                 return Ok(arc_rs); // @filter loop await
                             }
                             // put it back if not being chosen
                             let _ = router_socket_sender.send(Arc::downgrade(&arc_rs)).await;
+                            guard.socket = None;
+                        } else {
+                            guard.socket = None;
                         }
                     }
                     // If we are here, it means we have iterated all sockets in the chan and none of them are suitable.
