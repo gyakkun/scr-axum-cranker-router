@@ -1341,7 +1341,7 @@ mod lib_tests {
 
     #[test]
     #[should_panic]
-    fn test_hyphen_in_via() {
-        check_via_name(&"a-b".to_string());
+    fn test_via_name() {
+        check_via_name(&"👌".to_string());
     }
 }
