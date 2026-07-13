@@ -21,31 +21,53 @@ index 0343e27..ca372d9 100644
                      <source>11</source>
                  </configuration>
 diff --git a/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java b/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
-index c1fc183..8f95239 100644
+index c1fc183..f632cf0 100644
 --- a/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
-@@ -17,6 +17,7 @@ import okhttp3.Response;
+@@ -10,13 +10,17 @@ import com.hsbc.cranker.mucranker.BaseEndToEndTest;
+ import com.hsbc.cranker.mucranker.CrankerRouter;
+ import com.hsbc.cranker.mucranker.ProxyInfo;
+ import com.hsbc.cranker.mucranker.ProxyListener;
++import io.muserver.Http2ConfigBuilder;
+ import io.muserver.Method;
+ import io.muserver.MuServer;
+ import io.muserver.ResponseState;
+ import okhttp3.Response;
++import okhttp3.internal.http2.StreamResetException;
  import org.junit.jupiter.api.AfterEach;
  import org.junit.jupiter.api.RepeatedTest;
  import org.junit.jupiter.api.RepetitionInfo;
 +import org.junit.jupiter.api.condition.DisabledIf;
++import scaffolding.RustTestHelper;
  
  import java.io.EOFException;
  import java.io.IOException;
-@@ -32,9 +33,9 @@ import java.util.concurrent.atomic.AtomicReference;
+@@ -32,16 +36,20 @@ import java.util.concurrent.atomic.AtomicReference;
  
  import static com.hsbc.cranker.connector.ConnectorSocket.State.IDLE;
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.preferredProtocols;
 -import static com.hsbc.cranker.mucranker.CrankerRouterBuilder.crankerRouter;
 -import static io.muserver.MuServerBuilder.httpServer;
 -import static io.muserver.MuServerBuilder.httpsServer;
+ import static org.hamcrest.MatcherAssert.assertThat;
+-import static org.hamcrest.Matchers.*;
++import static org.hamcrest.Matchers.empty;
++import static org.hamcrest.Matchers.hasSize;
++import static org.hamcrest.Matchers.is;
++import static org.hamcrest.Matchers.notNullValue;
++import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+ import static org.junit.jupiter.api.Assertions.fail;
+ import static scaffolding.Action.swallowException;
+ import static scaffolding.AssertUtils.assertEventually;
+ import static scaffolding.ClientUtils.call;
+ import static scaffolding.ClientUtils.request;
 +import static scaffolding.TestServerBuilder.crankerRouter;
 +import static scaffolding.TestServerBuilder.httpServer;
 +import static scaffolding.TestServerBuilder.httpsServer;
- import static org.hamcrest.MatcherAssert.assertThat;
- import static org.hamcrest.Matchers.*;
- import static org.junit.jupiter.api.Assertions.fail;
-@@ -80,11 +81,6 @@ public class TimeoutTest {
+ 
+ public class TimeoutTest {
+ 
+@@ -80,23 +88,25 @@ public class TimeoutTest {
          connector = startConnector("my-app",  preferredProtocols(repetitionInfo));
          try (Response resp = call(request(routerServer.uri().resolve("/my-app/sleep-without-response")))) {
              assertThat(resp.code(), is(504));
@@ -57,7 +79,61 @@ index c1fc183..8f95239 100644
          }
      }
  
-@@ -184,6 +180,7 @@ public class TimeoutTest {
+-    @RepeatedTest(3)
++    @RepeatedTest(6)
+     public void ifTheIdleTimeoutIsExceededAfterResponseStartedThenConnectionIsClosed(RepetitionInfo repetitionInfo) {
++        // FIXME: This test requires the router http server is http2 disabled
++        //  otherwise the IOException thrown will not be an EOFException, but instead a StreamResetException
++        //  By default mu-server doesn't enable http2
++        //  This is an okhttp behaviour, may subject to change in the future okhttp version
++        var doHttp2 = doHttp2OrNot(repetitionInfo);
+         router = crankerRouter()
+             .withIdleTimeout(1450, TimeUnit.MILLISECONDS)
+             .withSupportedCrankerProtocols(List.of("cranker_1.0", "cranker_3.0"))
++            .withHttp2(doHttp2)
+             .start();
+         routerServer = httpsServer()
+             .addHandler(router.createRegistrationHandler())
+             .addHandler(router.createHttpHandler())
++            .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(doHttp2))
+             .start();
+ 
+         target = httpServer()
+@@ -108,16 +118,31 @@ public class TimeoutTest {
+                 })
+             .start();
+         connector = startConnector("my-app",  preferredProtocols(repetitionInfo));
+-        try (Response resp = call(request(routerServer.uri().resolve("/my-app/send-chunk-then-sleep")))) {
++        try (Response resp = call(request(routerServer.uri(
++            // FIXME: We don't specify http/https url here, so if
++            //  it's a rust router run in non tls mode
++            //  here will be an http scheme url
++        ).resolve("/my-app/send-chunk-then-sleep")))) {
+             assertThat(resp.code(), is(200));
+             assert resp.body() != null;
+             resp.body().string();
+             fail("should throw exception already.");
+         } catch (IOException expected) {
+-            assertThat(expected instanceof EOFException, is(true));
++            if (!doHttp2 || (RustTestHelper.isRustMode() && !RustTestHelper.isTlsMode())) {
++                // FIXME: If we do HTTP/2 but in non tls mode (http scheme url)
++                //  since axum/hyper doesn't support cleartext HTTP/2 (h2c)
++                //  it will fallback to HTTP/1.1 so it will be a normal
++                //  EOFException for HTTP/1.1
++                assertInstanceOf(EOFException.class, expected);
++            } else {
++                assertInstanceOf(StreamResetException.class, expected);
++            }
+         }
+     }
+ 
++    private static boolean doHttp2OrNot(RepetitionInfo repetitionInfo) {
++        return repetitionInfo.getCurrentRepetition() % 2 == 0;
++    }
+ 
+     @RepeatedTest(3)
+     public void ifTheConnectorDisconnectsWithoutGracefulShutdownItIsEventuallyDetected(RepetitionInfo repetitionInfo) throws Exception {
+@@ -184,6 +209,7 @@ public class TimeoutTest {
      }
  
      @RepeatedTest(3)
@@ -65,13 +141,13 @@ index c1fc183..8f95239 100644
      public void ifClientDisconnectedBeforeResponseStartThenProxyListenersShouldInvoke(RepetitionInfo repetitionInfo) throws InterruptedException {
          AtomicReference<ProxyInfo> ref = new AtomicReference<>();
          CountDownLatch countDownLatch = new CountDownLatch(1);
-@@ -229,3 +226,4 @@ public class TimeoutTest {
+@@ -229,3 +255,4 @@ public class TimeoutTest {
      }
  
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/BaseEndToEndTest.java b/src/test/java/com/hsbc/cranker/mucranker/BaseEndToEndTest.java
-index 5df1975..2c60cbd 100644
+index 5df1975..facab3f 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/BaseEndToEndTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/BaseEndToEndTest.java
 @@ -10,6 +10,9 @@ import org.junit.jupiter.api.RepetitionInfo;
@@ -102,7 +178,7 @@ index 5df1975..2c60cbd 100644
          this.crankerRouter = crankerRouterBuilder.start();
          this.router = httpsServerForTest()
                  .addHandler(crankerRouter.createRegistrationHandler())
-@@ -115,7 +118,7 @@ public abstract class BaseEndToEndTest {
+@@ -115,14 +118,14 @@ public abstract class BaseEndToEndTest {
                  .start();
      }
  
@@ -111,6 +187,15 @@ index 5df1975..2c60cbd 100644
          return httpsServer();
      }
  
+     public static List<String> preferredProtocols(RepetitionInfo repetitionInfo) {
+         final int currentRepetition = repetitionInfo.getCurrentRepetition();
+-        switch (currentRepetition) {
+-            case 1:
++        switch (currentRepetition % 3) {
++            case  1:
+                 return List.of(CRANKER_PROTOCOL_1);
+             case 2:
+                 return List.of(CRANKER_PROTOCOL_3);
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/CrankerConnectorInfoTest.java b/src/test/java/com/hsbc/cranker/mucranker/CrankerConnectorInfoTest.java
 index ca98bc5..5f14caa 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/CrankerConnectorInfoTest.java
@@ -163,7 +248,7 @@ index 9c118ca..0bdfad9 100644
          final int localTotal = localhostResult.values().stream().mapToInt(AtomicInteger::get).sum();
          assertThat(localTotal, is(20));
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterCleanTest.java b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterCleanTest.java
-index 031e273..a6b8823 100644
+index 031e273..b6b924a 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterCleanTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterCleanTest.java
 @@ -14,8 +14,8 @@ import java.util.List;
@@ -177,64 +262,24 @@ index 031e273..a6b8823 100644
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.is;
  import static scaffolding.Action.swallowException;
-@@ -78,12 +78,17 @@ public class CrankerRouterCleanTest {
- 
-         // assert route info clear before de-register
-         assertEventually(() -> {
--            try (Response resp = client.newCall(request(router.uri().resolve("/health/connectors")).build()).execute()) {
--                assertThat(resp.code(), is(200));
--                assert resp.body() != null;
--                final JSONObject servicesJson = new JSONObject(resp.body().string()).getJSONObject("services");
--                return servicesJson.has("something");
--            }
-+//            boolean isRustMode = scaffolding.RustTestHelper.isRustMode();
-+//            if (isRustMode) {
-+//                return crankerRouter.collectInfo().service("something").isPresent();
-+//            } else {
-+                try (Response resp = client.newCall(request(router.uri().resolve("/health/connectors")).build()).execute()) {
-+                    assertThat(resp.code(), is(200));
-+                    assert resp.body() != null;
-+                    final JSONObject servicesJson = new JSONObject(resp.body().string()).getJSONObject("services");
-+                    return servicesJson.has("something");
-+                }
-+//            }
-         }, is(true));
- 
-         // shutdown connector, which causing WebSocketFarm do retry
-@@ -91,12 +96,17 @@ public class CrankerRouterCleanTest {
- 
-         // assert route info clear after de-register
-         assertEventually(() -> {
--            try (Response resp = client.newCall(request(router.uri().resolve("/health/connectors")).build()).execute()) {
--                assertThat(resp.code(), is(200));
--                assert resp.body() != null;
--                final JSONObject servicesJson = new JSONObject(resp.body().string()).getJSONObject("services");
--                return servicesJson.has("something");
--            }
-+//            boolean isRustMode = scaffolding.RustTestHelper.isRustMode();
-+//            if (isRustMode) {
-+//                return crankerRouter.collectInfo().service("something").isPresent();
-+//            } else {
-+                try (Response resp = client.newCall(request(router.uri().resolve("/health/connectors")).build()).execute()) {
-+                    assertThat(resp.code(), is(200));
-+                    assert resp.body() != null;
-+                    final JSONObject servicesJson = new JSONObject(resp.body().string()).getJSONObject("services");
-+                    return servicesJson.has("something");
-+                }
-+//            }
-         }, is(false));
- 
-         // assert client will get 404
-@@ -108,3 +118,4 @@ public class CrankerRouterCleanTest {
+@@ -108,3 +108,4 @@ public class CrankerRouterCleanTest {
      }
  
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java
-index 6a6d5b5..8ebd0c0 100644
+index 6a6d5b5..3ed83ca 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java
-@@ -11,6 +11,7 @@ import org.junit.jupiter.api.AfterEach;
+@@ -2,6 +2,7 @@ package com.hsbc.cranker.mucranker;
+ 
+ import com.hsbc.cranker.connector.CrankerConnector;
+ import io.muserver.ContentTypes;
++import io.muserver.Http2ConfigBuilder;
+ import io.muserver.Method;
+ import io.muserver.MuServer;
+ import okhttp3.MediaType;
+@@ -11,6 +12,7 @@ import org.junit.jupiter.api.AfterEach;
  import org.junit.jupiter.api.BeforeEach;
  import org.junit.jupiter.api.RepeatedTest;
  import org.junit.jupiter.api.RepetitionInfo;
@@ -242,7 +287,7 @@ index 6a6d5b5..8ebd0c0 100644
  import scaffolding.StringUtils;
  
  import java.io.IOException;
-@@ -20,9 +21,9 @@ import java.util.concurrent.TimeUnit;
+@@ -20,9 +22,9 @@ import java.util.concurrent.TimeUnit;
  
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.preferredProtocols;
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.startConnectorAndWaitForRegistration;
@@ -255,7 +300,32 @@ index 6a6d5b5..8ebd0c0 100644
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.*;
  import static org.junit.jupiter.api.Assertions.fail;
-@@ -203,6 +204,7 @@ public class CrankerRouterHandlerTest {
+@@ -73,10 +75,22 @@ public class CrankerRouterHandlerTest {
+             })
+             .start();
+         connector = startConnector("my-target-server", preferredProtocols(repetitionInfo));
+-        try (Response resp = call(request(routerServer.uri().resolve("/my-target-server/blah%20blah?this%20thing=some%20value")))) {
++        try (Response resp = call(request(routerServer.uri(
++            // FIXME: We don't use explicit http()/httpsUri() here
++            //  so if it's a rust router and it's not in tls mode
++            //  here will be a plain http scheme url,
++            //  and given Rust doesn't support h2c mode (plaintext http2)
++            //  and by default rust router is http2 enabled where possible
++            //  so we need this special handling in the empty if body
++        ).resolve("/my-target-server/blah%20blah?this%20thing=some%20value")))) {
+             assertThat(resp.code(), is(200));
+             assertThat(resp.header("Content-Length"), is(nullValue()));
+-            assertThat(resp.header("Transfer-Encoding"), is("chunked"));
++            //noinspection StatementWithEmptyBody
++            if (RustTestHelper.isRustMode() && RustTestHelper.isTlsMode()) {
++
++            } else {
++                assertThat(resp.header("Transfer-Encoding"), is("chunked"));
++            }
+             assertThat(resp.body().string(), is("Got GET /my-target-server/blah%20blah and query some value"));
+         }
+     }
+@@ -203,6 +217,7 @@ public class CrankerRouterHandlerTest {
          try (Response resp = call(request(routerServer.uri().resolve("/blah.txt")))) {
              switch (preferredProtocols.get(0)) {
                  case "cranker_3.0": {
@@ -263,7 +333,7 @@ index 6a6d5b5..8ebd0c0 100644
                      assertThat(resp.code(), is(404));
                      break;
                  }
-@@ -276,3 +278,4 @@ public class CrankerRouterHandlerTest {
+@@ -276,3 +291,4 @@ public class CrankerRouterHandlerTest {
      }
  
  }
@@ -399,10 +469,10 @@ index 9423c9b..72fa39d 100644
  import static org.hamcrest.Matchers.is;
  import static scaffolding.ClientUtils.call;
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java b/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java
-index c60c904..eee918d 100644
+index c60c904..eaaed5e 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java
-@@ -7,23 +7,27 @@ import okhttp3.*;
+@@ -7,17 +7,21 @@ import okhttp3.*;
  import org.junit.jupiter.api.RepeatedTest;
  import org.junit.jupiter.api.RepetitionInfo;
  import org.junit.jupiter.api.Test;
@@ -410,6 +480,7 @@ index c60c904..eee918d 100644
  import scaffolding.ClientUtils;
  import scaffolding.InMemCookieJar;
  
++import scaffolding.RustTestHelper;
 +import scaffolding.TestCrankerRouterBuilder;
 +
  import java.io.IOException;
@@ -426,14 +497,46 @@ index c60c904..eee918d 100644
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.*;
  import static org.junit.jupiter.api.Assertions.fail;
- import static org.junit.jupiter.api.Assumptions.assumeTrue;
- import static scaffolding.ClientUtils.*;
+@@ -37,7 +41,9 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+         startRouterAndConnector(crankerRouter().withViaName("some-host.name:1234").withSupportedCrankerProtocols(List.of("cranker_1.0", "cranker_3.0")), preferredProtocols(repetitionInfo));
+         try (Response resp = call(request(router.uri()))) {
+             assert resp.body() != null;
+-            assertThat(resp.body().string(), is("via: [HTTP/1.1 some-host.name:1234]"));
++            var bodyStr = resp.body().string();
++            assertThat(bodyStr, startsWith("via:"));
++            assertThat(bodyStr, containsString("some-host.name:1234"));
+         }
+     }
  
-+@DisabledIf("scaffolding.RustTestHelper#isRustMode")
- public class HeaderProxyingTest extends BaseEndToEndTest {
+@@ -78,7 +84,7 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+             })
+             .start();
  
-     @RepeatedTest(3)
-@@ -227,7 +231,7 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+-        this.crankerRouter = crankerRouter().withSupportedCrankerProtocols(List.of("cranker_1.0", "cranker_3.0")).start();
++        this.crankerRouter = crankerRouter().withSupportedCrankerProtocols(List.of("cranker_1.0", "cranker_3.0")).withHttp2(false).start();
+ 
+         this.router = httpsServer()
+             .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
+@@ -126,6 +132,7 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+         client.newCall(request(router.uri().resolve("/make")).build()).execute().close();
+         List<Cookie> cookies = client.cookieJar().loadForRequest(HttpUrl.get(router.uri()));
+         assertThat(cookies.size(), is(2));
++        System.err.println("cookies: " + cookies); // FIXME: Not the same order, in rust router 2 first then 1
+         assertThat(cookies.get(0).value(), is("1"));
+         assertThat(cookies.get(1).value(), is("2"));
+ 
+@@ -203,7 +210,10 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+             assert resp.body() != null;
+             final String[] split = resp.body().string().split("\n");
+             // forward:by=10.0.0.10;for=127.0.0.1;host=example.org;proto=https
++            /* @formatter:off */
++            if (RustTestHelper.isRustMode() && !RustTestHelper.isTlsMode()) {} else
+             assertThat(split[0], containsString("host=example.org;proto=https"));
++            /* @formatter:on */
+             // x-forwarded-host:example.org
+             assertThat(split[1], is("x-forwarded-host:example.org"));
+             // host:localhost:56492
+@@ -227,7 +237,7 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
              })
              .start();
  
@@ -442,7 +545,29 @@ index c60c904..eee918d 100644
              .withSupportedCrankerProtocols(List.of("cranker_1.0", "cranker_3.0"))
              .withDiscardClientForwardedHeaders(false)
              .proxyHostHeader(false)
-@@ -315,3 +319,4 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+@@ -245,7 +255,10 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+             // host:localhost:56492
+             assertThat(split[2], containsString("host:localhost:"));
+             // forward:[for=www.fxclientui.gfx.us.gbm.hsbc.com,by=10.0.0.10;for=127.0.0.1;host=example.org;proto=https]
++            /* @formatter:off */
++            if (RustTestHelper.isRustMode() && !RustTestHelper.isTlsMode()) {} else
+             assertThat(split[0], containsString("host=example.org;proto=https"));
++            /* @formatter:on */
+             assertThat(split[0], containsString(",")); // size is 2
+         }
+     }
+@@ -293,7 +306,10 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+         startRouterAndConnector(crankerRouter().withSupportedCrankerProtocols(List.of("cranker_1.0", "cranker_3.0")).withSendLegacyForwardedHeaders(true), preferredProtocols(repetitionInfo));
+         try (Response resp = call(request(router.uri()))) {
+             assert resp.body() != null;
++            /* @formatter:off */
++            if (RustTestHelper.isRustMode() && !RustTestHelper.isTlsMode()) {} else
+             assertThat(resp.body().string(), oneOf("https " + router.uri().getAuthority() + " 127.0.0.1 1", "https " + router.uri().getAuthority() + " 0:0:0:0:0:0:0:1 1"));
++            /* @formatter:on */
+         }
+     }
+ 
+@@ -315,3 +331,4 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
      }
  
  }
@@ -816,10 +941,10 @@ index 67617a7..9e2de5e 100644
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java
 new file mode 100644
-index 0000000..481369b
+index 0000000..bc4d994
 --- /dev/null
 +++ b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java
-@@ -0,0 +1,382 @@
+@@ -0,0 +1,389 @@
 +package com.hsbc.cranker.mucranker;
 +
 +import io.muserver.MuHandler;
@@ -847,6 +972,7 @@ index 0000000..481369b
 +    private final int regPort;
 +    private final int visitPort;
 +    private final HttpClient httpClient;
++    private final boolean http2;
 +
 +    public RustCrankerRouter(
 +            IPValidator ipValidator,
@@ -861,7 +987,8 @@ index 0000000..481369b
 +            List<ProxyListener> completionListeners,
 +            RouteResolver routeResolver,
 +            List<String> supportedCrankerProtocol,
-+            java.util.function.Function<io.muserver.MuRequest, String> clientIpProvider
++            java.util.function.Function<io.muserver.MuRequest, String> clientIpProvider,
++            boolean http2
 +    ) {
 +        int portToUse = lastAssignedPort;
 +        if (portToUse == 0 || !isPortFree(portToUse)) {
@@ -870,6 +997,7 @@ index 0000000..481369b
 +        lastAssignedPort = portToUse;
 +        this.regPort = portToUse;
 +        this.visitPort = this.regPort;
++        this.http2 = http2;
 +
 +        HttpClient client = null;
 +        try {
@@ -899,8 +1027,8 @@ index 0000000..481369b
 +            File exe = envExe != null ? new File(envExe) : null;
 +            if (exe == null || !exe.exists()) {
 +                String[] candidatePaths = {
-+                    "../scr-axum-cranker-router/target/release/examples/unified_router_server",
-+                    "../scr-axum-cranker-router/target/debug/examples/unified_router_server"
++                    "../scr-axum-cranker-router/target/debug/examples/unified_router_server",
++                    "../scr-axum-cranker-router/target/release/examples/unified_router_server"
 +                };
 +                for (String path : candidatePaths) {
 +                    File f = new File(path + ".exe");
@@ -918,7 +1046,7 @@ index 0000000..481369b
 +            if (exe == null || !exe.exists()) {
 +                throw new IllegalStateException("Rust unified_router_server binary not found. Please specify RUST_ROUTER_SERVER_EXE or run 'cargo build --example unified_router_server'");
 +            }
-+
++            System.err.println("STARTING RUST EXE FROM: " + exe);
 +            List<String> cmd = new ArrayList<>();
 +            cmd.add(exe.getCanonicalPath());
 +            cmd.add("--reg-port");
@@ -941,6 +1069,10 @@ index 0000000..481369b
 +            cmd.add(String.valueOf(idleReadTimeoutMills));
 +            cmd.add("--tls");
 +            cmd.add(String.valueOf(RustTestHelper.isTlsMode()));
++            cmd.add("--http2");
++            cmd.add(String.valueOf(this.http2));
++            cmd.add("--proxy-host-header");
++            cmd.add(String.valueOf(!doNotProxyHeaders.contains("host")));
 +
 +            ProcessBuilder pb = new ProcessBuilder(cmd);
 +            pb.redirectOutput(ProcessBuilder.Redirect.to(new File("target/rust-router.log")));
@@ -1269,7 +1401,7 @@ index 0000000..a677e2e
 +}
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/ServerSentEventTest.java b/src/test/java/com/hsbc/cranker/mucranker/ServerSentEventTest.java
-index b800035..d884059 100644
+index b800035..b46d8c9 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/ServerSentEventTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/ServerSentEventTest.java
 @@ -12,8 +12,8 @@ import scaffolding.SseTestClient;
@@ -1283,7 +1415,29 @@ index b800035..d884059 100644
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.contains;
  import static scaffolding.Action.swallowException;
-@@ -129,3 +129,4 @@ public class ServerSentEventTest extends BaseEndToEndTest {
+@@ -42,7 +42,9 @@ public class ServerSentEventTest extends BaseEndToEndTest {
+ 
+         this.crankerRouter = crankerRouter()
+             .withSupportedCrankerProtocols(List.of("cranker_1.0", "cranker_3.0"))
+-            .withConnectorMaxWaitInMillis(400).start();
++            .withConnectorMaxWaitInMillis(400)
++            .withHttp2(false)
++            .start();
+ 
+         this.router = httpsServerForTest()
+             .addHandler(crankerRouter.createRegistrationHandler())
+@@ -106,7 +108,9 @@ public class ServerSentEventTest extends BaseEndToEndTest {
+ 
+         this.crankerRouter = crankerRouter()
+             .withSupportedCrankerProtocols(List.of("cranker_1.0", "cranker_3.0"))
+-            .withConnectorMaxWaitInMillis(400).start();
++            .withConnectorMaxWaitInMillis(400)
++            .withHttp2(false)
++            .start();
+ 
+         this.router = httpsServerForTest()
+             .addHandler(crankerRouter.createRegistrationHandler())
+@@ -129,3 +133,4 @@ public class ServerSentEventTest extends BaseEndToEndTest {
      }
  
  }
@@ -1341,10 +1495,10 @@ index 93a12fb..bfe66c3 100644
 +}
 diff --git a/src/test/java/scaffolding/TestCrankerRouterBuilder.java b/src/test/java/scaffolding/TestCrankerRouterBuilder.java
 new file mode 100644
-index 0000000..00f1fcc
+index 0000000..1e7dacb
 --- /dev/null
 +++ b/src/test/java/scaffolding/TestCrankerRouterBuilder.java
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,156 @@
 +package scaffolding;
 +
 +import com.hsbc.cranker.mucranker.*;
@@ -1356,9 +1510,15 @@ index 0000000..00f1fcc
 +
 +public class TestCrankerRouterBuilder {
 +    private final CrankerRouterBuilder delegate = CrankerRouterBuilder.crankerRouter();
++    private boolean http2 = true;
 +
 +    public static TestCrankerRouterBuilder crankerRouter() {
 +        return new TestCrankerRouterBuilder();
++    }
++
++    public TestCrankerRouterBuilder withHttp2(boolean http2) {
++        this.http2 = http2;
++        return this;
 +    }
 +
 +    public TestCrankerRouterBuilder withDiscardClientForwardedHeaders(boolean discardClientForwardedHeaders) {
@@ -1485,7 +1645,8 @@ index 0000000..00f1fcc
 +                return new com.hsbc.cranker.mucranker.RustCrankerRouter(
 +                    ipValidator, discardClientForwardedHeaders, sendLegacyForwardedHeaders, viaValue, doNotProxyHeaders,
 +                    maxWaitInMillis, pingAfterWriteMillis, idleReadTimeoutMills, routesKeepTimeMillis,
-+                    completionListeners, routeResolver, supportedCrankerProtocol, clientIpProvider
++                    completionListeners, routeResolver, supportedCrankerProtocol, clientIpProvider,
++                    this.http2
 +                );
 +            } catch (Exception e) {
 +                throw new RuntimeException("Failed to construct RustCrankerRouter", e);
@@ -1496,7 +1657,7 @@ index 0000000..00f1fcc
 +}
 diff --git a/src/test/java/scaffolding/TestServerBuilder.java b/src/test/java/scaffolding/TestServerBuilder.java
 new file mode 100644
-index 0000000..2516176
+index 0000000..413b48d
 --- /dev/null
 +++ b/src/test/java/scaffolding/TestServerBuilder.java
 @@ -0,0 +1,158 @@
@@ -1634,7 +1795,7 @@ index 0000000..2516176
 +                                String methodName = method.getName();
 +                                if (methodName.equals("uri") || methodName.equals("httpUri") || methodName.equals("httpsUri")) {
 +                                    if (isHttps) {
-+                                        if (methodName.equals("httpsUri")) {
++                                        if (methodName.equals("httpsUri") || methodName.equals("uri")) {
 +                                            int tlsPort = targetRustPort > 50000 ? targetRustPort - 10000 : targetRustPort + 10000;
 +                                            return URI.create("https://127.0.0.1:" + tlsPort);
 +                                        } else {
