@@ -4,6 +4,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUN_JAVA_TEST: true
+  RUN_TLS_OFF_TEST: true
   CRANKER_CONNECTOR_REMOTE_URL: https://github.com/hsbc/cranker-connector.git
   MU_CRANKER_ROUTER_REMOTE_URL: https://github.com/hsbc/mu-cranker-router.git
 
