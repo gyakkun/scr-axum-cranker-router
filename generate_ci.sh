@@ -111,13 +111,13 @@ echo "Checking environment dependencies..."
 if ! command -v cargo &> /dev/null; then
     export PATH="$PATH:$HOME/.cargo/bin"
 fi
-for cmd in git java mvn cargo; do
+for cmd in git java mvn cargo openssl; do
     if ! command -v "$cmd" &> /dev/null; then
         echo "Error: Required command '$cmd' is not installed or not in PATH." >&2
         exit 1
     fi
 done
-echo "Environment dependencies verified: git, java, mvn, cargo are available."
+echo "Environment dependencies verified: git, java, mvn, cargo, openssl are available."
 
 # 2. Paths and Directories Setup
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -181,9 +181,13 @@ echo "=== Applying patches to cloned repositories ==="
 git -C "$CI_TMP_DIR/cranker-connector" apply "$SCRIPT_DIR/patches/cranker-connector.patch"
 git -C "$CI_TMP_DIR/mu-cranker-router" apply "$SCRIPT_DIR/patches/mu-cranker-router.patch"
 
+# 5.5. Generate Self Signed Certificates
+echo "=== Generating Self-Signed Certificates ==="
+(cd "$SCRIPT_DIR/self_signed_certs" && chmod +x openssl_command.sh && ./openssl_command.sh)
+
 # 6. Build Router Server Binary
 echo "=== Building scr-axum-cranker-router bin ==="
-cargo build --release --example unified_router_server
+cargo build --all-features --release --example unified_router_server
 
 # Locate binary extension (.exe on Windows)
 EXE_EXT=""
