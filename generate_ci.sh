@@ -187,16 +187,16 @@ echo "=== Generating Self-Signed Certificates ==="
 
 # 6. Build Router Server Binary
 echo "=== Building scr-axum-cranker-router bin ==="
-cargo build --all-features --release --example unified_router_server
+cargo build --all-features --example unified_router_server
 
 # Locate binary extension (.exe on Windows)
 EXE_EXT=""
-if [ -f "$SCRIPT_DIR/target/release/examples/unified_router_server.exe" ]; then
+if [ -f "$SCRIPT_DIR/target/debug/examples/unified_router_server.exe" ]; then
     EXE_EXT=".exe"
 fi
 
 # Copy built binary to temp dir
-cp "$SCRIPT_DIR/target/release/examples/unified_router_server${EXE_EXT}" "$CI_TMP_DIR/unified_router_server${EXE_EXT}"
+cp "$SCRIPT_DIR/target/debug/examples/unified_router_server${EXE_EXT}" "$CI_TMP_DIR/unified_router_server${EXE_EXT}"
 
 # 7. Build & Install mu-cranker-router and cranker-connector
 echo "=== Building and installing mu-cranker-router ==="
