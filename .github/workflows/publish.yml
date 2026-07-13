@@ -43,8 +43,8 @@ jobs:
       - name: Install cargo-edit
         run: cargo install cargo-edit
 
-      - name: Bump Minor Version
-        run: cargo set-version --bump minor
+      - name: Bump Patch Version
+        run: cargo set-version --bump patch
 
       - name: Configure Git
         run: |
