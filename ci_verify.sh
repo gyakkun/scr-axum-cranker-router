@@ -10,13 +10,13 @@ echo "Checking environment dependencies..."
 if ! command -v cargo &> /dev/null; then
     export PATH="$PATH:$HOME/.cargo/bin"
 fi
-for cmd in git java mvn cargo openssl dos2unix; do
+for cmd in git java mvn cargo openssl; do
     if ! command -v "$cmd" &> /dev/null; then
         echo "Error: Required command '$cmd' is not installed or not in PATH." >&2
         exit 1
     fi
 done
-echo "Environment dependencies verified: git, java, mvn, cargo, openssl, dos2unix are available."
+echo "Environment dependencies verified: git, java, mvn, cargo, openssl are available."
 
 # 2. Paths and Directories Setup
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
