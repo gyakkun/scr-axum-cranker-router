@@ -1,27 +1,118 @@
 diff --git a/pom.xml b/pom.xml
-index 0343e27..ca372d9 100644
+index 0343e27..6dc947b 100644
 --- a/pom.xml
 +++ b/pom.xml
-@@ -66,7 +66,7 @@
+@@ -55,18 +55,18 @@
+         <dependency>
+             <groupId>org.slf4j</groupId>
+             <artifactId>slf4j-api</artifactId>
+-            <version>2.0.17</version>
++            <version>2.0.18</version>
+         </dependency>
+         <dependency>
+             <groupId>org.slf4j</groupId>
+             <artifactId>slf4j-simple</artifactId>
+-            <version>2.0.17</version>
++            <version>2.0.18</version>
+             <scope>test</scope>
+         </dependency>
          <dependency>
              <groupId>io.muserver</groupId>
              <artifactId>mu-server</artifactId>
 -            <version>2.2.3</version>
-+            <version>2.3.0</version>
++            <version>2.3.2</version>
              <scope>provided</scope>
          </dependency>
          <dependency>
-@@ -170,7 +170,7 @@
+@@ -90,20 +90,20 @@
+         <dependency>
+             <groupId>org.junit.jupiter</groupId>
+             <artifactId>junit-jupiter</artifactId>
+-            <version>5.14.2</version>
++            <version>6.1.2</version>
+             <scope>test</scope>
+         </dependency>
+ 
+         <dependency>
+             <groupId>com.squareup.okhttp3</groupId>
+             <artifactId>okhttp-jvm</artifactId>
+-            <version>5.3.2</version>
++            <version>5.4.0</version>
+             <scope>test</scope>
+         </dependency>
+         <dependency>
+             <groupId>com.squareup.okhttp3</groupId>
+             <artifactId>okhttp-sse</artifactId>
+-            <version>5.3.2</version>
++            <version>5.4.0</version>
+             <scope>test</scope>
+         </dependency>
+         <dependency>
+@@ -117,6 +117,29 @@
+ 
+     <build>
+         <plugins>
++            <plugin>
++                <groupId>org.apache.maven.plugins</groupId>
++                <artifactId>maven-enforcer-plugin</artifactId>
++                <version>3.6.3</version>
++                <executions>
++                    <execution>
++                        <id>enforce-versions</id>
++                        <goals>
++                            <goal>enforce</goal>
++                        </goals>
++                        <configuration>
++                            <rules>
++                                <requireMavenVersion>
++                                    <version>3.6.3</version>
++                                </requireMavenVersion>
++                                <requireJavaVersion>
++                                    <version>11</version>
++                                </requireJavaVersion>
++                            </rules>
++                        </configuration>
++                    </execution>
++                </executions>
++            </plugin>
+             <plugin>
+                 <groupId>org.apache.maven.plugins</groupId>
+                 <artifactId>maven-jar-plugin</artifactId>
+@@ -146,7 +169,7 @@
+             <plugin>
+                 <groupId>com.github.danielflower.mavenplugins</groupId>
+                 <artifactId>multi-module-maven-release-plugin</artifactId>
+-                <version>3.8.2</version>
++                <version>3.8.5</version>
+                 <configuration>
+                     <releaseProfiles>
+                         <releaseProfile>release</releaseProfile>
+@@ -165,12 +188,12 @@
+             <plugin>
+                 <groupId>org.apache.maven.plugins</groupId>
+                 <artifactId>maven-surefire-plugin</artifactId>
+-                <version>3.5.4</version>
++                <version>3.6.0-M1</version>
+             </plugin>
              <plugin>
                  <groupId>org.apache.maven.plugins</groupId>
                  <artifactId>maven-javadoc-plugin</artifactId>
 -                <version>3.6.3</version>
-+                <version>3.11.3</version>
++                <version>3.12.0</version>
                  <configuration>
                      <source>11</source>
                  </configuration>
+@@ -198,7 +221,7 @@
+                     <plugin>
+                         <groupId>org.sonatype.central</groupId>
+                         <artifactId>central-publishing-maven-plugin</artifactId>
+-                        <version>0.10.0</version>
++                        <version>0.11.0</version>
+                         <extensions>true</extensions>
+                         <configuration>
+                             <publishingServerId>central</publishingServerId>
 diff --git a/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java b/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
-index c1fc183..8a25d2d 100644
+index c1fc183..5da716f 100644
 --- a/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
 @@ -10,13 +10,17 @@ import com.hsbc.cranker.mucranker.BaseEndToEndTest;
@@ -99,18 +190,7 @@ index c1fc183..8a25d2d 100644
              .start();
  
          target = httpServer()
-@@ -108,16 +118,27 @@ public class TimeoutTest {
-                 })
-             .start();
-         connector = startConnector("my-app",  preferredProtocols(repetitionInfo));
--        try (Response resp = call(request(routerServer.uri().resolve("/my-app/send-chunk-then-sleep")))) {
-+        try (Response resp = call(request(routerServer.uri(
-+            // FIXME: We don't specify http/https url here, so if
-+            //  it's a rust router run in non tls mode
-+            //  here will be an http scheme url
-+        ).resolve("/my-app/send-chunk-then-sleep")))) {
-             assertThat(resp.code(), is(200));
-             assert resp.body() != null;
+@@ -114,10 +124,17 @@ public class TimeoutTest {
              resp.body().string();
              fail("should throw exception already.");
          } catch (IOException expected) {
@@ -129,7 +209,7 @@ index c1fc183..8a25d2d 100644
  
      @RepeatedTest(3)
      public void ifTheConnectorDisconnectsWithoutGracefulShutdownItIsEventuallyDetected(RepetitionInfo repetitionInfo) throws Exception {
-@@ -184,6 +205,7 @@ public class TimeoutTest {
+@@ -184,6 +201,7 @@ public class TimeoutTest {
      }
  
      @RepeatedTest(3)
@@ -137,7 +217,7 @@ index c1fc183..8a25d2d 100644
      public void ifClientDisconnectedBeforeResponseStartThenProxyListenersShouldInvoke(RepetitionInfo repetitionInfo) throws InterruptedException {
          AtomicReference<ProxyInfo> ref = new AtomicReference<>();
          CountDownLatch countDownLatch = new CountDownLatch(1);
-@@ -229,3 +251,4 @@ public class TimeoutTest {
+@@ -229,3 +247,4 @@ public class TimeoutTest {
      }
  
  }
@@ -264,10 +344,10 @@ index 031e273..b6b924a 100644
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java
-index 6a6d5b5..11df252 100644
+index 6a6d5b5..4b03bff 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java
-@@ -2,6 +2,7 @@ package com.hsbc.cranker.mucranker;
+@@ -2,15 +2,18 @@ package com.hsbc.cranker.mucranker;
  
  import com.hsbc.cranker.connector.CrankerConnector;
  import io.muserver.ContentTypes;
@@ -275,7 +355,10 @@ index 6a6d5b5..11df252 100644
  import io.muserver.Method;
  import io.muserver.MuServer;
  import okhttp3.MediaType;
-@@ -11,6 +12,7 @@ import org.junit.jupiter.api.AfterEach;
++import okhttp3.Protocol;
+ import okhttp3.RequestBody;
+ import okhttp3.Response;
+ import org.junit.jupiter.api.AfterEach;
  import org.junit.jupiter.api.BeforeEach;
  import org.junit.jupiter.api.RepeatedTest;
  import org.junit.jupiter.api.RepetitionInfo;
@@ -283,7 +366,7 @@ index 6a6d5b5..11df252 100644
  import scaffolding.StringUtils;
  
  import java.io.IOException;
-@@ -20,9 +22,9 @@ import java.util.concurrent.TimeUnit;
+@@ -20,9 +23,9 @@ import java.util.concurrent.TimeUnit;
  
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.preferredProtocols;
  import static com.hsbc.cranker.mucranker.BaseEndToEndTest.startConnectorAndWaitForRegistration;
@@ -296,46 +379,33 @@ index 6a6d5b5..11df252 100644
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.*;
  import static org.junit.jupiter.api.Assertions.fail;
-@@ -73,10 +75,22 @@ public class CrankerRouterHandlerTest {
-             })
-             .start();
-         connector = startConnector("my-target-server", preferredProtocols(repetitionInfo));
--        try (Response resp = call(request(routerServer.uri().resolve("/my-target-server/blah%20blah?this%20thing=some%20value")))) {
-+        try (Response resp = call(request(routerServer.uri(
-+            // FIXME: We don't use explicit http()/httpsUri() here
-+            //  so if it's a rust router and it's not in tls mode
-+            //  here will be a plain http scheme url,
-+            //  and given Rust doesn't support h2c mode (plaintext http2)
-+            //  and by default rust router is http2 enabled where possible
-+            //  so we need this special handling in the empty if body
-+        ).resolve("/my-target-server/blah%20blah?this%20thing=some%20value")))) {
+@@ -76,7 +79,9 @@ public class CrankerRouterHandlerTest {
+         try (Response resp = call(request(routerServer.uri().resolve("/my-target-server/blah%20blah?this%20thing=some%20value")))) {
              assertThat(resp.code(), is(200));
              assertThat(resp.header("Content-Length"), is(nullValue()));
 -            assertThat(resp.header("Transfer-Encoding"), is("chunked"));
-+            //noinspection StatementWithEmptyBody
-+            if (RustTestHelper.isRustMode()) {
-+
-+            } else {
++            if (resp.protocol().equals(Protocol.HTTP_1_1) || resp.protocol().equals(Protocol.HTTP_1_0)) {
 +                assertThat(resp.header("Transfer-Encoding"), is("chunked"));
 +            }
              assertThat(resp.body().string(), is("Got GET /my-target-server/blah%20blah and query some value"));
          }
      }
-@@ -203,6 +217,7 @@ public class CrankerRouterHandlerTest {
+@@ -203,6 +208,8 @@ public class CrankerRouterHandlerTest {
          try (Response resp = call(request(routerServer.uri().resolve("/blah.txt")))) {
              switch (preferredProtocols.get(0)) {
                  case "cranker_3.0": {
++                    // FIXME: We keep this behaviour explicitly in the axum/rust implementation
 +                    if (RustTestHelper.isRustMode()) break;
                      assertThat(resp.code(), is(404));
                      break;
                  }
-@@ -276,3 +291,4 @@ public class CrankerRouterHandlerTest {
+@@ -276,3 +283,4 @@ public class CrankerRouterHandlerTest {
      }
  
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRegistrationTest.java b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRegistrationTest.java
-index c52c9bb..afacbb2 100644
+index c52c9bb..b6160cf 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRegistrationTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRegistrationTest.java
 @@ -7,6 +7,7 @@ import org.junit.jupiter.api.AfterEach;
@@ -361,7 +431,7 @@ index c52c9bb..afacbb2 100644
      }
  
      @RepeatedTest(3)
-+    @DisabledIf("scaffolding.RustTestHelper#isRustMode")
++    @DisabledIf("scaffolding.RustTestHelper#isRustMode") // NOTE: Route resolver cannot be injected to Rust exe
      public void canMapRouteWithStashWhenUsingLongFirstRouteResolver(RepetitionInfo repetitionInfo) throws IOException {
  
          crankerRouter = crankerRouter()
@@ -369,7 +439,7 @@ index c52c9bb..afacbb2 100644
      }
  
      @Test
-+    @DisabledIf("scaffolding.RustTestHelper#isRustMode")
++    @DisabledIf("scaffolding.RustTestHelper#isRustMode")  // NOTE: ip provider cannot be injected to Rust exe
      public void canUseCustomizedIpProviderToKnowClientIp() {
          String forValue = "126.0.0.0";
          ForwardedHeader forwardedHeader = new ForwardedHeader("125.0.0.0", forValue, "forwarded.example.org", "http", null);
@@ -377,7 +447,7 @@ index c52c9bb..afacbb2 100644
      }
  
      @Test
-+    @DisabledIf("scaffolding.RustTestHelper#isRustMode")
++    @DisabledIf("scaffolding.RustTestHelper#isRustMode")  // NOTE: Customer mu handler cannot be injected to Rust exe
      public void canUseDefaultMethodToGetClientIp() {
          String forValue = "126.0.0.0";
          ForwardedHeader forwardedHeader = new ForwardedHeader("125.0.0.0", forValue, "forwarded.example.org", "http", null);
@@ -387,7 +457,7 @@ index c52c9bb..afacbb2 100644
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRetryTest.java b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRetryTest.java
-index a957683..1766141 100644
+index a957683..b15e251 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRetryTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterRetryTest.java
 @@ -7,6 +7,7 @@ import okhttp3.Response;
@@ -409,15 +479,16 @@ index a957683..1766141 100644
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.equalTo;
  import static org.hamcrest.Matchers.is;
-@@ -80,6 +81,7 @@ public class CrankerRouterRetryTest {
+@@ -80,6 +81,8 @@ public class CrankerRouterRetryTest {
              final String protocol = preferredProtocols.get(0);
              switch (protocol) {
                  case "cranker_3.0": {
++                    // FIXME: We keep the cranker_1.0 behaviour explicitly in axum/rust implementation
 +                    if (RustTestHelper.isRustMode()) continue;
                      try (Response response = client.newCall(request(router.uri().resolve("/something/blah")).build()).execute()) {
                          assertThat(response.code(), equalTo(404));
                      } catch (Exception e) {
-@@ -125,5 +127,4 @@ public class CrankerRouterRetryTest {
+@@ -125,5 +128,4 @@ public class CrankerRouterRetryTest {
          assertEventually(() -> crankerRouter.collectInfo().service("something").get().connectors().size(), is(1));
          assertEventually(() -> crankerRouter.collectInfo().service("something").get().connectors().get(0).connections().size(), is(2));
      }

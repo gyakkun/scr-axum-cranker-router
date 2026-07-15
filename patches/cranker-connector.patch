@@ -1,37 +1,85 @@
 diff --git a/pom.xml b/pom.xml
-index 634e982..63414cf 100644
+index 634e982..52382de 100644
 --- a/pom.xml
 +++ b/pom.xml
-@@ -60,13 +60,13 @@
+@@ -54,19 +54,19 @@
+         <dependency>
+             <groupId>org.slf4j</groupId>
+             <artifactId>slf4j-simple</artifactId>
+-            <version>2.0.17</version>
++            <version>2.0.18</version>
+             <scope>test</scope>
+         </dependency>
          <dependency>
              <groupId>com.hsbc.cranker</groupId>
              <artifactId>mu-cranker-router</artifactId>
 -            <version>2.0.4</version>
-+            <version>2.0-SNAPSHOT</version>
++            <version>2.0.8</version>
              <scope>test</scope>
          </dependency>
          <dependency>
              <groupId>io.muserver</groupId>
              <artifactId>mu-server</artifactId>
 -            <version>2.1.18</version>
-+            <version>2.3.0</version>
++            <version>2.3.2</version>
              <scope>test</scope>
          </dependency>
          <dependency>
-@@ -93,10 +93,21 @@
-             <version>5.1.0</version>
+@@ -78,29 +78,63 @@
+         <dependency>
+             <groupId>org.junit.jupiter</groupId>
+             <artifactId>junit-jupiter</artifactId>
+-            <version>5.13.4</version>
++            <version>6.1.2</version>
              <scope>test</scope>
          </dependency>
+         <dependency>
+             <groupId>com.squareup.okhttp3</groupId>
+             <artifactId>okhttp-jvm</artifactId>
+-            <version>5.1.0</version>
++            <version>5.4.0</version>
+             <scope>test</scope>
+         </dependency>
+         <dependency>
+             <groupId>com.squareup.okhttp3</groupId>
+             <artifactId>okhttp-sse</artifactId>
+-            <version>5.1.0</version>
++            <version>5.4.0</version>
++            <scope>test</scope>
++        </dependency>
 +        <dependency>
 +            <groupId>org.json</groupId>
 +            <artifactId>json</artifactId>
 +            <version>20251224</version>
-+            <scope>test</scope>
-+        </dependency>
+             <scope>test</scope>
+         </dependency>
      </dependencies>
  
      <build>
          <plugins>
++            <plugin>
++                <groupId>org.apache.maven.plugins</groupId>
++                <artifactId>maven-enforcer-plugin</artifactId>
++                <version>3.6.3</version>
++                <executions>
++                    <execution>
++                        <id>enforce-versions</id>
++                        <goals>
++                            <goal>enforce</goal>
++                        </goals>
++                        <configuration>
++                            <rules>
++                                <requireMavenVersion>
++                                    <version>3.6.3</version>
++                                </requireMavenVersion>
++                                <requireJavaVersion>
++                                    <version>11</version>
++                                </requireJavaVersion>
++                            </rules>
++                        </configuration>
++                    </execution>
++                </executions>
++            </plugin>
 +            <plugin>
 +                <groupId>org.apache.maven.plugins</groupId>
 +                <artifactId>maven-clean-plugin</artifactId>
@@ -40,14 +88,62 @@ index 634e982..63414cf 100644
              <plugin>
                  <groupId>org.apache.maven.plugins</groupId>
                  <artifactId>maven-compiler-plugin</artifactId>
-@@ -166,6 +177,28 @@
+-                <version>3.14.0</version>
++                <version>3.15.0</version>
+                 <configuration>
+                     <source>11</source>
+                     <target>11</target>
+@@ -109,13 +143,13 @@
+             <plugin>
+                 <groupId>org.apache.maven.plugins</groupId>
+                 <artifactId>maven-surefire-plugin</artifactId>
+-                <version>3.5.3</version>
++                <version>3.6.0-M1</version>
+             </plugin>
+ 
+             <plugin>
+                 <groupId>org.apache.maven.plugins</groupId>
+                 <artifactId>maven-jar-plugin</artifactId>
+-                <version>3.4.2</version>
++                <version>3.5.0</version>
+                 <configuration>
+                     <archive>
+                         <manifest>
+@@ -128,7 +162,7 @@
+             <plugin>
+                 <groupId>org.apache.maven.plugins</groupId>
+                 <artifactId>maven-source-plugin</artifactId>
+-                <version>3.3.1</version>
++                <version>3.4.0</version>
+                 <executions>
+                     <execution>
+                         <id>attach-sources</id>
+@@ -141,7 +175,7 @@
+             <plugin>
+                 <groupId>com.github.danielflower.mavenplugins</groupId>
+                 <artifactId>multi-module-maven-release-plugin</artifactId>
+-                <version>3.8.2</version>
++                <version>3.8.5</version>
+                 <configuration>
+                     <releaseProfiles>
+                         <releaseProfile>release</releaseProfile>
+@@ -152,7 +186,7 @@
+             <plugin>
+                 <groupId>org.apache.maven.plugins</groupId>
+                 <artifactId>maven-javadoc-plugin</artifactId>
+-                <version>3.11.3</version>
++                <version>3.12.0</version>
+                 <executions>
+                     <execution>
+                         <id>attach-javadocs</id>
+@@ -166,6 +200,28 @@
                      </execution>
                  </executions>
              </plugin>
 +            <plugin>
 +                <groupId>org.apache.maven.plugins</groupId>
 +                <artifactId>maven-shade-plugin</artifactId>
-+                <version>3.6.0</version>
++                <version>3.6.2</version>
 +                <executions>
 +                    <execution>
 +                        <phase>package</phase>
@@ -69,6 +165,24 @@ index 634e982..63414cf 100644
          </plugins>
      </build>
  
+@@ -177,7 +233,7 @@
+                     <plugin>
+                         <groupId>org.sonatype.central</groupId>
+                         <artifactId>central-publishing-maven-plugin</artifactId>
+-                        <version>0.8.0</version>
++                        <version>0.11.0</version>
+                         <extensions>true</extensions>
+                         <configuration>
+                             <publishingServerId>central</publishingServerId>
+@@ -188,7 +244,7 @@
+                     <plugin>
+                         <groupId>org.apache.maven.plugins</groupId>
+                         <artifactId>maven-gpg-plugin</artifactId>
+-                        <version>3.2.4</version>
++                        <version>3.2.8</version>
+                         <executions>
+                             <execution>
+                                 <id>sign-artifacts</id>
 diff --git a/src/main/java/com/hsbc/cranker/connector/CommandLineConnector.java b/src/main/java/com/hsbc/cranker/connector/CommandLineConnector.java
 new file mode 100644
 index 0000000..fd73d6f
@@ -258,10 +372,10 @@ index 49cd021..ca15785 100644
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/connector/ConcurrentUploadTest.java b/src/test/java/com/hsbc/cranker/connector/ConcurrentUploadTest.java
-index 1e84353..f93f08a 100644
+index 1e84353..588741a 100644
 --- a/src/test/java/com/hsbc/cranker/connector/ConcurrentUploadTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/ConcurrentUploadTest.java
-@@ -9,6 +9,7 @@ import org.junit.jupiter.api.RepetitionInfo;
+@@ -9,12 +9,14 @@ import org.junit.jupiter.api.RepetitionInfo;
  import org.slf4j.Logger;
  import org.slf4j.LoggerFactory;
  
@@ -269,7 +383,14 @@ index 1e84353..f93f08a 100644
  import java.net.http.HttpRequest;
  import java.net.http.HttpResponse;
  import java.util.Queue;
-@@ -26,35 +27,47 @@ public class ConcurrentUploadTest extends BaseEndToEndTest {
+ import java.util.concurrent.ConcurrentLinkedQueue;
+ import java.util.concurrent.CountDownLatch;
+ import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
+ 
+ import static io.muserver.MuServerBuilder.httpServer;
+ import static org.junit.jupiter.api.Assertions.*;
+@@ -26,35 +28,47 @@ public class ConcurrentUploadTest extends BaseEndToEndTest {
      private volatile MuHandler handler = (request, response) -> false;
  
      protected MuServer targetServer = httpServer()
@@ -336,7 +457,7 @@ index 1e84353..f93f08a 100644
      }
  
      @RepeatedTest(3)
-@@ -66,30 +79,41 @@ public class ConcurrentUploadTest extends BaseEndToEndTest {
+@@ -66,30 +80,35 @@ public class ConcurrentUploadTest extends BaseEndToEndTest {
              return true;
          };
  
@@ -344,35 +465,29 @@ index 1e84353..f93f08a 100644
 +        // in crankerRouter state before sending arbitrary client requests
 +        waitForRegistration("upload-service", connector.connectorId(), 2, crankerRouter);
 +
-+        Queue<String> orderTracker = new java.util.concurrent.ConcurrentLinkedQueue<>();
          Queue<HttpResponse<String>> responses = new ConcurrentLinkedQueue<>();
          CountDownLatch countDownLatch = new CountDownLatch(10);
-+        java.util.concurrent.atomic.AtomicInteger requestOrder = new java.util.concurrent.atomic.AtomicInteger(0);
  
          final String body = "c".repeat(10 * 1000);
 -        for(int i = 0; i < 10; i++) {
 +        for (int i = 0; i < 10; i++) {
              final int finalI = i;
              new Thread(() -> {
-+                int order = requestOrder.incrementAndGet();
                  try {
 -                    HttpResponse<String> resp = testClient.send(HttpRequest.newBuilder()
 -                        .method("POST", HttpRequest.BodyPublishers.ofString(body))
 -                        .uri(crankerServer.uri().resolve("/?task=" + finalI))
 -                        .build(), HttpResponse.BodyHandlers.ofString());
 +                    URI uri = crankerServer.uri().resolve("/upload-service/?task=" + finalI);
-+                    System.out.println("LAUNCHING REQUEST #" + order + " for task=" + finalI + " URI: " + uri);
 +                    HttpResponse<String> resp = localClient.send(HttpRequest.newBuilder()
 +                            .method("POST", HttpRequest.BodyPublishers.ofString(body))
 +                            .uri(uri)
 +                            .build(), HttpResponse.BodyHandlers.ofString());
-+                    System.out.println("COMPLETED REQUEST #" + order + " for task=" + finalI + " with status=" + resp.statusCode());
                      responses.add(resp);
 -                    countDownLatch.countDown();
                  } catch (Exception e) {
                      log.error("Concurrent request error", e);
 -                    responses.add(null);
-+                    System.err.println("FAILED REQUEST #" + order + " for task=" + finalI);
 +                } finally {
 +                    countDownLatch.countDown();
                  }
