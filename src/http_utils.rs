@@ -35,7 +35,11 @@ pub(crate) fn set_target_request_headers(
         has_content_length_or_transfer_encoding |=
             lowercase_key.eq(http::header::CONTENT_LENGTH.as_str())
                 || lowercase_key.eq(http::header::TRANSFER_ENCODING.as_str());
-        hdr_to_tgt.append(k, v.clone());
+        if lowercase_key == "host" {
+            hdr_to_tgt.insert(k, v.clone());
+        } else {
+            hdr_to_tgt.append(k, v.clone());
+        }
     });
     let cli_all_via = header_map_get_all_ok_to_string(cli_hdr, http::header::VIA);
 
