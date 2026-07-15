@@ -57,7 +57,7 @@ jobs:
           git tag "v$NEW_VERSION"
           git push origin HEAD --tags
 
-      - name: Publish to crates.io (Dry Run)
-        run: cargo publish --dry-run
+      - name: Publish to crates.io
+        run: cargo publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
