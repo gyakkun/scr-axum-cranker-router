@@ -82,6 +82,12 @@ echo "  mu-cranker-router: origin/$MU_ROUTER_BRANCH @ $MU_ROUTER_COMMIT"
 echo "Generating patch files..."
 mkdir -p "$SCRIPT_DIR/patches"
 
+if [[ "$OSTYPE" == "cygwin" || "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]] \
+   && ! command -v dos2unix >/dev/null 2>&1; then
+    echo "Error: Required command 'dos2unix' is not installed or not in PATH." >&2
+    exit 1
+fi
+
 git -C "$WORKSPACE_DIR/cranker-connector" diff "origin/$CONNECTOR_BRANCH" > "$SCRIPT_DIR/patches/cranker-connector.patch"
 dos2unix "$SCRIPT_DIR/patches/cranker-connector.patch"
 git -C "$WORKSPACE_DIR/mu-cranker-router" diff "origin/$MU_ROUTER_BRANCH" > "$SCRIPT_DIR/patches/mu-cranker-router.patch"
