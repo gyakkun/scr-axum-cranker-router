@@ -280,7 +280,7 @@ index 0000000..fd73d6f
 +    }
 +}
 diff --git a/src/test/java/com/hsbc/cranker/connector/BaseEndToEndTest.java b/src/test/java/com/hsbc/cranker/connector/BaseEndToEndTest.java
-index 49cd021..ca15785 100644
+index 49cd021..c9df4f5 100644
 --- a/src/test/java/com/hsbc/cranker/connector/BaseEndToEndTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/BaseEndToEndTest.java
 @@ -2,6 +2,7 @@ package com.hsbc.cranker.connector;
@@ -311,9 +311,9 @@ index 49cd021..ca15785 100644
 +        boolean isRust = scaffolding.RustTestHelper.isRustMode();
 +        if (isRust) {
 +            return new RustCrankerRouter(
-+                    null, false, false, "cranker-connector-test", java.util.Collections.emptySet(),
-+                    10000, 2000, 30000, 60000, java.util.Collections.emptyList(), null,
-+                    List.of("cranker_3.0", "cranker_1.0"), null, true
++                null, false, false, "cranker-connector-test", java.util.Collections.emptySet(),
++                10000, 2000, 30000, 60000, java.util.Collections.emptyList(), null,
++                List.of("cranker_3.0", "cranker_1.0"), null, true
 +            );
 +        } else {
 +            return CrankerRouterBuilder
@@ -347,7 +347,7 @@ index 49cd021..ca15785 100644
      }
  
      protected static URI registrationUri(URI routerUri) {
-@@ -109,9 +136,20 @@ public class BaseEndToEndTest {
+@@ -109,9 +136,22 @@ public class BaseEndToEndTest {
  
      @AfterEach
      public void stopServers() {
@@ -364,15 +364,17 @@ index 49cd021..ca15785 100644
 +            swallowException(crankerRouter::stop);
 +        }
 +        boolean isRust = scaffolding.RustTestHelper.isRustMode();
-+        if(isRust){
-+            try { Thread.sleep(300); } catch (Exception ignored) {}
++        if (isRust) {
++            try {
++                Thread.sleep(300);
++            } catch (Exception ignored) {}
 +        }
      }
  
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/connector/ConcurrentUploadTest.java b/src/test/java/com/hsbc/cranker/connector/ConcurrentUploadTest.java
-index 1e84353..588741a 100644
+index 1e84353..34d30ab 100644
 --- a/src/test/java/com/hsbc/cranker/connector/ConcurrentUploadTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/ConcurrentUploadTest.java
 @@ -9,12 +9,14 @@ import org.junit.jupiter.api.RepetitionInfo;
@@ -390,14 +392,8 @@ index 1e84353..588741a 100644
  
  import static io.muserver.MuServerBuilder.httpServer;
  import static org.junit.jupiter.api.Assertions.*;
-@@ -26,35 +28,47 @@ public class ConcurrentUploadTest extends BaseEndToEndTest {
-     private volatile MuHandler handler = (request, response) -> false;
- 
-     protected MuServer targetServer = httpServer()
--        .addHandler((request, response) -> handler.handle(request, response))
--        .start();
-+            .addHandler((request, response) -> handler.handle(request, response))
-+            .start();
+@@ -30,14 +32,21 @@ public class ConcurrentUploadTest extends BaseEndToEndTest {
+         .start();
  
      private CrankerConnector connector;
 +    private java.util.concurrent.ExecutorService clientExecutor;
@@ -405,42 +401,28 @@ index 1e84353..588741a 100644
  
      @BeforeEach
      void setUp(RepetitionInfo repetitionInfo) {
--        connector = CrankerConnectorBuilder.connector()
--            .withPreferredProtocols(preferredProtocols(repetitionInfo))
--            .withHttpClient(CrankerConnectorBuilder.createHttpClient(true).build())
--            .withRouterUris(RegistrationUriSuppliers.fixedUris(registrationUri(registrationServer.uri())))
--            .withRoute("*")
--            .withTarget(targetServer.uri())
--            .withProxyEventListener(new ProxyEventListener() {
--                @Override
--                public void onProxyError(HttpRequest request, Throwable error) {
--                    log.warn("onProxyError, request=" + request, error);
--                }
--            })
--            .withComponentName("cranker-connector-unit-test")
--            .start();
 +        clientExecutor = java.util.concurrent.Executors.newFixedThreadPool(20);
 +        localClient = HttpUtils.createHttpClientBuilder(true)
-+                .executor(clientExecutor)
-+                .build();
++            .executor(clientExecutor)
++            .build();
++
+         connector = CrankerConnectorBuilder.connector()
+             .withPreferredProtocols(preferredProtocols(repetitionInfo))
+             .withHttpClient(CrankerConnectorBuilder.createHttpClient(true).build())
+             .withRouterUris(RegistrationUriSuppliers.fixedUris(registrationUri(registrationServer.uri())))
+-            .withRoute("*")
++            .withRoute("upload-service")
+             .withTarget(targetServer.uri())
+             .withProxyEventListener(new ProxyEventListener() {
+                 @Override
+@@ -46,15 +55,20 @@ public class ConcurrentUploadTest extends BaseEndToEndTest {
+                 }
+             })
+             .withComponentName("cranker-connector-unit-test")
++            .withSlidingWindowSize(10)
+             .start();
  
 -        waitForRegistration("*", connector.connectorId(),2, crankerRouter);
-+        connector = CrankerConnectorBuilder.connector()
-+                .withPreferredProtocols(preferredProtocols(repetitionInfo))
-+                .withHttpClient(CrankerConnectorBuilder.createHttpClient(true).build())
-+                .withRouterUris(RegistrationUriSuppliers.fixedUris(registrationUri(registrationServer.uri())))
-+                .withRoute("upload-service")
-+                .withTarget(targetServer.uri())
-+                .withProxyEventListener(new ProxyEventListener() {
-+                    @Override
-+                    public void onProxyError(HttpRequest request, Throwable error) {
-+                        log.warn("onProxyError, request=" + request, error);
-+                    }
-+                })
-+                .withComponentName("cranker-connector-unit-test")
-+                .withSlidingWindowSize(10)
-+                .start();
-+
 +        waitForRegistration("upload-service", connector.connectorId(), 2, crankerRouter);
      }
  
@@ -475,14 +457,12 @@ index 1e84353..588741a 100644
              new Thread(() -> {
                  try {
 -                    HttpResponse<String> resp = testClient.send(HttpRequest.newBuilder()
--                        .method("POST", HttpRequest.BodyPublishers.ofString(body))
--                        .uri(crankerServer.uri().resolve("/?task=" + finalI))
--                        .build(), HttpResponse.BodyHandlers.ofString());
 +                    URI uri = crankerServer.uri().resolve("/upload-service/?task=" + finalI);
 +                    HttpResponse<String> resp = localClient.send(HttpRequest.newBuilder()
-+                            .method("POST", HttpRequest.BodyPublishers.ofString(body))
-+                            .uri(uri)
-+                            .build(), HttpResponse.BodyHandlers.ofString());
+                         .method("POST", HttpRequest.BodyPublishers.ofString(body))
+-                        .uri(crankerServer.uri().resolve("/?task=" + finalI))
++                        .uri(uri)
+                         .build(), HttpResponse.BodyHandlers.ofString());
                      responses.add(resp);
 -                    countDownLatch.countDown();
                  } catch (Exception e) {
@@ -503,7 +483,7 @@ index 1e84353..588741a 100644
              assertEquals(200, response.statusCode());
              assertEquals(body, response.body());
 diff --git a/src/test/java/com/hsbc/cranker/connector/ConnectRetryTest.java b/src/test/java/com/hsbc/cranker/connector/ConnectRetryTest.java
-index 03affbe..98201de 100644
+index 03affbe..7af0e87 100644
 --- a/src/test/java/com/hsbc/cranker/connector/ConnectRetryTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/ConnectRetryTest.java
 @@ -17,17 +17,21 @@ import java.util.List;
@@ -541,39 +521,37 @@ index 03affbe..98201de 100644
      }
  
      @RepeatedTest(3)
-@@ -57,6 +62,7 @@ public class ConnectRetryTest {
+@@ -57,51 +62,78 @@ public class ConnectRetryTest {
          this.crankerRouter = crankerRouter()
              .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
              .start();
-+        try {
-         this.router = httpsServer()
-             .addHandler(crankerRouter.createRegistrationHandler())
-             .addHandler(crankerRouter.createHttpHandler())
-@@ -68,14 +74,18 @@ public class ConnectRetryTest {
-         String body = randomAsciiStringOfLength(100);
-         HttpResponse<String> resp = testClient.send(HttpRequest.newBuilder()
-             .method("POST", HttpRequest.BodyPublishers.ofString(body))
+-        this.router = httpsServer()
+-            .addHandler(crankerRouter.createRegistrationHandler())
+-            .addHandler(crankerRouter.createHttpHandler())
+-            .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
+-            .start();
+-
+-        this.connector = startConnectorAndWaitForRegistration(crankerRouter, "*", targetServer, preferredProtocols(repetitionInfo), 2, router);
+-
+-        String body = randomAsciiStringOfLength(100);
+-        HttpResponse<String> resp = testClient.send(HttpRequest.newBuilder()
+-            .method("POST", HttpRequest.BodyPublishers.ofString(body))
 -            .uri(router.uri())
-+            .uri(router.uri().resolve("/something"))
-             .build(), HttpResponse.BodyHandlers.ofString());
-         assertEquals(body, resp.body());
- 
-         int originalPort = router.uri().getPort();
-+            boolean isRust = scaffolding.RustTestHelper.isRustMode();
-+            if (isRust) {
-+                crankerRouter.stop();
-+            }
-         router.stop();
- 
+-            .build(), HttpResponse.BodyHandlers.ofString());
+-        assertEquals(body, resp.body());
+-
+-        int originalPort = router.uri().getPort();
+-        router.stop();
+-
 -        assertThrows(IOException.class, () -> testClient.send(HttpRequest.newBuilder().uri(router.uri()).build(), HttpResponse.BodyHandlers.ofString()));
-+        assertThrows(IOException.class, () -> testClient.send(HttpRequest.newBuilder().uri(router.uri().resolve("/something")).build(), HttpResponse.BodyHandlers.ofString()));
- 
-         Thread.sleep(2000);
- 
-@@ -84,24 +94,46 @@ public class ConnectRetryTest {
-         this.crankerRouter = crankerRouter()
-             .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
-             .start();
+-
+-        Thread.sleep(2000);
+-
+-        assertThat(connector.routers().get(0).currentUnsuccessfulConnectionAttempts(), greaterThan(0));
+-
+-        this.crankerRouter = crankerRouter()
+-            .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
+-            .start();
 -        this.router = httpsServer()
 -            .withHttpsPort(originalPort)
 -            .addHandler(crankerRouter.createRegistrationHandler())
@@ -586,12 +564,43 @@ index 03affbe..98201de 100644
 -            HttpResponse<String> newResp = testClient.send(HttpRequest.newBuilder()
 -                .method("POST", HttpRequest.BodyPublishers.ofString(newBody))
 -                .uri(router.uri())
--                .build(), HttpResponse.BodyHandlers.ofString());
++        try {
++            this.router = httpsServer()
++                .addHandler(crankerRouter.createRegistrationHandler())
++                .addHandler(crankerRouter.createHttpHandler())
++                .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
++                .start();
++
++            this.connector = startConnectorAndWaitForRegistration(crankerRouter, "*", targetServer, preferredProtocols(repetitionInfo), 2, router);
++
++            String body = randomAsciiStringOfLength(100);
++            HttpResponse<String> resp = testClient.send(HttpRequest.newBuilder()
++                .method("POST", HttpRequest.BodyPublishers.ofString(body))
++                .uri(router.uri().resolve("/something"))
+                 .build(), HttpResponse.BodyHandlers.ofString());
 -            return newResp.body();
 -        }, is(newBody));
 -
 -        assertThat(connector.routers().get(0).currentUnsuccessfulConnectionAttempts(), is(0));
 -
++            assertEquals(body, resp.body());
++
++            int originalPort = router.uri().getPort();
++            boolean isRust = scaffolding.RustTestHelper.isRustMode();
++            if (isRust) {
++                crankerRouter.stop();
++            }
++            router.stop();
++
++            assertThrows(IOException.class, () -> testClient.send(HttpRequest.newBuilder().uri(router.uri().resolve("/something")).build(), HttpResponse.BodyHandlers.ofString()));
++
++            Thread.sleep(2000);
++
++            assertThat(connector.routers().get(0).currentUnsuccessfulConnectionAttempts(), greaterThan(0));
++
++            this.crankerRouter = crankerRouter()
++                .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
++                .start();
 +            try {
 +                this.router = httpsServer()
 +                    .withHttpsPort(originalPort)
@@ -635,43 +644,72 @@ index 03affbe..98201de 100644
      }
  
      @RepeatedTest(3)
-@@ -120,7 +152,7 @@ public class ConnectRetryTest {
+@@ -120,65 +152,84 @@ public class ConnectRetryTest {
          this.crankerRouter = crankerRouter()
              .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
              .start();
 -
-+        try {
-         this.router = httpsServer()
-             .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
-             .addHandler(crankerRouter.createRegistrationHandler())
-@@ -150,35 +182,54 @@ public class ConnectRetryTest {
-         verifyHttpRequestWorking();
- 
-         int originalPort = router.uri().getPort();
-+            boolean isRust = scaffolding.RustTestHelper.isRustMode();
-+            if (isRust) {
-         crankerRouter.stop();
-+            }
-         router.stop();
- 
--        assertThrows(IOException.class, () -> testClient.send(HttpRequest.newBuilder().uri(router.uri()).build(), HttpResponse.BodyHandlers.ofString()));
-+        assertThrows(IOException.class, () -> testClient.send(HttpRequest.newBuilder().uri(router.uri().resolve("/something")).build(), HttpResponse.BodyHandlers.ofString()));
- 
-         assertEventually(exceptionCount::get, greaterThan(0));
- 
-         this.crankerRouter = crankerRouter()
-             .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
-             .start();
 -        this.router = httpsServer()
--            .withHttpsPort(originalPort)
 -            .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
 -            .addHandler(crankerRouter.createRegistrationHandler())
 -            .addHandler(crankerRouter.createHttpHandler())
 -            .start();
 -
--        waitForRegistration("*", connector.connectorId(), slidingWindow, crankerRouter);
--
--        verifyHttpRequestWorking();
+-        this.connector = CrankerConnectorBuilder.connector()
+-            .withPreferredProtocols(preferredProtocols(repetitionInfo))
+-            .withHttpClient(CrankerConnectorBuilder.createHttpClient(true).build())
+-            .withTarget(targetServer.uri())
+-            .withRoute("*")
+-            .withRouterUris(RegistrationUriSuppliers.fixedUris(
+-                URI.create("ws" + router.uri().toString().substring(4))))
+-            .withSlidingWindowSize(slidingWindow)
+-            .withRouterRegistrationListener(new RouterEventListener() {
+-                @Override
+-                public void onSocketConnectionError(RouterRegistration router, Throwable exception) {
+-                    exceptionCount.incrementAndGet();
++        try {
++            this.router = httpsServer()
++                .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
++                .addHandler(crankerRouter.createRegistrationHandler())
++                .addHandler(crankerRouter.createHttpHandler())
++                .start();
++
++            this.connector = CrankerConnectorBuilder.connector()
++                .withPreferredProtocols(preferredProtocols(repetitionInfo))
++                .withHttpClient(CrankerConnectorBuilder.createHttpClient(true).build())
++                .withTarget(targetServer.uri())
++                .withRoute("*")
++                .withRouterUris(RegistrationUriSuppliers.fixedUris(
++                    URI.create("ws" + router.uri().toString().substring(4))))
++                .withSlidingWindowSize(slidingWindow)
++                .withRouterRegistrationListener(new RouterEventListener() {
++                    @Override
++                    public void onSocketConnectionError(RouterRegistration router, Throwable exception) {
++                        exceptionCount.incrementAndGet();
++                    }
++                })
++                .start();
++
++            waitForRegistration("*", connector.connectorId(), slidingWindow, crankerRouter);
++
++            assertThat(exceptionCount.get(), equalTo(0));
++
++            verifyHttpRequestWorking();
++
++            int originalPort = router.uri().getPort();
++            boolean isRust = scaffolding.RustTestHelper.isRustMode();
++            if (isRust) {
++                crankerRouter.stop();
++            }
++            router.stop();
++
++            assertThrows(IOException.class, () -> testClient.send(HttpRequest.newBuilder().uri(router.uri().resolve("/something")).build(), HttpResponse.BodyHandlers.ofString()));
++
++            assertEventually(exceptionCount::get, greaterThan(0));
++
++            this.crankerRouter = crankerRouter()
++                .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
++                .start();
 +            try {
 +                this.router = httpsServer()
 +                    .withHttpsPort(originalPort)
@@ -688,7 +726,37 @@ index 03affbe..98201de 100644
 +                if (isRustMode && crankerRouter != null) {
 +                    swallowException(crankerRouter::stop);
 +                    this.crankerRouter = null;
-+                }
+                 }
+-            })
+-            .start();
+-
+-        waitForRegistration("*", connector.connectorId(), slidingWindow, crankerRouter);
+-
+-        assertThat(exceptionCount.get(), equalTo(0));
+-
+-        verifyHttpRequestWorking();
+-
+-        int originalPort = router.uri().getPort();
+-        crankerRouter.stop();
+-        router.stop();
+-
+-        assertThrows(IOException.class, () -> testClient.send(HttpRequest.newBuilder().uri(router.uri()).build(), HttpResponse.BodyHandlers.ofString()));
+-
+-        assertEventually(exceptionCount::get, greaterThan(0));
+-
+-        this.crankerRouter = crankerRouter()
+-            .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
+-            .start();
+-        this.router = httpsServer()
+-            .withHttpsPort(originalPort)
+-            .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
+-            .addHandler(crankerRouter.createRegistrationHandler())
+-            .addHandler(crankerRouter.createHttpHandler())
+-            .start();
+-
+-        waitForRegistration("*", connector.connectorId(), slidingWindow, crankerRouter);
+-
+-        verifyHttpRequestWorking();
 +            }
 +        } finally {
 +            boolean isRustMode = scaffolding.RustTestHelper.isRustMode();
@@ -712,7 +780,7 @@ index 03affbe..98201de 100644
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorBuilderTest.java b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorBuilderTest.java
-index c4f213b..061e37d 100644
+index c4f213b..7f6d0ef 100644
 --- a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorBuilderTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorBuilderTest.java
 @@ -8,6 +8,7 @@ import io.muserver.MuServer;
@@ -734,13 +802,22 @@ index c4f213b..061e37d 100644
  import static org.junit.jupiter.api.Assertions.assertEquals;
  import static scaffolding.Action.swallowException;
  
+@@ -80,7 +81,7 @@ class CrankerConnectorBuilderTest {
+     @RepeatedTest(3)
+     void testMaxHeadersSize_exception(RepetitionInfo repetitionInfo) throws IOException, InterruptedException {
+ 
+-        setupServerForMaxHeaders(40000,  preferredProtocols(repetitionInfo));
++        setupServerForMaxHeaders(40000, preferredProtocols(repetitionInfo));
+ 
+         final String bigHeader = "b".repeat(58000); // test header size from 2000 to 20000
+ 
 @@ -121,3 +122,4 @@ class CrankerConnectorBuilderTest {
          this.connector = startConnectorAndWaitForRegistration(crankerRouter, "*", targetServer, preferredProtocols, 2, this.crankerServer);
      }
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorHttp2Test.java b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorHttp2Test.java
-index 58937ca..fd9ac76 100644
+index 58937ca..8ae2cd0 100644
 --- a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorHttp2Test.java
 +++ b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorHttp2Test.java
 @@ -17,8 +17,8 @@ import java.util.concurrent.TimeUnit;
@@ -762,6 +839,15 @@ index 58937ca..fd9ac76 100644
              .start();
  
          this.routerServer = httpsServer()
+@@ -61,7 +62,7 @@ public class CrankerConnectorHttp2Test {
+             .addHandler(crankerRouter.createHttpHandler())
+             .start();
+ 
+-        this.connector = startConnectorAndWaitForRegistration(crankerRouter, "*", targetServer, preferredProtocols(repetitionInfo),2, this.routerServer);
++        this.connector = startConnectorAndWaitForRegistration(crankerRouter, "*", targetServer, preferredProtocols(repetitionInfo), 2, this.routerServer);
+ 
+         HttpResponse<String> response = http2Client.send(HttpRequest.newBuilder()
+             .uri(this.routerServer.uri().resolve("/test"))
 @@ -72,3 +73,4 @@ public class CrankerConnectorHttp2Test {
          assertThat(response.body(), is("hello world"));
      }
@@ -807,7 +893,7 @@ index cc5fc4c..f442897 100644
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorStopTest.java b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorStopTest.java
-index 252f14c..46df0ac 100644
+index 252f14c..cc54a4b 100644
 --- a/src/test/java/com/hsbc/cranker/connector/CrankerConnectorStopTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/CrankerConnectorStopTest.java
 @@ -1,6 +1,5 @@
@@ -830,23 +916,13 @@ index 252f14c..46df0ac 100644
  import static org.hamcrest.MatcherAssert.assertThat;
  import static org.hamcrest.Matchers.*;
  import static org.junit.jupiter.api.Assertions.*;
-@@ -36,22 +35,27 @@ public class CrankerConnectorStopTest {
-     private static final Logger log = LoggerFactory.getLogger(CrankerConnectorStopTest.class);
- 
-     private final HttpClient httpClient = HttpUtils.createHttpClientBuilder(true)
--        .version(HttpClient.Version.HTTP_2)
--        .build();
-+            .version(HttpClient.Version.HTTP_2)
-+            .build();
-     private CrankerRouter crankerRouter;
-     private MuServer targetServer;
-     private MuServer routerServer;
+@@ -44,14 +43,19 @@ public class CrankerConnectorStopTest {
      private CrankerConnector connector;
  
      private final AtomicInteger counter = new AtomicInteger(0);
 -    private final ScheduledExecutorService executorService = Executors.newScheduledThreadPool(10, r -> new Thread(r, "test-pool" + counter.incrementAndGet()));
 +    private final ScheduledExecutorService executorService = Executors.newScheduledThreadPool(10,
-+            r -> new Thread(r, "test-pool" + counter.incrementAndGet()));
++        r -> new Thread(r, "test-pool" + counter.incrementAndGet()));
  
      @AfterEach
      public void after() {
@@ -865,26 +941,12 @@ index 252f14c..46df0ac 100644
          swallowException(executorService::shutdownNow);
      }
  
-@@ -62,22 +66,22 @@ public class CrankerConnectorStopTest {
-         this.targetServer = httpsServer().start();
- 
-         this.crankerRouter = crankerRouter()
--            .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
--            .start();
-+                .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
-+                .start();
- 
-         this.routerServer = httpsServer()
--            .addHandler(crankerRouter.createRegistrationHandler())
--            .addHandler(crankerRouter.createHttpHandler())
--            .start();
-+                .addHandler(crankerRouter.createRegistrationHandler())
-+                .addHandler(crankerRouter.createHttpHandler())
-+                .start();
+@@ -71,13 +75,13 @@ public class CrankerConnectorStopTest {
+             .start();
  
          this.connector = startConnectorAndWaitForRegistration(crankerRouter, "*", targetServer,
 -            List.of("cranker_1.0"),2, this.routerServer);
-+                List.of("cranker_1.0"), 2, this.routerServer);
++            List.of("cranker_1.0"), 2, this.routerServer);
  
          assertThat(this.connector.stop(10, TimeUnit.SECONDS), is(true));
          assertDoesNotThrow(() -> {
@@ -895,125 +957,24 @@ index 252f14c..46df0ac 100644
              }
          });
          this.connector = null;
-@@ -90,38 +94,38 @@ public class CrankerConnectorStopTest {
-         AtomicInteger clientCounter = new AtomicInteger(0);
- 
-         this.targetServer = httpsServer()
--            .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(true))
--            .addHandler(Method.GET, "/test", (request, response, pathParams) -> {
--                serverCounter.incrementAndGet();
--                final AsyncHandle asyncHandle = request.handleAsync();
--                executorService.schedule(() -> {
--                    response.status(201);
--                    asyncHandle.write(ByteBuffer.wrap("hello world".getBytes()));
--                    asyncHandle.complete();
--                }, 2, TimeUnit.SECONDS);
--            })
--            .start();
-+                .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(true))
-+                .addHandler(Method.GET, "/test", (request, response, pathParams) -> {
-+                    serverCounter.incrementAndGet();
-+                    final AsyncHandle asyncHandle = request.handleAsync();
-+                    executorService.schedule(() -> {
-+                        response.status(201);
-+                        asyncHandle.write(ByteBuffer.wrap("hello world".getBytes()));
-+                        asyncHandle.complete();
-+                    }, 2, TimeUnit.SECONDS);
-+                })
-+                .start();
- 
-         this.crankerRouter = crankerRouter()
--            .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
--            .start();
-+                .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
-+                .start();
- 
-         this.routerServer = httpsServer()
--            .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
--            .addHandler(crankerRouter.createRegistrationHandler())
--            .addHandler(crankerRouter.createHttpHandler())
--            .start();
-+                .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
-+                .addHandler(crankerRouter.createRegistrationHandler())
-+                .addHandler(crankerRouter.createHttpHandler())
-+                .start();
+@@ -113,7 +117,7 @@ public class CrankerConnectorStopTest {
+             .start();
  
          this.connector = startConnectorAndWaitForRegistration(crankerRouter, "*", targetServer,
 -            preferredProtocols(repetitionInfo),2, this.routerServer);
-+                preferredProtocols(repetitionInfo), 2, this.routerServer);
++            preferredProtocols(repetitionInfo), 2, this.routerServer);
  
          int requestCount = 3;
          for (int i = 0; i < requestCount; i++) {
-             executorService.submit(() -> swallowException(() -> {
-                 log.info("client: sending request");
-                 HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
--                    .uri(this.routerServer.uri().resolve("/test"))
--                    .build(), HttpResponse.BodyHandlers.ofString());
-+                        .uri(this.routerServer.uri().resolve("/test"))
-+                        .build(), HttpResponse.BodyHandlers.ofString());
-                 assertThat(response.statusCode(), is(201));
-                 assertThat(response.body(), is("hello world"));
-                 clientCounter.incrementAndGet();
-@@ -145,38 +149,38 @@ public class CrankerConnectorStopTest {
-         AtomicInteger clientCounter = new AtomicInteger(0);
- 
-         this.targetServer = httpsServer()
--            .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(true))
--            .addHandler(Method.GET, "/test", (request, response, pathParams) -> {
--                serverCounter.incrementAndGet();
--                response.contentType(ContentTypes.TEXT_PLAIN_UTF8);
--                try (PrintWriter writer = response.writer()) {
--                    for (int i = 0; i < 12; i++) {
--                        writer.print(i + ",");
--                        writer.flush();
--                        Thread.sleep(100L);
-+                .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(true))
-+                .addHandler(Method.GET, "/test", (request, response, pathParams) -> {
-+                    serverCounter.incrementAndGet();
-+                    response.contentType(ContentTypes.TEXT_PLAIN_UTF8);
-+                    try (PrintWriter writer = response.writer()) {
-+                        for (int i = 0; i < 12; i++) {
-+                            writer.print(i + ",");
-+                            writer.flush();
-+                            Thread.sleep(100L);
-+                        }
-                     }
--                }
--            })
--            .start();
-+                })
-+                .start();
- 
-         this.crankerRouter = crankerRouter()
--            .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
--            .start();
-+                .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
-+                .start();
- 
-         this.routerServer = httpsServer()
--            .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
--            .addHandler(crankerRouter.createRegistrationHandler())
--            .addHandler(crankerRouter.createHttpHandler())
--            .start();
-+                .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
-+                .addHandler(crankerRouter.createRegistrationHandler())
-+                .addHandler(crankerRouter.createHttpHandler())
-+                .start();
+@@ -170,7 +174,7 @@ public class CrankerConnectorStopTest {
+             .start();
  
          this.connector = startConnectorAndWaitForRegistration(crankerRouter, "*", targetServer,
 -            preferredProtocols(repetitionInfo),2, this.routerServer);
-+                preferredProtocols(repetitionInfo), 2, this.routerServer);
++            preferredProtocols(repetitionInfo), 2, this.routerServer);
  
          executorService.submit(() -> {
              try {
-                 HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
--                    .uri(this.routerServer.uri().resolve("/test"))
--                    .build(), HttpResponse.BodyHandlers.ofString());
-+                        .uri(this.routerServer.uri().resolve("/test"))
-+                        .build(), HttpResponse.BodyHandlers.ofString());
-                 assertThat(response.statusCode(), is(200));
-                 assertThat(response.body(), is("0,1,2,3,4,5,6,7,8,9,10,11,"));
-                 clientCounter.incrementAndGet();
 @@ -194,7 +198,6 @@ public class CrankerConnectorStopTest {
          assertEventually(clientCounter::get, equalTo(1));
      }
@@ -1022,73 +983,15 @@ index 252f14c..46df0ac 100644
      @RepeatedTest(3)
      void getTimeoutExceptionIfExceedTimeout(RepetitionInfo repetitionInfo) {
  
-@@ -203,42 +206,42 @@ public class CrankerConnectorStopTest {
-         AtomicInteger clientCounter = new AtomicInteger(0);
- 
-         this.targetServer = httpsServer()
--            .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(true))
--            .addHandler(Method.GET, "/test", (request, response, pathParams) -> {
--                serverCounter.incrementAndGet();
--                final AsyncHandle asyncHandle = request.handleAsync();
--                executorService.schedule(() -> {
--                    try {
--                        response.status(201);
--                        asyncHandle.write(ByteBuffer.wrap("hello world".getBytes()));
--                        asyncHandle.complete();
--                    } catch (Throwable throwable) {
--                        serverExceptionCounter.incrementAndGet();
--                    }
--                }, 3, TimeUnit.SECONDS);
--            })
--            .start();
-+                .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(true))
-+                .addHandler(Method.GET, "/test", (request, response, pathParams) -> {
-+                    serverCounter.incrementAndGet();
-+                    final AsyncHandle asyncHandle = request.handleAsync();
-+                    executorService.schedule(() -> {
-+                        try {
-+                            response.status(201);
-+                            asyncHandle.write(ByteBuffer.wrap("hello world".getBytes()));
-+                            asyncHandle.complete();
-+                        } catch (Throwable throwable) {
-+                            serverExceptionCounter.incrementAndGet();
-+                        }
-+                    }, 3, TimeUnit.SECONDS);
-+                })
-+                .start();
- 
-         this.crankerRouter = crankerRouter()
--            .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
--            .start();
-+                .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
-+                .start();
- 
-         this.routerServer = httpsServer()
--            .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
--            .addHandler(crankerRouter.createRegistrationHandler())
--            .addHandler(crankerRouter.createHttpHandler())
--            .start();
-+                .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
-+                .addHandler(crankerRouter.createRegistrationHandler())
-+                .addHandler(crankerRouter.createHttpHandler())
-+                .start();
+@@ -230,7 +233,7 @@ public class CrankerConnectorStopTest {
+             .start();
  
          this.connector = startConnectorAndWaitForRegistration(crankerRouter, "*", targetServer,
 -            preferredProtocols(repetitionInfo),2, this.routerServer);
-+                preferredProtocols(repetitionInfo), 2, this.routerServer);
++            preferredProtocols(repetitionInfo), 2, this.routerServer);
  
          int requestCount = 3;
          for (int i = 0; i < requestCount; i++) {
-             executorService.submit(() -> swallowException(() -> {
-                 log.info("client: sending request");
-                 HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
--                    .uri(this.routerServer.uri().resolve("/test"))
--                    .build(), HttpResponse.BodyHandlers.ofString());
-+                        .uri(this.routerServer.uri().resolve("/test"))
-+                        .build(), HttpResponse.BodyHandlers.ofString());
-                 assertThat(response.statusCode(), is(201));
-                 assertThat(response.body(), is("hello world"));
-                 clientCounter.incrementAndGet();
 @@ -249,7 +252,6 @@ public class CrankerConnectorStopTest {
          assertEventually(serverCounter::get, equalTo(requestCount));
          assertEventually(clientCounter::get, lessThan(requestCount));
@@ -1097,50 +1000,11 @@ index 252f14c..46df0ac 100644
          assertThat(this.connector.stop(1, TimeUnit.SECONDS), is(false));
          this.targetServer.stop();
      }
-@@ -258,60 +260,58 @@ public class CrankerConnectorStopTest {
-     public void throwIllegalStateExceptionWhenCallingStopBeforeCallingStart(RepetitionInfo repetitionInfo) {
+@@ -281,11 +283,9 @@ public class CrankerConnectorStopTest {
+             .withComponentName("cranker-connector-unit-test")
+             .build(); // not start
  
-         this.targetServer = httpsServer()
--            .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(true))
--            .addHandler(Method.GET, "/test", (request, response, pathParams) -> response.write("hello world"))
--            .start();
-+                .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(true))
-+                .addHandler(Method.GET, "/test", (request, response, pathParams) -> response.write("hello world"))
-+                .start();
- 
-         this.crankerRouter = crankerRouter()
--            .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
--            .start();
-+                .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
-+                .start();
- 
-         this.routerServer = httpsServer()
--            .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
--            .addHandler(crankerRouter.createRegistrationHandler())
--            .addHandler(crankerRouter.createHttpHandler())
--            .start();
-+                .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
-+                .addHandler(crankerRouter.createRegistrationHandler())
-+                .addHandler(crankerRouter.createHttpHandler())
-+                .start();
- 
-         this.connector = CrankerConnectorBuilder.connector()
--            .withPreferredProtocols(preferredProtocols(repetitionInfo))
--            .withHttpClient(CrankerConnectorBuilder.createHttpClient(true).build())
--            .withRouterUris(RegistrationUriSuppliers.fixedUris(URI.create("wss://localhost:1234")))
--            .withRoute("*")
--            .withTarget(URI.create("https://test-url"))
--            .withComponentName("cranker-connector-unit-test")
--            .build(); // not start
 -
-+                .withPreferredProtocols(preferredProtocols(repetitionInfo))
-+                .withHttpClient(CrankerConnectorBuilder.createHttpClient(true).build())
-+                .withRouterUris(RegistrationUriSuppliers.fixedUris(URI.create("wss://localhost:1234")))
-+                .withRoute("*")
-+                .withTarget(URI.create("https://test-url"))
-+                .withComponentName("cranker-connector-unit-test")
-+                .build(); // not start
- 
          assertFalse(connector.stop(1, TimeUnit.SECONDS));
      }
  
@@ -1148,48 +1012,6 @@ index 252f14c..46df0ac 100644
      @RepeatedTest(3)
      public void throwIllegalStateExceptionWhenCallingStopMultipleTime(RepetitionInfo repetitionInfo) {
  
-         this.targetServer = httpsServer()
--            .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(true))
--            .addHandler(Method.GET, "/test", (request, response, pathParams) -> response.write("hello world"))
--            .start();
-+                .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(true))
-+                .addHandler(Method.GET, "/test", (request, response, pathParams) -> response.write("hello world"))
-+                .start();
- 
-         this.crankerRouter = crankerRouter()
--            .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
--            .start();
-+                .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
-+                .start();
- 
-         this.routerServer = httpsServer()
--            .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
--            .addHandler(crankerRouter.createRegistrationHandler())
--            .addHandler(crankerRouter.createHttpHandler())
--            .start();
-+                .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
-+                .addHandler(crankerRouter.createRegistrationHandler())
-+                .addHandler(crankerRouter.createHttpHandler())
-+                .start();
- 
-         this.connector = CrankerConnectorBuilder.connector()
--            .withPreferredProtocols(preferredProtocols(repetitionInfo))
--            .withHttpClient(CrankerConnectorBuilder.createHttpClient(true).build())
--            .withRouterUris(RegistrationUriSuppliers.fixedUris(registrationUri(routerServer.uri())))
--            .withRoute("*")
--            .withTarget(URI.create("https://test-url"))
--            .withComponentName("cranker-connector-unit-test")
--            .start();
-+                .withPreferredProtocols(preferredProtocols(repetitionInfo))
-+                .withHttpClient(CrankerConnectorBuilder.createHttpClient(true).build())
-+                .withRouterUris(RegistrationUriSuppliers.fixedUris(registrationUri(routerServer.uri())))
-+                .withRoute("*")
-+                .withTarget(URI.create("https://test-url"))
-+                .withComponentName("cranker-connector-unit-test")
-+                .start();
- 
-         // call stop the first time
-         assertTrue(connector.stop(5, TimeUnit.SECONDS));
 @@ -320,7 +320,6 @@ public class CrankerConnectorStopTest {
          assertFalse(connector.stop(1, TimeUnit.SECONDS));
      }
@@ -1198,66 +1020,7 @@ index 252f14c..46df0ac 100644
      @RepeatedTest(3)
      public void clientDropEarlyCanNotifyMicroservice(RepetitionInfo repetitionInfo) throws IOException {
  
-@@ -328,48 +327,47 @@ public class CrankerConnectorStopTest {
-         final AtomicBoolean serverReceived = new AtomicBoolean(false);
- 
-         this.targetServer = httpServer()
--            .addHandler(Method.GET, "/test", (request, response, pathParams) -> {
--                // no response, just holding the tcp connection until client drop
--                final AsyncHandle asyncHandle = request.handleAsync();
--                asyncHandle.addResponseCompleteHandler(info -> {
--                    log.info("http server response complete, info={}", info);
--                    responseInfo[0] = info;
--                });
--                serverReceived.set(true);
--                asyncHandle.write(ByteBuffer.wrap("hello1".getBytes()));
--            })
--            .start();
-+                .addHandler(Method.GET, "/test", (request, response, pathParams) -> {
-+                    // no response, just holding the tcp connection until client drop
-+                    final AsyncHandle asyncHandle = request.handleAsync();
-+                    asyncHandle.addResponseCompleteHandler(info -> {
-+                        log.info("http server response complete, info={}", info);
-+                        responseInfo[0] = info;
-+                    });
-+                    serverReceived.set(true);
-+                    asyncHandle.write(ByteBuffer.wrap("hello1".getBytes()));
-+                })
-+                .start();
- 
-         log.info("http server started at {}", this.targetServer.uri());
- 
-         this.crankerRouter = crankerRouter()
--            .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
--            .start();
-+                .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
-+                .start();
- 
-         this.routerServer = httpServer()
--            .withHttpPort(0)
--            .addHandler(crankerRouter.createRegistrationHandler())
--            .addHandler(crankerRouter.createHttpHandler())
--            .start();
-+                .withHttpPort(0)
-+                .addHandler(crankerRouter.createRegistrationHandler())
-+                .addHandler(crankerRouter.createHttpHandler())
-+                .start();
- 
-         this.connector = CrankerConnectorBuilder.connector()
--            .withPreferredProtocols(preferredProtocols(repetitionInfo))
--            .withHttpClient(CrankerConnectorBuilder.createHttpClient(true).build())
--            .withRouterUris(RegistrationUriSuppliers.fixedUris(registrationUri(routerServer.uri())))
--            .withRoute("*")
--            .withTarget(targetServer.uri())
--            .withComponentName("cranker-connector-unit-test")
--            .start();
-+                .withPreferredProtocols(preferredProtocols(repetitionInfo))
-+                .withHttpClient(CrankerConnectorBuilder.createHttpClient(true).build())
-+                .withRouterUris(RegistrationUriSuppliers.fixedUris(registrationUri(routerServer.uri())))
-+                .withRoute("*")
-+                .withTarget(targetServer.uri())
-+                .withComponentName("cranker-connector-unit-test")
-+                .start();
+@@ -363,7 +362,6 @@ public class CrankerConnectorStopTest {
  
          waitForRegistration("*", connector.connectorId(), 2, crankerRouter);
  
@@ -1265,98 +1028,26 @@ index 252f14c..46df0ac 100644
          String host = this.routerServer.uri().getHost();
          int port = this.routerServer.uri().getPort();
          String path = "/test";
- 
-         try (Socket socket = new Socket(host, port);
--             OutputStreamWriter writer = new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8)) {
-+                OutputStreamWriter writer = new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8)) {
-             writer.write("GET " + path + " HTTP/1.1\r\n");
-             writer.write("Host: " + host + "\r\n");
-             writer.write("User-Agent: Mozilla/5.0\r\n");
 @@ -383,7 +381,8 @@ public class CrankerConnectorStopTest {
              writer.close();
              socket.close();
  
 -            AssertUtils.assertEventually(() -> responseInfo[0] != null && !responseInfo[0].completedSuccessfully(), is(true), 10, 100);
 +            AssertUtils.assertEventually(() -> responseInfo[0] != null && !responseInfo[0].completedSuccessfully(),
-+                    is(true), 10, 100);
++                is(true), 10, 100);
          }
      }
  
-@@ -394,38 +393,38 @@ public class CrankerConnectorStopTest {
-         final AtomicBoolean serverReceived = new AtomicBoolean(false);
- 
-         this.targetServer = httpServer()
--            .addHandler(Method.GET, "/test", (request, response, pathParams) -> {
--                // no response, just holding the tcp connection until client drop
--                final AsyncHandle asyncHandle = request.handleAsync();
--                asyncHandle.addResponseCompleteHandler(info -> {
--                    log.info("http server response complete, info={}", info);
--                    responseInfo[0] = info;
--                });
--                serverReceived.set(true);
--                asyncHandle.write(ByteBuffer.wrap("hello1".getBytes()));
--            })
--            .start();
-+                .addHandler(Method.GET, "/test", (request, response, pathParams) -> {
-+                    // no response, just holding the tcp connection until client drop
-+                    final AsyncHandle asyncHandle = request.handleAsync();
-+                    asyncHandle.addResponseCompleteHandler(info -> {
-+                        log.info("http server response complete, info={}", info);
-+                        responseInfo[0] = info;
-+                    });
-+                    serverReceived.set(true);
-+                    asyncHandle.write(ByteBuffer.wrap("hello1".getBytes()));
-+                })
-+                .start();
- 
-         log.info("http server started at {}", this.targetServer.uri());
- 
-         this.crankerRouter = crankerRouter()
--            .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
--            .start();
-+                .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
-+                .start();
- 
-         this.routerServer = httpServer()
--            .withHttpPort(0)
--            .addHandler(crankerRouter.createRegistrationHandler())
--            .addHandler(crankerRouter.createHttpHandler())
--            .start();
-+                .withHttpPort(0)
-+                .addHandler(crankerRouter.createRegistrationHandler())
-+                .addHandler(crankerRouter.createHttpHandler())
-+                .start();
- 
-         this.connector = CrankerConnectorBuilder.connector()
--            .withPreferredProtocols(preferredProtocols(repetitionInfo))
--            .withHttpClient(CrankerConnectorBuilder.createHttpClient(true).build())
--            .withRouterUris(RegistrationUriSuppliers.fixedUris(registrationUri(routerServer.uri())))
--            .withRoute("*")
--            .withTarget(targetServer.uri())
--            .withComponentName("cranker-connector-unit-test")
--            .start();
-+                .withPreferredProtocols(preferredProtocols(repetitionInfo))
-+                .withHttpClient(CrankerConnectorBuilder.createHttpClient(true).build())
-+                .withRouterUris(RegistrationUriSuppliers.fixedUris(registrationUri(routerServer.uri())))
-+                .withRoute("*")
-+                .withTarget(targetServer.uri())
-+                .withComponentName("cranker-connector-unit-test")
-+                .start();
- 
-         waitForRegistration("*", connector.connectorId(), 2, crankerRouter);
- 
-@@ -437,8 +436,9 @@ public class CrankerConnectorStopTest {
+@@ -437,7 +436,8 @@ public class CrankerConnectorStopTest {
          AtomicBoolean isClientCompleted = new AtomicBoolean(false);
          new Thread(() -> {
              try (Socket socket = new Socket(host, port);
 -                 OutputStreamWriter writer = new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8);
--                 BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
-+                    OutputStreamWriter writer = new OutputStreamWriter(socket.getOutputStream(),
-+                            StandardCharsets.UTF_8);
-+                    BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
++                 OutputStreamWriter writer = new OutputStreamWriter(socket.getOutputStream(),
++                     StandardCharsets.UTF_8);
+                  BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
                  writer.write("GET " + path + " HTTP/1.1\r\n");
                  writer.write("Host: " + host + "\r\n");
-                 writer.write("User-Agent: Mozilla/5.0\r\n");
 @@ -446,7 +446,6 @@ public class CrankerConnectorStopTest {
                  writer.write("\r\n");
                  writer.flush();
@@ -1371,7 +1062,7 @@ index 252f14c..46df0ac 100644
          // microservice and client both aware
 -        AssertUtils.assertEventually(() -> responseInfo[0] != null && !responseInfo[0].completedSuccessfully(), is(true), 10, 100);
 +        AssertUtils.assertEventually(() -> responseInfo[0] != null && !responseInfo[0].completedSuccessfully(),
-+                is(true), 10, 100);
++            is(true), 10, 100);
          AssertUtils.assertEventually(isClientCompleted::get, is(true));
  
      }
@@ -1392,7 +1083,7 @@ index 2f7e33e..c0575b3 100644
          assertEquals(210, resp.statusCode());
          assertEquals(body, resp.body());
 diff --git a/src/test/java/com/hsbc/cranker/connector/DualRouterTest.java b/src/test/java/com/hsbc/cranker/connector/DualRouterTest.java
-index b7b261a..bdc61c7 100644
+index b7b261a..0347267 100644
 --- a/src/test/java/com/hsbc/cranker/connector/DualRouterTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/DualRouterTest.java
 @@ -17,9 +17,9 @@ import java.util.List;
@@ -1407,13 +1098,61 @@ index b7b261a..bdc61c7 100644
  import static java.util.stream.Collectors.toList;
  import static org.hamcrest.CoreMatchers.is;
  import static org.hamcrest.MatcherAssert.assertThat;
+@@ -55,10 +55,10 @@ public class DualRouterTest extends BaseEndToEndTest {
+     private CrankerConnector connector4;
+ 
+     private static CrankerConnector startConnector(String targetServiceName,
+-                                                                        MuServer target,
+-                                                                        List<String> preferredProtocols,
+-                                                                        int slidingWindowSize,
+-                                                                        MuServer... registrationRouters) {
++                                                   MuServer target,
++                                                   List<String> preferredProtocols,
++                                                   int slidingWindowSize,
++                                                   MuServer... registrationRouters) {
+         CrankerConnector connector = CrankerConnectorBuilder.connector()
+             .withPreferredProtocols(preferredProtocols)
+             .withHttpClient(CrankerConnectorBuilder.createHttpClient(true).build())
+@@ -101,16 +101,16 @@ public class DualRouterTest extends BaseEndToEndTest {
+             .addHandler(router2.createRegistrationHandler())
+             .addHandler(router2.createHttpHandler()).start();
+ 
+-        connector1 = startConnector("a", targetA1,preferredProtocols, 2, routerServer1, routerServer2);
++        connector1 = startConnector("a", targetA1, preferredProtocols, 2, routerServer1, routerServer2);
+         waitForRegistration("a", connector1.connectorId(), 2, router1, router2);
+ 
+-        connector2 = startConnector("b", targetB, preferredProtocols,2, routerServer1, routerServer2);
++        connector2 = startConnector("b", targetB, preferredProtocols, 2, routerServer1, routerServer2);
+         waitForRegistration("b", connector2.connectorId(), 2, router1, router2);
+ 
+-        connector3 = startConnector("a", targetA2, preferredProtocols,2, routerServer1, routerServer2);
++        connector3 = startConnector("a", targetA2, preferredProtocols, 2, routerServer1, routerServer2);
+         waitForRegistration("a", connector3.connectorId(), 2, router1, router2);
+ 
+-        connector4 = startConnector("*", targetCatchAll, preferredProtocols,2, routerServer1, routerServer2);
++        connector4 = startConnector("*", targetCatchAll, preferredProtocols, 2, routerServer1, routerServer2);
+         waitForRegistration("*", connector4.connectorId(), 2, router1, router2);
+ 
+     }
 @@ -167,3 +167,4 @@ public class DualRouterTest extends BaseEndToEndTest {
      }
  
  }
 +
+diff --git a/src/test/java/com/hsbc/cranker/connector/HttpUtilsTest.java b/src/test/java/com/hsbc/cranker/connector/HttpUtilsTest.java
+index 5016618..2d80c15 100644
+--- a/src/test/java/com/hsbc/cranker/connector/HttpUtilsTest.java
++++ b/src/test/java/com/hsbc/cranker/connector/HttpUtilsTest.java
+@@ -5,7 +5,6 @@ import io.muserver.MuServer;
+ import io.muserver.MuServerBuilder;
+ import org.junit.jupiter.api.Test;
+ 
+-import javax.net.ssl.SSLHandshakeException;
+ import java.io.IOException;
+ import java.net.http.HttpClient;
+ import java.net.http.HttpRequest;
 diff --git a/src/test/java/com/hsbc/cranker/connector/RouterSupplierTest.java b/src/test/java/com/hsbc/cranker/connector/RouterSupplierTest.java
-index f24dfc2..b68d8d2 100644
+index f24dfc2..b96bcb0 100644
 --- a/src/test/java/com/hsbc/cranker/connector/RouterSupplierTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/RouterSupplierTest.java
 @@ -4,25 +4,38 @@ import com.hsbc.cranker.mucranker.CrankerRouter;
@@ -1472,13 +1211,22 @@ index f24dfc2..b68d8d2 100644
      public void routersCanBeDynamicallyAddedAndRemoved(RepetitionInfo repetitionInfo) throws Exception {
  
          final AtomicReference<RouterEventListener.ChangeData> changeData = new AtomicReference<>();
+@@ -143,7 +161,7 @@ public class RouterSupplierTest extends BaseEndToEndTest {
+             .withRouterUpdateInterval(500, TimeUnit.MILLISECONDS)
+             .start();
+ 
+-        waitForRegistration(route, connector.connectorId(),1, router1);
++        waitForRegistration(route, connector.connectorId(), 1, router1);
+         waitForRegistration(route, connector.connectorId(), 1, router2);
+ 
+         assertThat(changeData.get().added(), hasSize(2));
 @@ -273,3 +291,4 @@ public class RouterSupplierTest extends BaseEndToEndTest {
          return URI.create(scheme + "://" + routerServer.uri().getAuthority());
      }
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/connector/ServerSentEventTest.java b/src/test/java/com/hsbc/cranker/connector/ServerSentEventTest.java
-index 822e2de..6ef261e 100644
+index 822e2de..fa847f3 100644
 --- a/src/test/java/com/hsbc/cranker/connector/ServerSentEventTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/ServerSentEventTest.java
 @@ -14,12 +14,14 @@ import java.util.Arrays;
@@ -1500,15 +1248,19 @@ index 822e2de..6ef261e 100644
  
  public class ServerSentEventTest extends BaseEndToEndTest {
  
-@@ -34,6 +36,7 @@ public class ServerSentEventTest extends BaseEndToEndTest {
+@@ -34,9 +36,10 @@ public class ServerSentEventTest extends BaseEndToEndTest {
          if (targetServer != null) swallowException(targetServer::stop);
          if (router != null) swallowException(router::stop);
          if (connector != null) swallowException(() -> connector.stop(10, TimeUnit.SECONDS));
 +        if (crankerRouter != null) swallowException(crankerRouter::stop);
      }
  
-    @RepeatedTest(3)
-@@ -51,27 +54,35 @@ public class ServerSentEventTest extends BaseEndToEndTest {
+-   @RepeatedTest(3)
++    @RepeatedTest(3)
+     public void MuServer_NormalSseTest(RepetitionInfo repetitionInfo) throws Exception {
+ 
+         this.targetServer = httpServer()
+@@ -51,30 +54,38 @@ public class ServerSentEventTest extends BaseEndToEndTest {
  
          this.crankerRouter = crankerRouter()
              .withSupportedCrankerProtocols(List.of("cranker_3.0", "cranker_1.0"))
@@ -1534,36 +1286,49 @@ index 822e2de..6ef261e 100644
 -            "onEvent: id=null, type=null, data=Number 2",
 -            "onClosed:"
 -        )));
-+       try {
-+           this.router = httpsServer()
-+               .addHandler(crankerRouter.createRegistrationHandler())
-+               .addHandler(crankerRouter.createHttpHandler())
-+               .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
-+               .start();
++        try {
++            this.router = httpsServer()
++                .addHandler(crankerRouter.createRegistrationHandler())
++                .addHandler(crankerRouter.createHttpHandler())
++                .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
++                .start();
 +
-+           this.connector = startConnectorAndWaitForRegistration(crankerRouter, "*", targetServer,
-+               preferredProtocols(repetitionInfo), 2, router);
++            this.connector = startConnectorAndWaitForRegistration(crankerRouter, "*", targetServer,
++                preferredProtocols(repetitionInfo), 2, router);
 +
-+           this.client = SseTestClient.startSse(router.uri().resolve("/sse/counter"));
-+           this.client.waitUntilClose(5, TimeUnit.SECONDS);
++            this.client = SseTestClient.startSse(router.uri().resolve("/sse/counter"));
++            this.client.waitUntilClose(5, TimeUnit.SECONDS);
 +
-+           assertThat(this.client.getMessages(), equalTo(Arrays.asList(
-+               "onOpen:",
-+               "onEvent: id=null, type=null, data=Number 0",
-+               "onEvent: id=null, type=null, data=Number 1",
-+               "onEvent: id=null, type=null, data=Number 2",
-+               "onClosed:"
-+           )));
-+       } finally {
-+           boolean isRustMode = scaffolding.RustTestHelper.isRustMode();
-+           if (isRustMode && crankerRouter != null) {
-+               swallowException(crankerRouter::stop);
-+               this.crankerRouter = null;
-+           }
-+       }
++            assertThat(this.client.getMessages(), equalTo(Arrays.asList(
++                "onOpen:",
++                "onEvent: id=null, type=null, data=Number 0",
++                "onEvent: id=null, type=null, data=Number 1",
++                "onEvent: id=null, type=null, data=Number 2",
++                "onClosed:"
++            )));
++        } finally {
++            boolean isRustMode = scaffolding.RustTestHelper.isRustMode();
++            if (isRustMode && crankerRouter != null) {
++                swallowException(crankerRouter::stop);
++                this.crankerRouter = null;
++            }
++        }
      }
  
-    @Test
+-   @Test
++    @Test
+     public void MuServer_TargetServerDownInMiddleTest_ClientTalkToTargetServer() throws Exception {
+ 
+         this.targetServer = httpServer()
+@@ -99,7 +110,7 @@ public class ServerSentEventTest extends BaseEndToEndTest {
+         )));
+     }
+ 
+-   @RepeatedTest(3)
++    @RepeatedTest(3)
+     public void MuServer_TargetServerDownInMiddleTest_ClientTalkToRouter(RepetitionInfo repetitionInfo) throws Exception {
+ 
+         this.targetServer = httpServer()
 @@ -114,27 +125,36 @@ public class ServerSentEventTest extends BaseEndToEndTest {
  
          this.crankerRouter = crankerRouter()
@@ -1590,47 +1355,46 @@ index 822e2de..6ef261e 100644
 -            equalTo("onEvent: id=null, type=null, data=Number 2"),
 -            startsWith("onFailure: message=")
 -        ));
-+       try {
-+           this.router = httpsServer()
-+               .addHandler(crankerRouter.createRegistrationHandler())
-+               .addHandler(crankerRouter.createHttpHandler())
-+               .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
-+               .start();
++        try {
++            this.router = httpsServer()
++                .addHandler(crankerRouter.createRegistrationHandler())
++                .addHandler(crankerRouter.createHttpHandler())
++                .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
++                .start();
 +
-+           this.connector = startConnectorAndWaitForRegistration(crankerRouter, "*", targetServer,
-+               preferredProtocols(repetitionInfo), 2, router);
++            this.connector = startConnectorAndWaitForRegistration(crankerRouter, "*", targetServer,
++                preferredProtocols(repetitionInfo), 2, router);
 +
-+           this.client = SseTestClient.startSse(router.uri().resolve("/sse/counter"));
-+           this.client.waitUntilError(100, TimeUnit.SECONDS);
++            this.client = SseTestClient.startSse(router.uri().resolve("/sse/counter"));
++            this.client.waitUntilError(100, TimeUnit.SECONDS);
 +
-+           assertThat(this.client.getMessages(), contains(
-+               equalTo("onOpen:"),
-+               equalTo("onEvent: id=null, type=null, data=Number 0"),
-+               equalTo("onEvent: id=null, type=null, data=Number 1"),
-+               equalTo("onEvent: id=null, type=null, data=Number 2"),
-+               startsWith("onFailure: message=")
-+           ));
-+       } finally {
-+           boolean isRustMode = scaffolding.RustTestHelper.isRustMode();
-+           if (isRustMode && crankerRouter != null) {
-+               swallowException(crankerRouter::stop);
-+               this.crankerRouter = null;
-+           }
-+       }
++            assertThat(this.client.getMessages(), contains(
++                equalTo("onOpen:"),
++                equalTo("onEvent: id=null, type=null, data=Number 0"),
++                equalTo("onEvent: id=null, type=null, data=Number 1"),
++                equalTo("onEvent: id=null, type=null, data=Number 2"),
++                startsWith("onFailure: message=")
++            ));
++        } finally {
++            boolean isRustMode = scaffolding.RustTestHelper.isRustMode();
++            if (isRustMode && crankerRouter != null) {
++                swallowException(crankerRouter::stop);
++                this.crankerRouter = null;
++            }
++        }
      }
  
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java
 new file mode 100644
-index 0000000..ab80157
+index 0000000..69fdc96
 --- /dev/null
 +++ b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java
-@@ -0,0 +1,437 @@
+@@ -0,0 +1,446 @@
 +package com.hsbc.cranker.mucranker;
 +
 +import io.muserver.MuHandler;
-+import scaffolding.RustTestHelper;
 +import org.json.JSONArray;
 +import org.json.JSONObject;
 +
@@ -1675,20 +1439,20 @@ index 0000000..ab80157
 +    private final java.util.function.Function<io.muserver.MuRequest, String> clientIpProvider;
 +
 +    public RustCrankerRouter(
-+            IPValidator ipValidator,
-+            boolean discardClientForwardedHeaders,
-+            boolean sendLegacyForwardedHeaders,
-+            String viaValue,
-+            Set<String> doNotProxyHeaders,
-+            long maxWaitInMillis,
-+            long pingAfterWriteMillis,
-+            long idleReadTimeoutMills,
-+            long routesKeepTimeMillis,
-+            List<ProxyListener> completionListeners,
-+            RouteResolver routeResolver,
-+            List<String> supportedCrankerProtocol,
-+            java.util.function.Function<io.muserver.MuRequest, String> clientIpProvider,
-+            boolean http2
++        IPValidator ipValidator,
++        boolean discardClientForwardedHeaders,
++        boolean sendLegacyForwardedHeaders,
++        String viaValue,
++        Set<String> doNotProxyHeaders,
++        long maxWaitInMillis,
++        long pingAfterWriteMillis,
++        long idleReadTimeoutMills,
++        long routesKeepTimeMillis,
++        List<ProxyListener> completionListeners,
++        RouteResolver routeResolver,
++        List<String> supportedCrankerProtocol,
++        java.util.function.Function<io.muserver.MuRequest, String> clientIpProvider,
++        boolean http2
 +    ) {
 +        this.regPort = findFreePort();
 +        this.visitPort = this.regPort;
@@ -1711,21 +1475,27 @@ index 0000000..ab80157
 +        try {
 +            javax.net.ssl.TrustManager[] trustAllCerts = new javax.net.ssl.TrustManager[]{
 +                new javax.net.ssl.X509TrustManager() {
-+                    public java.security.cert.X509Certificate[] getAcceptedIssuers() { return null; }
-+                    public void checkClientTrusted(java.security.cert.X509Certificate[] certs, String authType) {}
-+                    public void checkServerTrusted(java.security.cert.X509Certificate[] certs, String authType) {}
++                    public java.security.cert.X509Certificate[] getAcceptedIssuers() {
++                        return null;
++                    }
++
++                    public void checkClientTrusted(java.security.cert.X509Certificate[] certs, String authType) {
++                    }
++
++                    public void checkServerTrusted(java.security.cert.X509Certificate[] certs, String authType) {
++                    }
 +                }
 +            };
 +            javax.net.ssl.SSLContext sc = javax.net.ssl.SSLContext.getInstance("SSL");
 +            sc.init(null, trustAllCerts, new java.security.SecureRandom());
 +            client = HttpClient.newBuilder()
-+                    .sslContext(sc)
-+                    .connectTimeout(java.time.Duration.ofMillis(2000))
-+                    .build();
++                .sslContext(sc)
++                .connectTimeout(java.time.Duration.ofMillis(2000))
++                .build();
 +        } catch (Exception e) {
 +            client = HttpClient.newBuilder()
-+                    .connectTimeout(java.time.Duration.ofMillis(2000))
-+                    .build();
++                .connectTimeout(java.time.Duration.ofMillis(2000))
++                .build();
 +        }
 +        this.httpClient = client;
 +    }
@@ -1813,8 +1583,8 @@ index 0000000..ab80157
 +            while (System.currentTimeMillis() - start < 10000) {
 +                try {
 +                    HttpResponse<String> response = httpClient.send(
-+                            HttpRequest.newBuilder().uri(URI.create("http://127.0.0.1:" + regPort + "/health")).GET().build(),
-+                            HttpResponse.BodyHandlers.ofString()
++                        HttpRequest.newBuilder().uri(URI.create("http://127.0.0.1:" + regPort + "/health")).GET().build(),
++                        HttpResponse.BodyHandlers.ofString()
 +                    );
 +                    if (response.statusCode() == 200) {
 +                        started = true;
@@ -1855,8 +1625,8 @@ index 0000000..ab80157
 +    public int idleConnectionCount() {
 +        try {
 +            HttpResponse<String> response = httpClient.send(
-+                    HttpRequest.newBuilder().uri(URI.create("http://127.0.0.1:" + regPort + "/health/connectors")).GET().build(),
-+                    HttpResponse.BodyHandlers.ofString()
++                HttpRequest.newBuilder().uri(URI.create("http://127.0.0.1:" + regPort + "/health/connectors")).GET().build(),
++                HttpResponse.BodyHandlers.ofString()
 +            );
 +            if (response.statusCode() == 200) {
 +                JSONObject obj = new JSONObject(response.body());
@@ -1887,9 +1657,11 @@ index 0000000..ab80157
 +
 +    public static class RustRegistrationHandler implements MuHandler {
 +        public final RustCrankerRouter router;
++
 +        public RustRegistrationHandler(RustCrankerRouter router) {
 +            this.router = router;
 +        }
++
 +        @Override
 +        public boolean handle(io.muserver.MuRequest request, io.muserver.MuResponse response) {
 +            return false;
@@ -1898,9 +1670,11 @@ index 0000000..ab80157
 +
 +    public static class RustHttpHandler implements MuHandler {
 +        public final RustCrankerRouter router;
++
 +        public RustHttpHandler(RustCrankerRouter router) {
 +            this.router = router;
 +        }
++
 +        @Override
 +        public boolean handle(io.muserver.MuRequest request, io.muserver.MuResponse response) {
 +            return false;
@@ -1911,8 +1685,8 @@ index 0000000..ab80157
 +    public RouterInfo collectInfo() {
 +        try {
 +            HttpResponse<String> response = httpClient.send(
-+                    HttpRequest.newBuilder().uri(URI.create("http://127.0.0.1:" + regPort + "/health/connectors")).GET().build(),
-+                    HttpResponse.BodyHandlers.ofString()
++                HttpRequest.newBuilder().uri(URI.create("http://127.0.0.1:" + regPort + "/health/connectors")).GET().build(),
++                HttpResponse.BodyHandlers.ofString()
 +            );
 +            if (response.statusCode() == 200) {
 +                JSONObject obj = new JSONObject(response.body());
@@ -1955,7 +1729,7 @@ index 0000000..ab80157
 +
 +    @Override
 +    public void stop() {
-+        if(process != null) {
++        if (process != null) {
 +            // 1. Handle all downstream descendant processes
 +            process.descendants().forEach(handle -> {
 +                if (handle.isAlive()) {
@@ -1985,21 +1759,21 @@ index 0000000..ab80157
 +        return new DarkModeManager() {
 +            private String toJson(DarkHost host) {
 +                return new JSONObject()
-+                        .put("address", host.address().getHostAddress())
-+                        .put("dateEnabled", host.dateEnabled().toEpochMilli())
-+                        .put("reason", host.reason() == null ? "" : host.reason())
-+                        .toString();
++                    .put("address", host.address().getHostAddress())
++                    .put("dateEnabled", host.dateEnabled().toEpochMilli())
++                    .put("reason", host.reason() == null ? "" : host.reason())
++                    .toString();
 +            }
 +
 +            private void sendPost(String path, String json) {
 +                try {
 +                    httpClient.send(
-+                            HttpRequest.newBuilder()
-+                                    .uri(URI.create("http://127.0.0.1:" + regPort + path))
-+                                    .header("Content-Type", "application/json")
-+                                    .POST(HttpRequest.BodyPublishers.ofString(json))
-+                                    .build(),
-+                            HttpResponse.BodyHandlers.discarding()
++                        HttpRequest.newBuilder()
++                            .uri(URI.create("http://127.0.0.1:" + regPort + path))
++                            .header("Content-Type", "application/json")
++                            .POST(HttpRequest.BodyPublishers.ofString(json))
++                            .build(),
++                        HttpResponse.BodyHandlers.discarding()
 +                    );
 +                } catch (Exception e) {
 +                    throw new RuntimeException(e);
@@ -2020,8 +1794,8 @@ index 0000000..ab80157
 +            public Set<DarkHost> darkHosts() {
 +                try {
 +                    HttpResponse<String> response = httpClient.send(
-+                            HttpRequest.newBuilder().uri(URI.create("http://127.0.0.1:" + regPort + "/dark-mode/hosts")).GET().build(),
-+                            HttpResponse.BodyHandlers.ofString()
++                        HttpRequest.newBuilder().uri(URI.create("http://127.0.0.1:" + regPort + "/dark-mode/hosts")).GET().build(),
++                        HttpResponse.BodyHandlers.ofString()
 +                    );
 +                    if (response.statusCode() == 200) {
 +                        JSONArray arr = new JSONArray(response.body());

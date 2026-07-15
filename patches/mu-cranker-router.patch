@@ -536,7 +536,7 @@ index 9423c9b..72fa39d 100644
  import static org.hamcrest.Matchers.is;
  import static scaffolding.ClientUtils.call;
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java b/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java
-index c60c904..89440b3 100644
+index c60c904..b6e5cc7 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java
 @@ -7,17 +7,21 @@ import okhttp3.*;
@@ -584,15 +584,7 @@ index c60c904..89440b3 100644
  
          this.router = httpsServer()
              .withHttp2Config(Http2ConfigBuilder.http2Config().enabled(false))
-@@ -126,6 +132,7 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
-         client.newCall(request(router.uri().resolve("/make")).build()).execute().close();
-         List<Cookie> cookies = client.cookieJar().loadForRequest(HttpUrl.get(router.uri()));
-         assertThat(cookies.size(), is(2));
-+        System.err.println("cookies: " + cookies); // FIXME: Not the same order, in rust router 2 first then 1
-         assertThat(cookies.get(0).value(), is("1"));
-         assertThat(cookies.get(1).value(), is("2"));
- 
-@@ -203,7 +210,9 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+@@ -203,7 +209,9 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
              assert resp.body() != null;
              final String[] split = resp.body().string().split("\n");
              // forward:by=10.0.0.10;for=127.0.0.1;host=example.org;proto=https
@@ -602,7 +594,7 @@ index c60c904..89440b3 100644
              // x-forwarded-host:example.org
              assertThat(split[1], is("x-forwarded-host:example.org"));
              // host:localhost:56492
-@@ -227,7 +236,7 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+@@ -227,7 +235,7 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
              })
              .start();
  
@@ -611,7 +603,7 @@ index c60c904..89440b3 100644
              .withSupportedCrankerProtocols(List.of("cranker_1.0", "cranker_3.0"))
              .withDiscardClientForwardedHeaders(false)
              .proxyHostHeader(false)
-@@ -245,7 +254,9 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+@@ -245,7 +253,9 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
              // host:localhost:56492
              assertThat(split[2], containsString("host:localhost:"));
              // forward:[for=www.fxclientui.gfx.us.gbm.hsbc.com,by=10.0.0.10;for=127.0.0.1;host=example.org;proto=https]
@@ -621,7 +613,7 @@ index c60c904..89440b3 100644
              assertThat(split[0], containsString(",")); // size is 2
          }
      }
-@@ -293,7 +304,9 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+@@ -293,7 +303,9 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
          startRouterAndConnector(crankerRouter().withSupportedCrankerProtocols(List.of("cranker_1.0", "cranker_3.0")).withSendLegacyForwardedHeaders(true), preferredProtocols(repetitionInfo));
          try (Response resp = call(request(router.uri()))) {
              assert resp.body() != null;
@@ -631,7 +623,7 @@ index c60c904..89440b3 100644
          }
      }
  
-@@ -315,3 +328,4 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+@@ -315,3 +327,4 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
      }
  
  }
@@ -1005,10 +997,10 @@ index 67617a7..9e2de5e 100644
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java
 new file mode 100644
-index 0000000..484b439
+index 0000000..a52282f
 --- /dev/null
 +++ b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java
-@@ -0,0 +1,429 @@
+@@ -0,0 +1,428 @@
 +package com.hsbc.cranker.mucranker;
 +
 +import io.muserver.MuHandler;
@@ -1142,7 +1134,6 @@ index 0000000..484b439
 +            if (exe == null || !exe.exists()) {
 +                throw new IllegalStateException("Rust unified_router_server binary not found. Please specify RUST_ROUTER_SERVER_EXE or run 'cargo build --example unified_router_server'");
 +            }
-+            System.err.println("STARTING RUST EXE FROM: " + exe);
 +            List<String> cmd = new ArrayList<>();
 +            cmd.add(exe.getCanonicalPath());
 +            cmd.add("--reg-port");
@@ -1546,6 +1537,19 @@ index b800035..b46d8c9 100644
  
  }
 +
+diff --git a/src/test/java/scaffolding/Action.java b/src/test/java/scaffolding/Action.java
+index dc1bc14..ab07082 100644
+--- a/src/test/java/scaffolding/Action.java
++++ b/src/test/java/scaffolding/Action.java
+@@ -10,7 +10,7 @@ public interface Action {
+         try {
+             action.run();
+         } catch (Exception e) {
+-            log.info("Ignoring exception: " + e.getMessage());
++            log.info("Ignoring exception: ", e);
+         }
+     }
+ 
 diff --git a/src/test/java/scaffolding/ClientUtils.java b/src/test/java/scaffolding/ClientUtils.java
 index 5cb7c68..88a3e8c 100644
 --- a/src/test/java/scaffolding/ClientUtils.java
