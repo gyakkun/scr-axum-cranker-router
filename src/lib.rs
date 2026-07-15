@@ -227,9 +227,6 @@ impl CrankerRouter {
             )
             // .with_state(self.state())
             .route("/health/connectors", get(Self::connector_info_handler))
-            // .route("/dark-mode/enable", post(Self::enable_dark_mode_handler))
-            // .route("/dark-mode/disable", post(Self::disable_dark_mode_handler))
-            // .route("/dark-mode/hosts", get(Self::get_dark_hosts_handler))
             // .with_state(self.state())
             // .route("/health/connections", get(???)) // how to get all conn of the server
             .route("/health", get(Self::health_root))

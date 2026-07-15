@@ -80,7 +80,6 @@ impl CrankerProtocolRequestBuilder {
                             cookie_list.push(s)
                         } else {
                             headers_str.push_str(format!("{}:{}\n", k.as_str(), s).as_str());
-                            // headers_str.push('\n');
                         }
                     }
                     Err(e) => {
