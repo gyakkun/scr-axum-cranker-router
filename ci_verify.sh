@@ -10,13 +10,13 @@ echo "Checking environment dependencies..."
 if ! command -v cargo &> /dev/null; then
     export PATH="$PATH:$HOME/.cargo/bin"
 fi
-for cmd in git java mvn cargo openssl; do
+for cmd in git java mvn cargo openssl dos2unix; do
     if ! command -v "$cmd" &> /dev/null; then
         echo "Error: Required command '$cmd' is not installed or not in PATH." >&2
         exit 1
     fi
 done
-echo "Environment dependencies verified: git, java, mvn, cargo, openssl are available."
+echo "Environment dependencies verified: git, java, mvn, cargo, openssl, dos2unix are available."
 
 # 2. Paths and Directories Setup
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -105,7 +105,7 @@ if [ -z "$CONNECTOR_JAR" ]; then
 fi
 cp "$CONNECTOR_JAR" "$CI_TMP_DIR/connector-uber.jar"
 
-# 8. Run Java mu-cranker-router tests in all 3 modes
+# 8. Run Java mu-cranker-router tests in Rust mode
 echo "=== Running Java mu-cranker-router tests (Java Mode) ==="
 if [[ "$RUN_JAVA_TEST" == "true" ]]; then
   mvn -f "$CI_TMP_DIR/mu-cranker-router/pom.xml" clean test -Dmaven.javadoc.skip=true -Dsource.skip=true
@@ -116,23 +116,13 @@ cleanup_rust_processes
 
 # export RUST_ROUTER_SERVER_EXE="$CI_TMP_DIR/unified_router_server${EXE_EXT}"
 
-echo "=== Running Java mu-cranker-router tests (Rust Mode, TLS off) ==="
-if [[ "$RUN_TLS_OFF_TEST" == "true" ]]; then
-  RUST_ROUTER_SERVER_EXE="$CI_TMP_DIR/unified_router_server${EXE_EXT}" \
-    mvn -f "$CI_TMP_DIR/mu-cranker-router/pom.xml" clean test -Dcranker.router.rust=true \
-        -Dmaven.javadoc.skip=true -Dsource.skip=true
-else
-  echo "Skipped Rust router test run since no RUN_TLS_OFF_TEST env var set"
-fi
-cleanup_rust_processes
-
-echo "=== Running Java mu-cranker-router tests (Rust Mode, TLS on) ==="
+echo "=== Running Java mu-cranker-router tests (Rust Mode) ==="
 RUST_ROUTER_SERVER_EXE="$CI_TMP_DIR/unified_router_server${EXE_EXT}" \
   mvn -f "$CI_TMP_DIR/mu-cranker-router/pom.xml" clean test -Dcranker.router.rust=true \
-      -Dcranker.router.tls=true -Dmaven.javadoc.skip=true -Dsource.skip=true
+      -Dmaven.javadoc.skip=true -Dsource.skip=true
 cleanup_rust_processes
 
-# 8.5. Run Java cranker-connector tests in all 3 modes
+# 8.5. Run Java cranker-connector tests in Rust mode
 echo "=== Running Java cranker-connector tests (Java Mode) ==="
 if [[ "$RUN_JAVA_TEST" == "true" ]]; then
   mvn -f "$CI_TMP_DIR/cranker-connector/pom.xml" clean test -Dmaven.javadoc.skip=true -Dsource.skip=true
@@ -141,20 +131,10 @@ else
 fi
 cleanup_rust_processes
 
-echo "=== Running Java cranker-connector tests (Rust Mode, TLS off) ==="
-if [[ "$RUN_TLS_OFF_TEST" == "true" ]]; then
-  RUST_ROUTER_SERVER_EXE="$CI_TMP_DIR/unified_router_server${EXE_EXT}" \
-    mvn -f "$CI_TMP_DIR/cranker-connector/pom.xml" clean test -Dcranker.router.rust=true \
-        -Dmaven.javadoc.skip=true -Dsource.skip=true
-else
-  echo "Skipped Rust connector test run since no RUN_TLS_OFF_TEST env var set"
-fi
-cleanup_rust_processes
-
-echo "=== Running Java cranker-connector tests (Rust Mode, TLS on) ==="
+echo "=== Running Java cranker-connector tests (Rust Mode) ==="
 RUST_ROUTER_SERVER_EXE="$CI_TMP_DIR/unified_router_server${EXE_EXT}" \
   mvn -f "$CI_TMP_DIR/cranker-connector/pom.xml" clean test -Dcranker.router.rust=true \
-      -Dcranker.router.tls=true -Dmaven.javadoc.skip=true -Dsource.skip=true
+      -Dmaven.javadoc.skip=true -Dsource.skip=true
 cleanup_rust_processes
 
 # 9. Run Rust unit & integration tests

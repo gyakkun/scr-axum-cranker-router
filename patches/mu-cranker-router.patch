@@ -21,7 +21,7 @@ index 0343e27..ca372d9 100644
                      <source>11</source>
                  </configuration>
 diff --git a/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java b/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
-index c1fc183..f632cf0 100644
+index c1fc183..8a25d2d 100644
 --- a/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
 +++ b/src/test/java/com/hsbc/cranker/connector/TimeoutTest.java
 @@ -10,13 +10,17 @@ import com.hsbc.cranker.mucranker.BaseEndToEndTest;
@@ -99,7 +99,7 @@ index c1fc183..f632cf0 100644
              .start();
  
          target = httpServer()
-@@ -108,16 +118,31 @@ public class TimeoutTest {
+@@ -108,16 +118,27 @@ public class TimeoutTest {
                  })
              .start();
          connector = startConnector("my-app",  preferredProtocols(repetitionInfo));
@@ -115,11 +115,7 @@ index c1fc183..f632cf0 100644
              fail("should throw exception already.");
          } catch (IOException expected) {
 -            assertThat(expected instanceof EOFException, is(true));
-+            if (!doHttp2 || (RustTestHelper.isRustMode() && !RustTestHelper.isTlsMode())) {
-+                // FIXME: If we do HTTP/2 but in non tls mode (http scheme url)
-+                //  since axum/hyper doesn't support cleartext HTTP/2 (h2c)
-+                //  it will fallback to HTTP/1.1 so it will be a normal
-+                //  EOFException for HTTP/1.1
++            if (!doHttp2) {
 +                assertInstanceOf(EOFException.class, expected);
 +            } else {
 +                assertInstanceOf(StreamResetException.class, expected);
@@ -133,7 +129,7 @@ index c1fc183..f632cf0 100644
  
      @RepeatedTest(3)
      public void ifTheConnectorDisconnectsWithoutGracefulShutdownItIsEventuallyDetected(RepetitionInfo repetitionInfo) throws Exception {
-@@ -184,6 +209,7 @@ public class TimeoutTest {
+@@ -184,6 +205,7 @@ public class TimeoutTest {
      }
  
      @RepeatedTest(3)
@@ -141,7 +137,7 @@ index c1fc183..f632cf0 100644
      public void ifClientDisconnectedBeforeResponseStartThenProxyListenersShouldInvoke(RepetitionInfo repetitionInfo) throws InterruptedException {
          AtomicReference<ProxyInfo> ref = new AtomicReference<>();
          CountDownLatch countDownLatch = new CountDownLatch(1);
-@@ -229,3 +255,4 @@ public class TimeoutTest {
+@@ -229,3 +251,4 @@ public class TimeoutTest {
      }
  
  }
@@ -268,7 +264,7 @@ index 031e273..b6b924a 100644
  }
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java
-index 6a6d5b5..3ed83ca 100644
+index 6a6d5b5..11df252 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/CrankerRouterHandlerTest.java
 @@ -2,6 +2,7 @@ package com.hsbc.cranker.mucranker;
@@ -317,7 +313,7 @@ index 6a6d5b5..3ed83ca 100644
              assertThat(resp.header("Content-Length"), is(nullValue()));
 -            assertThat(resp.header("Transfer-Encoding"), is("chunked"));
 +            //noinspection StatementWithEmptyBody
-+            if (RustTestHelper.isRustMode() && RustTestHelper.isTlsMode()) {
++            if (RustTestHelper.isRustMode()) {
 +
 +            } else {
 +                assertThat(resp.header("Transfer-Encoding"), is("chunked"));
@@ -469,7 +465,7 @@ index 9423c9b..72fa39d 100644
  import static org.hamcrest.Matchers.is;
  import static scaffolding.ClientUtils.call;
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java b/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java
-index c60c904..eaaed5e 100644
+index c60c904..89440b3 100644
 --- a/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java
 +++ b/src/test/java/com/hsbc/cranker/mucranker/HeaderProxyingTest.java
 @@ -7,17 +7,21 @@ import okhttp3.*;
@@ -525,18 +521,17 @@ index c60c904..eaaed5e 100644
          assertThat(cookies.get(0).value(), is("1"));
          assertThat(cookies.get(1).value(), is("2"));
  
-@@ -203,7 +210,10 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+@@ -203,7 +210,9 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
              assert resp.body() != null;
              final String[] split = resp.body().string().split("\n");
              // forward:by=10.0.0.10;for=127.0.0.1;host=example.org;proto=https
 +            /* @formatter:off */
-+            if (RustTestHelper.isRustMode() && !RustTestHelper.isTlsMode()) {} else
              assertThat(split[0], containsString("host=example.org;proto=https"));
 +            /* @formatter:on */
              // x-forwarded-host:example.org
              assertThat(split[1], is("x-forwarded-host:example.org"));
              // host:localhost:56492
-@@ -227,7 +237,7 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+@@ -227,7 +236,7 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
              })
              .start();
  
@@ -545,29 +540,27 @@ index c60c904..eaaed5e 100644
              .withSupportedCrankerProtocols(List.of("cranker_1.0", "cranker_3.0"))
              .withDiscardClientForwardedHeaders(false)
              .proxyHostHeader(false)
-@@ -245,7 +255,10 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+@@ -245,7 +254,9 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
              // host:localhost:56492
              assertThat(split[2], containsString("host:localhost:"));
              // forward:[for=www.fxclientui.gfx.us.gbm.hsbc.com,by=10.0.0.10;for=127.0.0.1;host=example.org;proto=https]
 +            /* @formatter:off */
-+            if (RustTestHelper.isRustMode() && !RustTestHelper.isTlsMode()) {} else
              assertThat(split[0], containsString("host=example.org;proto=https"));
 +            /* @formatter:on */
              assertThat(split[0], containsString(",")); // size is 2
          }
      }
-@@ -293,7 +306,10 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+@@ -293,7 +304,9 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
          startRouterAndConnector(crankerRouter().withSupportedCrankerProtocols(List.of("cranker_1.0", "cranker_3.0")).withSendLegacyForwardedHeaders(true), preferredProtocols(repetitionInfo));
          try (Response resp = call(request(router.uri()))) {
              assert resp.body() != null;
 +            /* @formatter:off */
-+            if (RustTestHelper.isRustMode() && !RustTestHelper.isTlsMode()) {} else
              assertThat(resp.body().string(), oneOf("https " + router.uri().getAuthority() + " 127.0.0.1 1", "https " + router.uri().getAuthority() + " 0:0:0:0:0:0:0:1 1"));
 +            /* @formatter:on */
          }
      }
  
-@@ -315,3 +331,4 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
+@@ -315,3 +328,4 @@ public class HeaderProxyingTest extends BaseEndToEndTest {
      }
  
  }
@@ -941,10 +934,10 @@ index 67617a7..9e2de5e 100644
 +
 diff --git a/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java
 new file mode 100644
-index 0000000..bc4d994
+index 0000000..484b439
 --- /dev/null
 +++ b/src/test/java/com/hsbc/cranker/mucranker/RustCrankerRouter.java
-@@ -0,0 +1,389 @@
+@@ -0,0 +1,429 @@
 +package com.hsbc.cranker.mucranker;
 +
 +import io.muserver.MuHandler;
@@ -966,13 +959,25 @@ index 0000000..bc4d994
 +
 +public class RustCrankerRouter implements CrankerRouter {
 +
-+    private static int lastAssignedPort = 0;
-+
-+    private final Process process;
-+    private final int regPort;
-+    private final int visitPort;
++    private Process process;
++    private int regPort;
++    private int visitPort;
 +    private final HttpClient httpClient;
 +    private final boolean http2;
++
++    private final IPValidator ipValidator;
++    private final boolean discardClientForwardedHeaders;
++    private final boolean sendLegacyForwardedHeaders;
++    private final String viaValue;
++    private final Set<String> doNotProxyHeaders;
++    private final long maxWaitInMillis;
++    private final long pingAfterWriteMillis;
++    private final long idleReadTimeoutMills;
++    private final long routesKeepTimeMillis;
++    private final List<ProxyListener> completionListeners;
++    private final RouteResolver routeResolver;
++    private final List<String> supportedCrankerProtocol;
++    private final java.util.function.Function<io.muserver.MuRequest, String> clientIpProvider;
 +
 +    public RustCrankerRouter(
 +            IPValidator ipValidator,
@@ -990,14 +995,22 @@ index 0000000..bc4d994
 +            java.util.function.Function<io.muserver.MuRequest, String> clientIpProvider,
 +            boolean http2
 +    ) {
-+        int portToUse = lastAssignedPort;
-+        if (portToUse == 0 || !isPortFree(portToUse)) {
-+            portToUse = findFreePort();
-+        }
-+        lastAssignedPort = portToUse;
-+        this.regPort = portToUse;
++        this.regPort = findFreePort();
 +        this.visitPort = this.regPort;
 +        this.http2 = http2;
++        this.ipValidator = ipValidator;
++        this.discardClientForwardedHeaders = discardClientForwardedHeaders;
++        this.sendLegacyForwardedHeaders = sendLegacyForwardedHeaders;
++        this.viaValue = viaValue;
++        this.doNotProxyHeaders = doNotProxyHeaders;
++        this.maxWaitInMillis = maxWaitInMillis;
++        this.pingAfterWriteMillis = pingAfterWriteMillis;
++        this.idleReadTimeoutMills = idleReadTimeoutMills;
++        this.routesKeepTimeMillis = routesKeepTimeMillis;
++        this.completionListeners = completionListeners;
++        this.routeResolver = routeResolver;
++        this.supportedCrankerProtocol = supportedCrankerProtocol;
++        this.clientIpProvider = clientIpProvider;
 +
 +        HttpClient client = null;
 +        try {
@@ -1020,7 +1033,19 @@ index 0000000..bc4d994
 +                    .build();
 +        }
 +        this.httpClient = client;
++    }
 +
++    public synchronized void setPorts(int port) {
++        if (this.process == null) {
++            this.regPort = port;
++            this.visitPort = port;
++        }
++    }
++
++    public synchronized void startOrGetProcess(boolean tlsMode, int maxHeaderSize) {
++        if (this.process != null) {
++            return;
++        }
 +        Process proc = null;
 +        try {
 +            String envExe = System.getenv("RUST_ROUTER_SERVER_EXE");
@@ -1068,15 +1093,22 @@ index 0000000..bc4d994
 +            cmd.add("--idle-read-timeout-ms");
 +            cmd.add(String.valueOf(idleReadTimeoutMills));
 +            cmd.add("--tls");
-+            cmd.add(String.valueOf(RustTestHelper.isTlsMode()));
++            cmd.add(String.valueOf(tlsMode));
++            cmd.add("--log-level");
++            cmd.add("debug");
 +            cmd.add("--http2");
 +            cmd.add(String.valueOf(this.http2));
 +            cmd.add("--proxy-host-header");
 +            cmd.add(String.valueOf(!doNotProxyHeaders.contains("host")));
++            if (maxHeaderSize > 0) {
++                cmd.add("--max-header-size");
++                cmd.add(String.valueOf(maxHeaderSize));
++            }
 +
 +            ProcessBuilder pb = new ProcessBuilder(cmd);
-+            pb.redirectOutput(ProcessBuilder.Redirect.to(new File("target/rust-router.log")));
-+            pb.redirectError(ProcessBuilder.Redirect.to(new File("target/rust-router-err.log")));
++            String routerId = UUID.randomUUID().toString();
++            pb.redirectOutput(ProcessBuilder.Redirect.to(new File("target/rust-router-" + routerId + ".log")));
++            pb.redirectError(ProcessBuilder.Redirect.to(new File("target/rust-router-err-" + routerId + ".log")));
 +            proc = pb.start();
 +
 +            // Wait for it to start up
@@ -1218,7 +1250,8 @@ index 0000000..bc4d994
 +                }
 +                return new RouterInfoImpl(services, Collections.emptySet(), Collections.emptyMap());
 +            }
-+        } catch (Exception ignored) {
++        } catch (Exception e) {
++            e.printStackTrace();
 +        }
 +        return new RouterInfoImpl(Collections.emptyList(), Collections.emptySet(), Collections.emptyMap());
 +    }
@@ -1467,19 +1500,15 @@ index 5cb7c68..88a3e8c 100644
 +
 diff --git a/src/test/java/scaffolding/RustTestHelper.java b/src/test/java/scaffolding/RustTestHelper.java
 new file mode 100644
-index 0000000..e53ff93
+index 0000000..5afc8c2
 --- /dev/null
 +++ b/src/test/java/scaffolding/RustTestHelper.java
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,7 @@
 +package scaffolding;
 +
 +public class RustTestHelper {
 +    public static boolean isRustMode() {
 +        return Boolean.getBoolean("cranker.router.rust") || "true".equalsIgnoreCase(System.getenv("CRANKER_ROUTER_RUST"));
-+    }
-+
-+    public static boolean isTlsMode() {
-+        return Boolean.getBoolean("cranker.router.tls") || "true".equalsIgnoreCase(System.getenv("CRANKER_TLS")) || "true".equalsIgnoreCase(System.getenv("CRANKER_ROUTER_TLS"));
 +    }
 +}
 diff --git a/src/test/java/scaffolding/StringUtils.java b/src/test/java/scaffolding/StringUtils.java
@@ -1657,10 +1686,10 @@ index 0000000..1e7dacb
 +}
 diff --git a/src/test/java/scaffolding/TestServerBuilder.java b/src/test/java/scaffolding/TestServerBuilder.java
 new file mode 100644
-index 0000000..413b48d
+index 0000000..2fb3f36
 --- /dev/null
 +++ b/src/test/java/scaffolding/TestServerBuilder.java
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,178 @@
 +package scaffolding;
 +
 +import io.muserver.MuHandler;
@@ -1686,6 +1715,8 @@ index 0000000..413b48d
 +    private final boolean isHttps;
 +    private RustCrankerRouter rustRouterForReg = null;
 +    private RustCrankerRouter rustRouterForVisit = null;
++    private int maxHeadersSize = -1;
++    private int requestedPort = 0;
 +
 +    private TestServerBuilder(MuServerBuilder builder, boolean isHttps) {
 +        this.builder = builder;
@@ -1697,15 +1728,7 @@ index 0000000..413b48d
 +    }
 +
 +    public static TestServerBuilder httpsServer() {
-+        if (RustTestHelper.isRustMode()) {
-+            if (RustTestHelper.isTlsMode()) {
-+                return new TestServerBuilder(MuServerBuilder.httpsServer(), true);
-+            } else {
-+                return new TestServerBuilder(MuServerBuilder.httpServer(), false);
-+            }
-+        } else {
-+            return new TestServerBuilder(MuServerBuilder.httpsServer(), true);
-+        }
++        return new TestServerBuilder(MuServerBuilder.httpsServer(), true);
 +    }
 +
 +    public static TestCrankerRouterBuilder crankerRouter() {
@@ -1733,13 +1756,15 @@ index 0000000..413b48d
 +    }
 +
 +    public TestServerBuilder withHttpPort(int port) {
++        this.requestedPort = port;
 +        builder.withHttpPort(port);
 +        return this;
 +    }
 +
 +    public TestServerBuilder withHttpsPort(int port) {
++        this.requestedPort = port;
 +        if (RustTestHelper.isRustMode()) {
-+            builder.withHttpPort(port);
++            builder.withHttpsPort(0);
 +        } else {
 +            builder.withHttpsPort(port);
 +        }
@@ -1762,6 +1787,7 @@ index 0000000..413b48d
 +    }
 +
 +    public TestServerBuilder withMaxHeadersSize(int maxHeadersSize) {
++        this.maxHeadersSize = maxHeadersSize;
 +        builder.withMaxHeadersSize(maxHeadersSize);
 +        return this;
 +    }
@@ -1769,9 +1795,32 @@ index 0000000..413b48d
 +    public MuServer start() {
 +        boolean isRustMode = scaffolding.RustTestHelper.isRustMode();
 +        if (isRustMode && (rustRouterForReg != null || rustRouterForVisit != null)) {
++            int targetPort = -1;
++            if (requestedPort > 0) {
++                if (isHttps) {
++                    targetPort = requestedPort > 50000 ? requestedPort - 10000 : requestedPort + 10000;
++                } else {
++                    targetPort = requestedPort;
++                }
++            }
++            if (rustRouterForReg != null) {
++                if (targetPort > 0) {
++                    rustRouterForReg.setPorts(targetPort);
++                }
++                rustRouterForReg.startOrGetProcess(isHttps, maxHeadersSize);
++            }
++            if (rustRouterForVisit != null) {
++                if (targetPort > 0) {
++                    rustRouterForVisit.setPorts(targetPort);
++                }
++                rustRouterForVisit.startOrGetProcess(isHttps, maxHeadersSize);
++            }
 +            // In Rust mode we direct traffic directly to the Rust ports
 +            // without starting any JVM-side TCP proxy
 +            builder.withHttpPort(0);
++            if (isHttps) {
++                builder.withHttpsPort(0);
++            }
 +        }
 +        MuServer realServer = builder.start();
 +        if (isRustMode && (rustRouterForReg != null || rustRouterForVisit != null)) {
