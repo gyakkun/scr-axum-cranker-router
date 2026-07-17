@@ -40,7 +40,7 @@ jobs:
           ./ci_verify.sh
 
       - name: Install cargo-edit
-        run: cargo install cargo-edit
+        run: cargo install --debug cargo-edit
 
       - name: Bump Patch Version
         run: cargo set-version --bump patch
