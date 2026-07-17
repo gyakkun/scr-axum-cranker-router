@@ -75,10 +75,12 @@ crate-type = ["bin"]
 
 [[example]]
 name = "tls_single_domain_server"
+required-features = ["axum-server-tls"]
 crate-type = ["bin"]
 
 [[example]]
 name = "unified_router_server"
+required-features = ["axum-server-tls"]
 crate-type = ["bin"]
 
 [[example]]
