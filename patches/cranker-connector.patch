@@ -185,10 +185,10 @@ index 634e982..52382de 100644
                                  <id>sign-artifacts</id>
 diff --git a/src/main/java/com/hsbc/cranker/connector/CommandLineConnector.java b/src/main/java/com/hsbc/cranker/connector/CommandLineConnector.java
 new file mode 100644
-index 0000000..fd73d6f
+index 0000000..0020268
 --- /dev/null
 +++ b/src/main/java/com/hsbc/cranker/connector/CommandLineConnector.java
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,93 @@
 +package com.hsbc.cranker.connector;
 +
 +import java.net.URI;
@@ -224,6 +224,9 @@ index 0000000..fd73d6f
 +                domain = args[++i];
 +            } else if ("--route".equals(args[i])) {
 +                route = args[++i];
++                if ("catch-all".equals(route)) {
++                    route = "*";
++                }
 +            } else if ("--target".equals(args[i])) {
 +                target = args[++i];
 +            } else if ("--registration-uris".equals(args[i])) {
