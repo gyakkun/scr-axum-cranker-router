@@ -1324,6 +1324,213 @@ mod lib_tests {
         router.stop();
     }
 
+    struct TestRouteFilter;
+    impl crate::router_socket_filter::RouterSocketFilter for TestRouteFilter {
+        fn should_use(
+            &self,
+            _target_path: String,
+            _method: axum::http::Method,
+            _original_uri: axum::extract::OriginalUri,
+            _headers: HeaderMap,
+            _addr: std::net::SocketAddr,
+            _config: crate::CrankerRouterConfig,
+            router_socket: Arc<dyn crate::router_socket::RouterSocket>,
+        ) -> bool {
+            router_socket.component_name().eq("bgm-archive-kt")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_catch_all_fallback_and_recovery() {
+        let reg_port = get_free_port().await;
+        let visit_port = get_free_port().await;
+        let target_port_primary = get_free_port().await;
+        let target_port_backup = get_free_port().await;
+
+        let router = Arc::new(CrankerRouterBuilder::new()
+            .with_via_name("testvia".to_string())
+            .with_router_socket_filter(Arc::new(TestRouteFilter))
+            .with_connector_max_wait_time_millis(3000)
+            .build());
+
+        let reg_listener = TcpListener::bind(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), reg_port)).await.unwrap();
+        let visit_listener = TcpListener::bind(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), visit_port)).await.unwrap();
+
+        let reg_router = router.registration_axum_router();
+        let visit_router = router.visit_portal_axum_router();
+
+        tokio::spawn(async move {
+            let _ = axum::serve(reg_listener, reg_router).await;
+        });
+        tokio::spawn(async move {
+            let _ = axum::serve(visit_listener, visit_router).await;
+        });
+
+        // Start primary target
+        let target_listener_primary = TcpListener::bind(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), target_port_primary)).await.unwrap();
+        tokio::spawn(async move {
+            let app = Router::new().route("/{*any}", get(|| async {
+                let stream = tokio_stream::iter(vec![Ok::<_, std::convert::Infallible>(bytes::Bytes::from("primary response"))]);
+                axum::body::Body::from_stream(stream)
+            }));
+            let _ = axum::serve(target_listener_primary, app).await;
+        });
+
+        // Start backup target
+        let target_listener_backup = TcpListener::bind(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), target_port_backup)).await.unwrap();
+        tokio::spawn(async move {
+            let app = Router::new().route("/{*any}", get(|| async {
+                let stream = tokio_stream::iter(vec![Ok::<_, std::convert::Infallible>(bytes::Bytes::from("backup response"))]);
+                axum::body::Body::from_stream(stream)
+            }));
+            let _ = axum::serve(target_listener_backup, app).await;
+        });
+
+        let log_file_primary = std::fs::File::create("target/test-connector-primary.log").unwrap();
+        let log_file_backup = std::fs::File::create("target/test-connector-backup.log").unwrap();
+        let jar_path = std::env::var("CRANKER_CONNECTOR_JAR")
+            .unwrap_or_else(|_| "../cranker-connector/target/cranker-connector-1.3-SNAPSHOT-uber.jar".to_string());
+
+        // Start backup connector (component: bgm-archive-kt-bak)
+        let child_backup = Command::new("java")
+            .arg("-cp")
+            .arg(&jar_path)
+            .arg("com.hsbc.cranker.connector.CommandLineConnector")
+            .arg("--target")
+            .arg(format!("http://127.0.0.1:{}", target_port_backup))
+            .arg("--registration-uris")
+            .arg(format!("ws://127.0.0.1:{}", reg_port))
+            .arg("--route")
+            .arg("catch-all")
+            .arg("--component-name")
+            .arg("bgm-archive-kt-bak")
+            .arg("--sliding-window")
+            .arg("3")
+            .stdout(log_file_backup.try_clone().unwrap())
+            .stderr(log_file_backup)
+            .spawn()
+            .unwrap();
+        let _backup_guard = ChildGuard(child_backup);
+
+        // Start primary connector (component: bgm-archive-kt)
+        let child_primary = Command::new("java")
+            .arg("-cp")
+            .arg(&jar_path)
+            .arg("com.hsbc.cranker.connector.CommandLineConnector")
+            .arg("--target")
+            .arg(format!("http://127.0.0.1:{}", target_port_primary))
+            .arg("--registration-uris")
+            .arg(format!("ws://127.0.0.1:{}", reg_port))
+            .arg("--route")
+            .arg("catch-all")
+            .arg("--component-name")
+            .arg("bgm-archive-kt")
+            .arg("--sliding-window")
+            .arg("3")
+            .stdout(log_file_primary.try_clone().unwrap())
+            .stderr(log_file_primary)
+            .spawn()
+            .unwrap();
+        let primary_guard = Arc::new(tokio::sync::Mutex::new(Some(ChildGuard(child_primary))));
+
+        // Wait for both connectors to be registered
+        let mut registered = false;
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if let Some(svc) = router.collect_info().services.iter().find(|s| s.route == "*") {
+                // Ensure at least two connectors are registered
+                if svc.connectors.len() >= 2 {
+                    registered = true;
+                    break;
+                }
+            }
+        }
+        assert!(registered, "Connectors failed to register!");
+
+        let client = reqwest::Client::new();
+
+        // 1. Primary is preferred
+        let resp_primary = client.get(format!("http://127.0.0.1:{}/test-path", visit_port))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp_primary.status(), StatusCode::OK);
+        assert_eq!(resp_primary.text().await.unwrap(), "primary response");
+
+        // 2. Kill primary and verify fallback happens instantly
+        {
+            let mut g = primary_guard.lock().await;
+            *g = None; // kills the child process
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Perform requests and verify they fallback instantly without the 5s timeout
+        let start_time = std::time::Instant::now();
+        let resp_backup = client.get(format!("http://127.0.0.1:{}/test-path", visit_port))
+            .send()
+            .await
+            .unwrap();
+        let elapsed = start_time.elapsed();
+        assert_eq!(resp_backup.status(), StatusCode::OK);
+        assert_eq!(resp_backup.text().await.unwrap(), "backup response");
+        assert!(elapsed < Duration::from_millis(1500), "Fallback was too slow: {:?}", elapsed);
+
+        // 3. Ensure successive requests to backup work successfully (testing V3 and V1 re-queuing)
+        for _ in 0..5 {
+            let resp = client.get(format!("http://127.0.0.1:{}/test-path", visit_port))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(resp.text().await.unwrap(), "backup response");
+        }
+
+        // 4. Bring primary back up and verify recovery
+        let log_file_primary2 = std::fs::File::create("target/test-connector-primary2.log").unwrap();
+        let child_primary2 = Command::new("java")
+            .arg("-cp")
+            .arg(&jar_path)
+            .arg("com.hsbc.cranker.connector.CommandLineConnector")
+            .arg("--target")
+            .arg(format!("http://127.0.0.1:{}", target_port_primary))
+            .arg("--registration-uris")
+            .arg(format!("ws://127.0.0.1:{}", reg_port))
+            .arg("--route")
+            .arg("catch-all")
+            .arg("--component-name")
+            .arg("bgm-archive-kt")
+            .arg("--sliding-window")
+            .arg("3")
+            .stdout(log_file_primary2.try_clone().unwrap())
+            .stderr(log_file_primary2)
+            .spawn()
+            .unwrap();
+        let _primary2_guard = ChildGuard(child_primary2);
+
+        // Wait for primary to register again
+        let mut primary_recovered = false;
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if let Some(svc) = router.collect_info().services.iter().find(|s| s.route == "*") {
+                if svc.connectors.iter().any(|c| c.component_name == "bgm-archive-kt") {
+                    primary_recovered = true;
+                    break;
+                }
+            }
+        }
+        assert!(primary_recovered, "Primary failed to recover registration!");
+
+        // Route should go back to primary
+        let resp_recovered = client.get(format!("http://127.0.0.1:{}/test-path", visit_port))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp_recovered.status(), StatusCode::OK);
+        assert_eq!(resp_recovered.text().await.unwrap(), "primary response");
+
+        router.stop();
+    }
+
     #[test]
     #[should_panic]
     fn test_non_ascii_char_in_via() {
