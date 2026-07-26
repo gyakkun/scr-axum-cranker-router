@@ -32,7 +32,7 @@ uuid = { version = "1", features = ["v4"] }
 async-stream = "0.3"
 async-trait = "0.1"
 simple_logger = "5"
-axum-macros = "0.5"
+# axum-macros = "0.5"
 
 # Optional dependencies for TLS / Axum Server features
 tokio-rustls = { version = "0.26", optional = true }
