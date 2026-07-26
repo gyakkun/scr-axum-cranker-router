@@ -156,6 +156,72 @@ impl WebSocketFarm {
             false
         })
     }
+
+    async fn try_fallback_sockets(
+        self: &Arc<Self>,
+        router_socket_filter: &dyn RouterSocketFilter,
+        router_socket_receiver: &Receiver<Weak<dyn RouterSocket>>,
+        router_socket_sender: &Sender<Weak<dyn RouterSocket>>,
+        cranker_router_config: &CrankerRouterConfig,
+        dark_hosts: &HashSet<DarkHost>,
+    ) -> Option<Arc<dyn RouterSocket>> {
+        if router_socket_filter.should_fallback_to_first_path_matched() {
+            let mut skipped = Vec::new();
+            while let Ok(rs) = router_socket_receiver.try_recv() {
+                if let Some(arc_rs) = rs.upgrade() {
+                    if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs) {
+                        continue;
+                    }
+                    if arc_rs.is_dark_mode_on(dark_hosts) {
+                        skipped.push(Arc::downgrade(&arc_rs));
+                        continue;
+                    }
+                    for s in skipped {
+                        let _ = router_socket_sender.send(s).await;
+                    }
+                    if arc_rs.cranker_version() == CRANKER_V_3_0 {
+                        let _ = router_socket_sender.send(Arc::downgrade(&arc_rs)).await;
+                    }
+                    return Some(arc_rs);
+                }
+            }
+            for s in skipped {
+                let _ = router_socket_sender.send(s).await;
+            }
+        }
+
+        if cranker_router_config.allow_catch_all
+            && router_socket_filter.should_fallback_to_catch_all()
+        {
+            if let Some(opt_catch_all_chan) = self.route_to_socket_chan.get("*") {
+                let (ca_tx, ca_rx) = opt_catch_all_chan.value().clone();
+                let mut skipped = Vec::new();
+                while let Ok(rs) = ca_rx.try_recv() {
+                    if let Some(arc_rs) = rs.upgrade() {
+                        if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs) {
+                            continue;
+                        }
+                        if arc_rs.is_dark_mode_on(dark_hosts) {
+                            skipped.push(Arc::downgrade(&arc_rs));
+                            continue;
+                        }
+                        for s in skipped {
+                            let _ = ca_tx.send(s).await;
+                        }
+                        if arc_rs.cranker_version() == CRANKER_V_3_0 {
+                            let _ = ca_tx.send(Arc::downgrade(&arc_rs)).await;
+                        }
+                        return Some(arc_rs);
+                    }
+                }
+                for s in skipped {
+                    let _ = ca_tx.send(s).await;
+                }
+            }
+        }
+
+        None
+    }
 }
 
 struct SocketGuard {
@@ -331,6 +397,18 @@ impl WebSocketFarmInterface for WebSocketFarm {
                         }
                     }
                     // If we are here, it means we have iterated all sockets in the chan and none of them are suitable.
+                    // Try fallback logic immediately before waiting to avoid unnecessary delays if a fallback/catch-all is available.
+                    let dark_hosts: HashSet<DarkHost> = self.dark_hosts.iter().map(|i| i.clone()).collect();
+                    if let Some(fallback_rs) = self.try_fallback_sockets(
+                        &*router_socket_filter,
+                        &router_socket_receiver,
+                        &router_socket_sender,
+                        &cranker_router_config,
+                        &dark_hosts,
+                    ).await {
+                        return Ok(fallback_rs);
+                    }
+
                     // We will wait for a new socket to be added.
                     loop {
                         match new_socket_rx.recv().await {
@@ -369,54 +447,14 @@ impl WebSocketFarmInterface for WebSocketFarm {
             Err(_) => {
                 self.waiting_task_count.fetch_add(-1, AcqRel);
                 let dark_hosts: HashSet<DarkHost> = self.dark_hosts.iter().map(|i| i.clone()).collect();
-                if router_socket_filter_c.should_fallback_to_first_path_matched() {
-                    let mut skipped = Vec::new();
-                    while let Ok(rs) = router_socket_receiver_c.try_recv() {
-                        if let Some(arc_rs) = rs.upgrade() {
-                            if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs) {
-                                continue;
-                            }
-                            if arc_rs.is_dark_mode_on(&dark_hosts) {
-                                skipped.push(Arc::downgrade(&arc_rs));
-                                continue;
-                            }
-                            for s in skipped {
-                                let _ = router_socket_sender_c.send(s).await;
-                            }
-                            return Ok(arc_rs);
-                        }
-                    }
-                    for s in skipped {
-                        let _ = router_socket_sender_c.send(s).await;
-                    }
-                }
-
-                if cranker_router_config_c.allow_catch_all
-                    && router_socket_filter_c.should_fallback_to_catch_all()
-                {
-                    if let Some(opt_catch_all_chan) = self.route_to_socket_chan.get("*") {
-                        let (ca_tx, ca_rx) = opt_catch_all_chan.value().clone();
-                        let mut skipped = Vec::new();
-                        while let Ok(rs) = ca_rx.try_recv() {
-                            if let Some(arc_rs) = rs.upgrade() {
-                                if self.should_remove_from_web_socket_farm_if_is_removed(&arc_rs)
-                                {
-                                    continue;
-                                }
-                                if arc_rs.is_dark_mode_on(&dark_hosts) {
-                                    skipped.push(Arc::downgrade(&arc_rs));
-                                    continue;
-                                }
-                                for s in skipped {
-                                    let _ = ca_tx.send(s).await;
-                                }
-                                return Ok(arc_rs);
-                            }
-                        }
-                        for s in skipped {
-                            let _ = ca_tx.send(s).await;
-                        }
-                    }
+                if let Some(fallback_rs) = self.try_fallback_sockets(
+                    &*router_socket_filter_c,
+                    &router_socket_receiver_c,
+                    &router_socket_sender_c,
+                    &cranker_router_config_c,
+                    &dark_hosts,
+                ).await {
+                    return Ok(fallback_rs);
                 }
 
                 let elapsed = time_utils::current_time_millis() - start_ts;

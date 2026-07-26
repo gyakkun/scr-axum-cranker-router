@@ -2,3 +2,4 @@
 /.idea
 /Cargo.lock
 /self_signed_certs/*.bin
+examples/crr.rs
